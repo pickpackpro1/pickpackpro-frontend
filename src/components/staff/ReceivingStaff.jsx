@@ -1,0 +1,481 @@
+import { AlertTriangle, CheckCircle2, Info, Package, RefreshCw } from "lucide-react";
+import { useEffect, useState } from "react";
+import LayoutStaff from "./stafflayout/LayoutStaff";
+import LoadingState from "../common/LoadingState";
+import FullPageLoader from "../common/FullPageLoader";
+import { getSession } from "../../utils/auth";
+
+const API_BASE_URL = import.meta.env.DEV
+  ? ""
+  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+
+const buildHeaders = (includeJson = false) => {
+  const session = getSession();
+  const headers = {};
+
+  if (session?.token) {
+    headers["Authorization"] = `Bearer ${session.token}`;
+  }
+
+  if (includeJson) headers["Content-Type"] = "application/json";
+  return headers;
+};
+
+const parseResponse = async (response) => {
+  const text = await response.text();
+  let payload = null;
+
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = text;
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.message ||
+        payload?.error ||
+        payload?.details ||
+        (typeof payload === "string" ? payload : "") ||
+        `Request failed with status ${response.status}`
+    );
+  }
+
+  return payload;
+};
+
+const extractShipments = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.shipments)) return payload.shipments;
+  if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
+  if (Array.isArray(payload?.data)) return payload.data;
+  return [];
+};
+
+const RECEIVING_QUEUE_STATUSES = ["pending_arrival", "submitted"];
+
+const LINE_ITEM_KEYS = [
+  "shipment_line_items",
+  "shipmentLineItems",
+  "shipment_items",
+  "shipmentItems",
+  "line_items",
+  "lineItems",
+  "items",
+  "products",
+  "productItems",
+  "product_items",
+];
+
+const LINE_ITEM_CONTAINERS = ["shipment", "data", "record", "result", "payload", "detail"];
+
+const getLineItems = (source) => {
+  if (Array.isArray(source)) return source;
+  if (!source || typeof source !== "object") return [];
+
+  for (const key of LINE_ITEM_KEYS) {
+    if (Array.isArray(source[key])) return source[key];
+  }
+
+  for (const key of LINE_ITEM_CONTAINERS) {
+    const nested = source[key];
+    if (!nested || nested === source || typeof nested !== "object") continue;
+    const nestedItems = getLineItems(nested);
+    if (nestedItems.length) return nestedItems;
+  }
+
+  return [];
+};
+
+const extractShipmentDetail = (payload) =>
+  payload?.shipment ||
+  payload?.data?.shipment ||
+  payload?.data?.record ||
+  payload?.data?.detail ||
+  payload?.record ||
+  payload?.detail ||
+  payload?.data ||
+  payload;
+
+const getItemId = (item) =>
+  item?.id || item?.shipmentItemId || item?.shipment_item_id || item?.lineItemId || item?.line_item_id || "";
+
+const getExpectedQty = (item) =>
+  Number(
+    item?.expectedQty ??
+      item?.expected_qty ??
+      item?.expectedQuantity ??
+      item?.expected_quantity ??
+      item?.qtyExpected ??
+      item?.qty_expected ??
+      item?.expectedUnits ??
+      item?.expected_units ??
+      item?.unitsExpected ??
+      item?.units_expected ??
+      item?.expected ??
+      item?.quantity ??
+      item?.qty ??
+      item?.count ??
+      item?.totalUnits ??
+      item?.total_units ??
+      item?.units ??
+      0
+  );
+
+const getReceivedQty = (item) =>
+  item?.receivedQty ??
+  item?.received_qty ??
+  item?.receivedQuantity ??
+  item?.received_quantity ??
+  item?.qtyReceived ??
+  item?.qty_received ??
+  item?.unitsReceived ??
+  item?.units_received ??
+  item?.received ??
+  "";
+
+const getItemSku = (item) =>
+  item?.sku ||
+  item?.sellerSku ||
+  item?.seller_sku ||
+  item?.skuCode ||
+  item?.sku_code ||
+  item?.product?.sku ||
+  item?.product?.sellerSku ||
+  item?.product?.seller_sku ||
+  item?.products?.sku ||
+  item?.products?.sellerSku ||
+  item?.products?.seller_sku ||
+  "";
+
+const getProductName = (item) =>
+  item?.productName ||
+  item?.product_name ||
+  item?.name ||
+  item?.product?.name ||
+  item?.products?.name ||
+  "Product line";
+
+const getReference = (shipment) => shipment?.reference || shipment?.shipmentNumber || shipment?.shipment_number || shipment?.id || "N/A";
+
+const getClientName = (shipment) =>
+  shipment?.client?.companyName ||
+  shipment?.client?.company_name ||
+  shipment?.client?.name ||
+  shipment?.clients?.companyName ||
+  shipment?.clients?.company_name ||
+  shipment?.clients?.name ||
+  shipment?.clientName ||
+  shipment?.client_name ||
+  shipment?.clientId ||
+  shipment?.client_id ||
+  "-";
+
+const ReceivingStaff = () => {
+  const [pendingArrivals, setPendingArrivals] = useState([]);
+  const [selectedShipment, setSelectedShipment] = useState(null);
+  const [receivedQuantities, setReceivedQuantities] = useState({});
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const loadPendingArrivals = async () => {
+    try {
+      setIsLoading(true);
+      setError("");
+      const responses = await Promise.all(
+        RECEIVING_QUEUE_STATUSES.map((status) =>
+          fetch(`${API_BASE_URL}/api/shipments?status=${encodeURIComponent(status)}&limit=100`, {
+            method: "GET",
+            headers: buildHeaders(),
+            cache: "no-store",
+          })
+        )
+      );
+      const payloads = await Promise.all(responses.map((response) => parseResponse(response)));
+      const shipmentsById = new Map();
+
+      payloads.flatMap(extractShipments).forEach((shipment, index) => {
+        const status = String(shipment?.status || "").toLowerCase();
+        if (!RECEIVING_QUEUE_STATUSES.includes(status)) return;
+
+        const key = shipment?.id || shipment?.uuid || shipment?.reference || `${status}-${index}`;
+        if (!shipmentsById.has(key)) shipmentsById.set(key, shipment);
+      });
+
+      setPendingArrivals([...shipmentsById.values()]);
+    } catch (requestError) {
+      setError(requestError.message);
+      setPendingArrivals([]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadPendingArrivals();
+  }, []);
+
+  const loadShipmentDetail = async (shipment) => {
+    const shipmentId = shipment?.id || shipment?.uuid || shipment?.reference;
+    try {
+      setError("");
+      const response = await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}`, {
+        method: "GET",
+        headers: buildHeaders(),
+        cache: "no-store",
+      });
+      const payload = await parseResponse(response);
+      const detail = extractShipmentDetail(payload);
+      const quantities = {};
+
+      getLineItems(detail).forEach((item) => {
+        quantities[getItemId(item)] = String(getReceivedQty(item));
+      });
+
+      setSelectedShipment(detail);
+      setReceivedQuantities(quantities);
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  };
+
+  const receiveShipment = async (startPrepAfterReceive = false) => {
+    if (!selectedShipment) return;
+
+    try {
+      setIsSaving(true);
+      setError("");
+      setMessage("");
+
+      const shipmentId = selectedShipment.id || selectedShipment.uuid;
+      const items = getLineItems(selectedShipment)
+        .map((item) => ({
+          shipmentItemId: getItemId(item),
+          receivedQty: Number(receivedQuantities[getItemId(item)] || 0),
+        }))
+        .filter((item) => item.shipmentItemId);
+
+      if (!items.length) {
+        throw new Error("Shipment has no valid line items to receive.");
+      }
+
+      await parseResponse(
+        await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
+          method: "POST",
+          headers: buildHeaders(true),
+          body: JSON.stringify({ items }),
+        })
+      );
+
+      if (startPrepAfterReceive) {
+        await parseResponse(
+          await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/status`, {
+            method: "PATCH",
+            headers: buildHeaders(true),
+            body: JSON.stringify({ status: "in_progress" }),
+          })
+        );
+      }
+
+      setMessage(startPrepAfterReceive ? "Shipment received and moved to in_progress." : "Shipment received.");
+      setSelectedShipment(null);
+      setReceivedQuantities({});
+      await loadPendingArrivals();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const selectedItems = getLineItems(selectedShipment);
+
+  return (
+    <LayoutStaff>
+      <FullPageLoader show={isLoading} label="Loading arrivals..." />
+      <div className="p-6">
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-[#132347]">Receiving</h1>
+            <p className="mt-1 text-sm text-gray-500">Receive pending arrivals and start prep work.</p>
+          </div>
+          <button
+            type="button"
+            onClick={loadPendingArrivals}
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Refresh
+          </button>
+        </div>
+
+        <div className="mb-5 flex items-center gap-2 rounded-xl bg-[#3b82f6] px-4 py-3 text-sm text-white shadow-sm">
+          <Info className="h-4 w-4 shrink-0" />
+          <span>Receiving moves a shipment to Received; start prep only when the team begins work and it should move to In Progress.</span>
+        </div>
+
+        {message ? <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">{message}</div> : null}
+        {error ? <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
+
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
+          <div className="rounded-2xl border border-gray-200 bg-white shadow-sm">
+            <div className="border-b border-gray-200 px-5 py-4">
+              <h2 className="text-xl font-semibold text-[#132347]">Pending Arrivals</h2>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="bg-white text-left text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                    <th className="px-5 py-3">Shipment</th>
+                    <th className="px-5 py-3">Client</th>
+                    <th className="px-5 py-3">Expected</th>
+                    <th className="px-5 py-3">Units</th>
+                    <th className="px-5 py-3">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {isLoading ? (
+                    <tr>
+                      <td colSpan="5" className="px-5 py-10 text-center text-sm text-gray-500">
+                        <LoadingState label="Loading arrivals..." />
+                      </td>
+                    </tr>
+                  ) : pendingArrivals.map((shipment) => {
+                    const shipmentId = shipment?.id || shipment?.uuid || shipment?.reference;
+                    const isSelected = selectedShipment && (selectedShipment.id || selectedShipment.uuid) === shipmentId;
+                    const units =
+                      shipment?.totalUnits ||
+                      shipment?.total_units ||
+                      shipment?.units ||
+                      getLineItems(shipment).reduce((sum, item) => sum + getExpectedQty(item), 0);
+
+                    return (
+                      <tr key={shipmentId} className={isSelected ? "bg-blue-50/50" : "hover:bg-gray-50"}>
+                        <td className="px-5 py-4 text-sm font-semibold text-[#2d6cdf]">{getReference(shipment)}</td>
+                        <td className="px-5 py-4 text-sm text-gray-700">{getClientName(shipment)}</td>
+                        <td className="px-5 py-4 text-sm text-gray-700">{shipment?.expectedArrivalDate || shipment?.expected_arrival_date || "-"}</td>
+                        <td className="px-5 py-4 text-sm text-gray-700">{units || 0}</td>
+                        <td className="px-5 py-4">
+                          <button
+                            type="button"
+                            onClick={() => loadShipmentDetail(shipment)}
+                            className="rounded-md bg-[#2d6cdf] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#2358b5]"
+                          >
+                            Receive
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {!isLoading && !pendingArrivals.length ? (
+                    <tr>
+                      <td colSpan="5" className="px-5 py-10 text-center text-sm text-gray-500">No pending arrivals found.</td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-gray-200 bg-white shadow-sm">
+            <div className="flex items-center gap-2 border-b border-gray-200 px-5 py-4">
+              <CheckCircle2 className="h-5 w-5 text-[#2d6cdf]" />
+              <h2 className="text-xl font-semibold text-[#132347]">Mark Received</h2>
+            </div>
+            <div className="space-y-4 p-5">
+              {selectedShipment ? (
+                <>
+                  <div className="rounded-xl bg-[#eef3ff] p-4">
+                    <h3 className="text-sm font-semibold text-[#132347]">{getReference(selectedShipment)}</h3>
+                    <p className="mt-1 text-xs text-gray-500">{getClientName(selectedShipment)}</p>
+                  </div>
+
+                  <div className="max-h-[52vh] space-y-3 overflow-y-auto pr-1">
+                    {selectedItems.map((item) => {
+                      const itemId = getItemId(item);
+                      const sku = getItemSku(item) || itemId || "SKU";
+                      const productName = getProductName(item);
+                      const expected = getExpectedQty(item);
+                      const value = receivedQuantities[itemId] ?? "";
+                      const hasDiscrepancy = value !== "" && Number(value) !== expected;
+
+                      return (
+                        <div key={itemId || item?.sku} className={`rounded-xl border p-4 ${hasDiscrepancy ? "border-red-200 bg-red-50" : "border-gray-200"}`}>
+                          <div className="mb-3 flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold text-gray-900">SKU: {sku}</p>
+                              <p className="mt-1 text-xs text-gray-500">{productName}</p>
+                            </div>
+                            <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-700">Expected {expected}</span>
+                          </div>
+                          <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <div>
+                              <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Expected</label>
+                              <input
+                                type="number"
+                                value={expected}
+                                readOnly
+                                className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Received</label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={value}
+                                onChange={(event) => setReceivedQuantities((current) => ({ ...current, [itemId]: event.target.value }))}
+                                className="w-full rounded-xl border border-[#93c5fd] px-3 py-3 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#2d6cdf]"
+                                placeholder="Received quantity"
+                              />
+                            </div>
+                          </div>
+                          {hasDiscrepancy ? (
+                            <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-white px-3 py-2 text-xs text-red-600">
+                              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                              <span>Expected {expected}, received {Number(value || 0)}. Backend will flag discrepancy.</span>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      disabled={isSaving}
+                      onClick={() => receiveShipment(false)}
+                      className="rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                    >
+                      Confirm Receipt
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSaving}
+                      onClick={() => receiveShipment(true)}
+                      className="rounded-xl bg-[#2d6cdf] px-4 py-3 text-sm font-semibold text-white hover:bg-[#2358b5] disabled:opacity-60"
+                    >
+                      Receive + Start Prep
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="flex min-h-64 flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 text-center">
+                  <Package className="mb-3 h-8 w-8 text-gray-300" />
+                  <p className="text-sm font-medium text-gray-700">Select a pending shipment to receive.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </LayoutStaff>
+  );
+};
+
+export default ReceivingStaff;
