@@ -10,7 +10,7 @@ import {
 
 const pageTitles = {
   "/tasks": "My Tasks",
-  "/shipments": "My Shipments",
+  "/shipments": "All Shipments",
   "/receiving": "Receiving",
   "/dispatch": "Dispatch",
 };

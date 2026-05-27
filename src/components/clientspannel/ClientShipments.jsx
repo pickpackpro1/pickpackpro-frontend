@@ -1180,6 +1180,95 @@ const sameLineItem = (left = {}, right = {}) => {
   );
 };
 
+const parseLineItemOrderValue = (value) => {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+};
+
+const getLineItemExplicitOrder = (item = {}) => {
+  const candidates = [
+    item?.itemIndex,
+    item?.item_index,
+    item?.lineItemIndex,
+    item?.line_item_index,
+    item?.displayOrder,
+    item?.display_order,
+    item?.sortOrder,
+    item?.sort_order,
+    item?.position,
+    item?.sequence,
+    item?.lineNumber,
+    item?.line_number,
+  ];
+
+  for (const value of candidates) {
+    const order = parseLineItemOrderValue(value);
+    if (order !== null) return order;
+  }
+
+  return null;
+};
+
+const parsePrefixedSequence = (value = '', prefixes = []) => {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const prefixPattern = prefixes.join('|');
+  const match = text.match(new RegExp(`^(?:${prefixPattern})[\\s_-]*0*(\\d+)$`, 'i'));
+  if (!match) return null;
+  const order = Number(match[1]);
+  return Number.isFinite(order) ? order : null;
+};
+
+const getLineItemNaturalOrder = (item = {}) =>
+  parsePrefixedSequence(getItemProductName(item), ['pp']) ??
+  parsePrefixedSequence(getItemSku(item), ['sku', 'pp']);
+
+const sortLineItemsByRank = (items = [], getRank = () => null) => {
+  const itemList = Array.isArray(items) ? items : [];
+  if (itemList.length < 2) return itemList;
+
+  const rankedItems = itemList.map((item, index) => ({
+    item,
+    index,
+    rank: getRank(item, index),
+  }));
+  const allRanked = rankedItems.every(({ rank }) => rank !== null && rank !== undefined);
+  const uniqueRanks = new Set(rankedItems.map(({ rank }) => String(rank))).size === rankedItems.length;
+
+  if (!allRanked || !uniqueRanks) return itemList;
+
+  return rankedItems
+    .sort((firstItem, secondItem) => firstItem.rank - secondItem.rank || firstItem.index - secondItem.index)
+    .map(({ item }) => item);
+};
+
+const sortLineItemsForDisplay = (items = [], fallbackItems = []) => {
+  const itemList = Array.isArray(items) ? items : [];
+  if (itemList.length < 2) return itemList;
+
+  const fallbackList = Array.isArray(fallbackItems) ? fallbackItems : [];
+  const fallbackSortedItems = fallbackList.length
+    ? sortLineItemsByRank(
+        sortLineItemsByRank(fallbackList, getLineItemExplicitOrder),
+        getLineItemNaturalOrder
+      )
+    : [];
+
+  if (fallbackSortedItems.length >= itemList.length) {
+    const fallbackOrderedItems = sortLineItemsByRank(itemList, (item) => {
+      const fallbackIndex = fallbackSortedItems.findIndex((fallbackItem) => sameLineItem(item, fallbackItem));
+      return fallbackIndex >= 0 ? fallbackIndex : null;
+    });
+    if (fallbackOrderedItems !== itemList) return fallbackOrderedItems;
+  }
+
+  const explicitOrderedItems = sortLineItemsByRank(itemList, getLineItemExplicitOrder);
+  if (explicitOrderedItems !== itemList) return explicitOrderedItems;
+
+  return sortLineItemsByRank(itemList, getLineItemNaturalOrder);
+};
+
 const mergeLineItemFallbacks = (fallbacks = []) =>
   fallbacks.filter(Boolean).reduce((merged, fallback) => {
     const mergedBundleSize = getItemBundleSize(merged);
@@ -1201,8 +1290,11 @@ const mergeLineItemFallbacks = (fallbacks = []) =>
 
 const mergeLineItemGroups = (...groups) => {
   const [primaryGroup = [], ...fallbackGroups] = groups.map((group) => (Array.isArray(group) ? group : []));
-  const primaryItems = primaryGroup.length ? primaryGroup : fallbackGroups.find((group) => group.length) || [];
-  const fallbackItems = fallbackGroups.flat();
+  const fallbackItems = sortLineItemsForDisplay(fallbackGroups.flat());
+  const primaryItems = sortLineItemsForDisplay(
+    primaryGroup.length ? primaryGroup : fallbackGroups.find((group) => group.length) || [],
+    fallbackItems
+  );
 
   return primaryItems.map((item, index) => {
     const fallback = mergeLineItemFallbacks([
@@ -1216,6 +1308,7 @@ const mergeLineItemGroups = (...groups) => {
 
 const buildSelectedShipmentFallback = (shipment = {}, shipmentId = '') => {
   const resolvedId = getShipmentId(shipment) || shipmentId;
+  const lineItems = sortLineItemsForDisplay(getLineItems(shipment));
 
   return {
     ...shipment,
@@ -1230,8 +1323,8 @@ const buildSelectedShipmentFallback = (shipment = {}, shipmentId = '') => {
     created: getShipmentCreatedDate(shipment),
     dispatchedAt: shipment?.dispatchedAt || shipment?.dispatched_at || '',
     dispatched_at: shipment?.dispatched_at || shipment?.dispatchedAt || '',
-    items: getLineItems(shipment),
-    lineItems: getLineItems(shipment),
+    items: lineItems,
+    lineItems,
     status: shipment?.status || 'draft',
   };
 };
@@ -1240,7 +1333,7 @@ const buildShipmentPreview = (shipment = {}, shipmentId = '') => {
   const fallback = buildSelectedShipmentFallback(shipment, shipmentId);
   const cachedDraft = getCachedDraft(fallback, shipment, shipmentId);
   const cachedItems = cachedDraft?.productItems || [];
-  const fallbackItems = getLineItems(fallback);
+  const fallbackItems = sortLineItemsForDisplay(getLineItems(fallback), cachedItems);
   const selectedItems = applyBundleSizesFromNotes(
     fallbackItems.length ? fallbackItems : cachedItems,
     fallback
@@ -1278,7 +1371,7 @@ const extractShipmentDetail = (payload) =>
   {};
 
 const normalizeShipment = (shipment) => {
-  const lineItems = getLineItems(shipment);
+  const lineItems = sortLineItemsForDisplay(getLineItems(shipment));
 
   return {
     ...shipment,
@@ -1688,8 +1781,25 @@ const getBoxItemQuantity = (item = {}) =>
     item?.unit_count
   );
 
+const BOX_ITEM_KEYS = [
+  'items',
+  'boxItems',
+  'box_items',
+  'boxLineItems',
+  'box_line_items',
+  'contents',
+  'boxContents',
+  'box_contents',
+  'lineItems',
+  'line_items',
+  'shipmentItems',
+  'shipment_items',
+  'products',
+  'skus',
+];
+
 const extractBoxItems = (payload) => {
-  const directItems = extractList(payload, ['items', 'boxItems', 'box_items', 'contents', 'lineItems', 'line_items']);
+  const directItems = extractList(payload, BOX_ITEM_KEYS);
   if (directItems.length) return directItems;
 
   const containers = [
@@ -1702,8 +1812,44 @@ const extractBoxItems = (payload) => {
   ];
 
   for (const container of containers) {
-    const items = extractList(container, ['items', 'boxItems', 'box_items', 'contents', 'lineItems', 'line_items']);
+    const items = extractList(container, BOX_ITEM_KEYS);
     if (items.length) return items;
+  }
+
+  const nestedLists = [
+    payload?.items,
+    payload?.boxItems,
+    payload?.box_items,
+    payload?.boxLineItems,
+    payload?.box_line_items,
+    payload?.contents,
+    payload?.boxContents,
+    payload?.box_contents,
+    payload?.lineItems,
+    payload?.line_items,
+    payload?.shipmentItems,
+    payload?.shipment_items,
+    payload?.products,
+    payload?.skus,
+    payload?.data?.items,
+    payload?.data?.boxItems,
+    payload?.data?.box_items,
+    payload?.data?.boxLineItems,
+    payload?.data?.box_line_items,
+    payload?.data?.contents,
+    payload?.data?.boxContents,
+    payload?.data?.box_contents,
+    payload?.data?.lineItems,
+    payload?.data?.line_items,
+    payload?.data?.shipmentItems,
+    payload?.data?.shipment_items,
+    payload?.data?.products,
+    payload?.data?.skus,
+  ];
+
+  for (const nestedList of nestedLists) {
+    const rows = toArray(nestedList);
+    if (rows.length) return rows;
   }
 
   return [];
@@ -1713,7 +1859,22 @@ const getBoxItems = (box = {}) => {
   const directItems = extractBoxItems(box);
   if (directItems.length) return directItems;
 
-  const rawContents = firstPresent(box?.contents, box?.box_contents);
+  const rawContents = firstPresent(
+    box?.contents,
+    box?.boxContents,
+    box?.box_contents,
+    box?.items,
+    box?.boxItems,
+    box?.box_items,
+    box?.boxLineItems,
+    box?.box_line_items,
+    box?.lineItems,
+    box?.line_items,
+    box?.shipmentItems,
+    box?.shipment_items,
+    box?.products,
+    box?.skus
+  );
   if (Array.isArray(rawContents)) return rawContents;
   if (rawContents && typeof rawContents === 'object') return [rawContents];
   if (typeof rawContents === 'string') {
@@ -1797,7 +1958,7 @@ const boxItemHasUsableAllocationData = (item = {}) => {
 };
 
 const boxHasInlineAllocationData = (box = {}) =>
-  extractBoxItems(box).length > 0 && extractBoxItems(box).every(boxItemHasUsableAllocationData);
+  getBoxItems(box).length > 0 && getBoxItems(box).every(boxItemHasUsableAllocationData);
 
 const getBoxAllocationCacheKeys = (box = {}, extraKeys = []) => [
   ...new Set(
@@ -2061,6 +2222,11 @@ const getBoxWeight = (box = {}) =>
 const getBoxSize = (box = {}) =>
   firstPresent(box?.boxSize, box?.box_size, box?.size, box?.type, box?.boxType, box?.box_type);
 
+const getBoxType = (box = {}) => {
+  const value = String(firstPresent(box?.boxType, box?.box_type, box?.containerType, box?.container_type, box?.type, 'box')).toLowerCase();
+  return value === 'pallet' ? 'pallet' : 'box';
+};
+
 const getBoxDimensionValue = (box = {}, longKey, shortKey) => {
   const dimensions = box?.dimensions || box?.dimension || {};
   return firstPresent(
@@ -2286,6 +2452,8 @@ const getFileEntityId = (file = {}) => {
     file?.item_id,
     file?.lineItemId,
     file?.line_item_id,
+    file?.shipmentLineItemId,
+    file?.shipment_line_item_id,
     file?.shipmentItemId,
     file?.shipment_item_id,
     file?.boxId,
@@ -2298,6 +2466,8 @@ const getFileEntityId = (file = {}) => {
     meta?.item_id,
     meta?.lineItemId,
     meta?.line_item_id,
+    meta?.shipmentLineItemId,
+    meta?.shipment_line_item_id,
     meta?.shipmentItemId,
     meta?.shipment_item_id,
     meta?.boxId,
@@ -2311,6 +2481,18 @@ const getFileEntityType = (file = {}) => {
   const meta = getFileMeta(file);
   return String(firstPresent(file?.entityType, file?.entity_type, meta?.entityType, meta?.entity_type)).trim().toLowerCase();
 };
+
+const normalizeEntityType = (value = '') => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+
+const ITEM_FILE_ENTITY_TYPE_LIST = ['item', 'shipment_item', 'shipmentitem', 'shipment_line_item', 'shipmentlineitem', 'line_item', 'lineitem'];
+const ITEM_FILE_ENTITY_TYPES = new Set(ITEM_FILE_ENTITY_TYPE_LIST);
+const ITEM_FILE_LOOKUP_ENTITY_TYPES = ['item', 'shipment_item', 'shipment_line_item', 'line_item'];
+const SHIPMENT_FILE_ENTITY_TYPES = new Set(['shipment']);
+const BOX_FILE_ENTITY_TYPES = new Set(['box']);
+
+const isItemFileEntityType = (value = '') => ITEM_FILE_ENTITY_TYPES.has(normalizeEntityType(value));
+const isShipmentFileEntityType = (value = '') => SHIPMENT_FILE_ENTITY_TYPES.has(normalizeEntityType(value));
+const isBoxFileEntityType = (value = '') => BOX_FILE_ENTITY_TYPES.has(normalizeEntityType(value));
 
 const getFileBoxId = (file = {}) =>
   firstPresent(
@@ -2626,15 +2808,16 @@ const isFnskuLabelFile = (file = {}) => {
   const name = getFileName(file).toLowerCase();
   const entityType = getFileEntityType(file);
   const url = getFileUrl(file).toLowerCase();
+  const stablePath = getFileStablePath(file);
   const isFbaBoxLabel =
     type.includes('fba_shipping_label') ||
     type.includes('fba-shipping-label') ||
     type.includes('shipping_label') ||
-    (entityType === 'box' && type.includes('label'));
+    (isBoxFileEntityType(entityType) && type.includes('label'));
 
   const isPdf = type.includes('pdf') || /\.pdf(?:$|\?)/i.test(name) || /\.pdf(?:$|\?)/i.test(url);
 
-  return !isFbaBoxLabel && (type.includes('fnsku') || name.includes('fnsku') || (entityType === 'item' && (type.includes('label') || isPdf || isImageFile(file) || isCsvFile(file))));
+  return !isFbaBoxLabel && (type.includes('fnsku') || name.includes('fnsku') || url.includes('fnsku') || stablePath.includes('fnsku') || (isItemFileEntityType(entityType) && (type.includes('label') || isPdf || isImageFile(file) || isCsvFile(file))));
 };
 
 const isAnyItemLabelFile = (file = {}) => {
@@ -2645,7 +2828,7 @@ const isAnyItemLabelFile = (file = {}) => {
     type.includes('fba_shipping_label') ||
     type.includes('fba-shipping-label') ||
     type.includes('shipping_label') ||
-    (entityType === 'box' && type.includes('label'));
+    (isBoxFileEntityType(entityType) && type.includes('label'));
 
   return !isFbaBoxLabel && (isFnskuLabelFile(file) || type.includes('label') || name.includes('label'));
 };
@@ -2727,10 +2910,14 @@ const getFileCreatedTime = (file = {}) => {
     file?.created_at,
     file?.uploadedAt,
     file?.uploaded_at,
+    file?.updatedAt,
+    file?.updated_at,
     getFileMeta(file)?.createdAt,
     getFileMeta(file)?.created_at,
     getFileMeta(file)?.uploadedAt,
-    getFileMeta(file)?.uploaded_at
+    getFileMeta(file)?.uploaded_at,
+    getFileMeta(file)?.updatedAt,
+    getFileMeta(file)?.updated_at
   );
   const time = value ? new Date(value).getTime() : 0;
   return Number.isFinite(time) ? time : 0;
@@ -2774,25 +2961,79 @@ const isExactItemLabelFileMatch = (file = {}, item = {}) => {
   );
 };
 
+const fileMatchesAnyLineItem = (file = {}, itemList = []) =>
+  itemList.some((item) => rawFileMatchesLineItem(file, item) || isExactItemLabelFileMatch(file, item));
+
+const isSupportedItemLabelFile = (file = {}) => isPdfFile(file) || isImageFile(file) || isCsvFile(file);
+
+const isShipmentLevelItemLabelFile = (file = {}) => {
+  const entityType = getFileEntityType(file);
+  if (isBoxFileEntityType(entityType) || isItemFileEntityType(entityType) || isFbaBoxLabelFile(file)) return false;
+  if (entityType && !isShipmentFileEntityType(entityType)) return false;
+  return isSupportedItemLabelFile(file) && (isFnskuLabelFile(file) || isAnyItemLabelFile(file));
+};
+
+const isItemLabelCandidateFile = (file = {}, itemList = []) => {
+  if (!getFileUrl(file) && !getFileName(file)) return false;
+  const entityType = getFileEntityType(file);
+  if (isBoxFileEntityType(entityType) || isFbaBoxLabelFile(file)) return false;
+
+  if (isItemFileEntityType(entityType)) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
+  if (getFileItemIndex(file) !== null) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
+  if (fileMatchesAnyLineItem(file, itemList)) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
+  if (isShipmentLevelItemLabelFile(file)) return true;
+
+  return (isFnskuLabelFile(file) || isAnyItemLabelFile(file)) && itemList.length === 1;
+};
+
+const getLatestShipmentLabelBatchFiles = (candidateFiles = [], itemCount = 0) => {
+  if (!itemCount) return [];
+  const shipmentLabelFiles = candidateFiles
+    .map((file, index) => ({ file, index }))
+    .filter(({ file }) => isShipmentLevelItemLabelFile(file));
+
+  if (shipmentLabelFiles.length < itemCount) return [];
+
+  const latestFiles = shipmentLabelFiles
+    .sort((firstFile, secondFile) => {
+      if (Boolean(firstFile.file?.localPreview) !== Boolean(secondFile.file?.localPreview)) {
+        return firstFile.file?.localPreview ? -1 : 1;
+      }
+      const timeDifference = getFileCreatedTime(secondFile.file) - getFileCreatedTime(firstFile.file);
+      return timeDifference || secondFile.index - firstFile.index;
+    })
+    .slice(0, itemCount);
+
+  return latestFiles
+    .sort((firstFile, secondFile) => {
+      const firstIndex = getFileItemIndex(firstFile.file);
+      const secondIndex = getFileItemIndex(secondFile.file);
+      if (firstIndex !== null && secondIndex !== null && firstIndex !== secondIndex) return firstIndex - secondIndex;
+      if (firstIndex !== null && secondIndex === null) return -1;
+      if (firstIndex === null && secondIndex !== null) return 1;
+      const timeDifference = getFileCreatedTime(firstFile.file) - getFileCreatedTime(secondFile.file);
+      return timeDifference || firstFile.index - secondFile.index;
+    })
+    .map(({ file }) => file);
+};
+
 const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) => {
   const itemList = toArray(items);
   if (!itemList.length) return [];
 
   const itemInlineFiles = itemList.flatMap((item) => getItemInlineLabelFiles(item));
   const candidateFiles = mergeFileLists(itemInlineFiles, files, visibleFiles)
-    .filter((file) => {
-      if (!getFileUrl(file) && !getFileName(file)) return false;
-      const entityType = getFileEntityType(file);
-      if (entityType === 'box' || isFbaBoxLabelFile(file)) return false;
-      return isFnskuLabelFile(file) || isAnyItemLabelFile(file) || isPdfFile(file) || isImageFile(file) || isCsvFile(file);
-    })
+    .filter((file) => isItemLabelCandidateFile(file, itemList))
     .sort((firstFile, secondFile) => {
+      if (Boolean(firstFile?.localPreview) !== Boolean(secondFile?.localPreview)) return firstFile?.localPreview ? -1 : 1;
+      const timeDifference = getFileCreatedTime(secondFile) - getFileCreatedTime(firstFile);
+      if (timeDifference) return timeDifference;
       const firstIndex = getFileItemIndex(firstFile);
       const secondIndex = getFileItemIndex(secondFile);
       if (firstIndex !== null && secondIndex !== null && firstIndex !== secondIndex) return firstIndex - secondIndex;
       if (firstIndex !== null && secondIndex === null) return -1;
       if (firstIndex === null && secondIndex !== null) return 1;
-      return getFileCreatedTime(firstFile) - getFileCreatedTime(secondFile);
+      return 0;
     });
 
   const assignments = new Array(itemList.length).fill(null);
@@ -2808,9 +3049,24 @@ const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) 
     return true;
   };
 
+  const latestShipmentLabelBatch = getLatestShipmentLabelBatchFiles(candidateFiles, itemList.length);
+  if (latestShipmentLabelBatch.length === itemList.length) {
+    itemList.forEach((item, itemIndex) => {
+      const batchFile = latestShipmentLabelBatch[itemIndex];
+      if (batchFile) assignFile(itemIndex, batchFile, candidateFiles.indexOf(batchFile));
+    });
+  }
+
   itemList.forEach((item, itemIndex) => {
+    if (assignments[itemIndex]) return;
     const exactFile = getUnusedFiles().find((file) => isExactItemLabelFileMatch(file, item));
     if (exactFile) assignFile(itemIndex, exactFile, candidateFiles.indexOf(exactFile));
+  });
+
+  itemList.forEach((item, itemIndex) => {
+    if (assignments[itemIndex]) return;
+    const indexedFile = getUnusedFiles().find((file) => getFileItemIndex(file) === itemIndex);
+    if (indexedFile) assignFile(itemIndex, indexedFile, candidateFiles.indexOf(indexedFile));
   });
 
   itemList.forEach((item, itemIndex) => {
@@ -2825,19 +3081,9 @@ const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) 
     if (uniqueMatchedFile) assignFile(itemIndex, uniqueMatchedFile, candidateFiles.indexOf(uniqueMatchedFile));
   });
 
-  const remainingItemIndexes = assignments
-    .map((file, itemIndex) => (file ? -1 : itemIndex))
-    .filter((itemIndex) => itemIndex >= 0);
   const remainingFiles = getUnusedFiles();
-
-  if (remainingFiles.length === remainingItemIndexes.length) {
-    remainingItemIndexes.forEach((itemIndex, remainingIndex) => {
-      assignFile(itemIndex, remainingFiles[remainingIndex], candidateFiles.indexOf(remainingFiles[remainingIndex]));
-    });
-  } else if (candidateFiles.length >= itemList.length) {
-    remainingItemIndexes.forEach((itemIndex) => {
-      assignFile(itemIndex, candidateFiles[itemIndex], itemIndex);
-    });
+  if (itemList.length === 1 && remainingFiles.length === 1 && !assignments[0]) {
+    assignFile(0, remainingFiles[0], candidateFiles.indexOf(remainingFiles[0]));
   }
 
   return assignments;
@@ -2939,6 +3185,21 @@ const enrichBoxesWithItems = async (boxes = [], lineItems = []) => {
     boxes.map(async (box) => {
       const existingItems = getBoxItems(box);
       const hasUsableItems = boxHasInlineAllocationData(box);
+
+      if (hasUsableItems) {
+        const hydratedExistingItems = hydrateBoxItemsWithLineItems(existingItems, lineItems);
+
+        return {
+          ...box,
+          items: hydratedExistingItems,
+          boxItems: hydratedExistingItems,
+          box_items: hydratedExistingItems,
+          boxContents: hydratedExistingItems,
+          box_contents: hydratedExistingItems,
+          contents: hydratedExistingItems,
+        };
+      }
+
       const boxItems = await fetchBoxItemsByBoxId(box);
 
       if (boxItems.length) {
@@ -2950,6 +3211,8 @@ const enrichBoxesWithItems = async (boxes = [], lineItems = []) => {
           items: hydratedBoxItems,
           boxItems: hydratedBoxItems,
           box_items: hydratedBoxItems,
+          boxContents: hydratedBoxItems,
+          box_contents: hydratedBoxItems,
           contents: hydratedBoxItems,
         };
       }
@@ -2961,19 +3224,9 @@ const enrichBoxesWithItems = async (boxes = [], lineItems = []) => {
           items: cachedItems,
           boxItems: cachedItems,
           box_items: cachedItems,
+          boxContents: cachedItems,
+          box_contents: cachedItems,
           contents: cachedItems,
-        };
-      }
-
-      if (hasUsableItems) {
-        const hydratedExistingItems = hydrateBoxItemsWithLineItems(existingItems, lineItems);
-
-        return {
-          ...box,
-          items: hydratedExistingItems,
-          boxItems: hydratedExistingItems,
-          box_items: hydratedExistingItems,
-          contents: hydratedExistingItems,
         };
       }
 
@@ -3126,7 +3379,7 @@ const isFbaBoxLabelFile = (file = {}) => {
     name.includes('fba') ||
     name.includes('shipping-label') ||
     name.includes('shipping_label') ||
-    (entityType === 'box' && type.includes('label'))
+    (isBoxFileEntityType(entityType) && type.includes('label'))
   );
 };
 
@@ -3233,7 +3486,7 @@ const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) =
       (entityId && boxLookupIds.includes(entityId)) ||
         boxLookupIds.some((boxId) => file?.boxId === boxId || file?.box_id === boxId) ||
         directFiles.includes(file) ||
-        (entityType === 'box' && allBoxes.length === 1 && boxIndex === 0)
+        (isBoxFileEntityType(entityType) && allBoxes.length === 1 && boxIndex === 0)
     );
   };
 
@@ -3259,7 +3512,7 @@ const isFileUsedAsBoxLabel = (file = {}, boxes = [], boxLabelFiles = []) => {
 
   const entityType = getFileEntityType(file);
   const entityId = String(getFileEntityId(file) || '').trim();
-  const fileLooksLikeBoxLabel = isFbaBoxLabelFile(file) || entityType === 'box';
+  const fileLooksLikeBoxLabel = isFbaBoxLabelFile(file) || isBoxFileEntityType(entityType);
 
   if (!fileLooksLikeBoxLabel) return false;
   if (isFbaBoxLabelFile(file) && boxes.length === 1) return true;
@@ -3827,7 +4080,7 @@ const buildShipmentNotes = (form = {}, items = []) =>
     .join('\n');
 
 const mapShipmentItemsToProductItems = (items = []) => {
-  const mappedItems = getLineItems({ items }).map((item) => ({
+  const mappedItems = sortLineItemsForDisplay(getLineItems({ items })).map((item) => ({
     productName: getItemProductName(item),
     sku: getItemSku(item),
     expectedQty: String(getItemExpectedQty(item) || ''),
@@ -3852,7 +4105,7 @@ const serializeProductItemsForDraft = (items = []) =>
   }));
 
 const getShipmentViewStats = (shipment = {}) => {
-  const items = getLineItems(shipment);
+  const items = sortLineItemsForDisplay(getLineItems(shipment));
   return {
     items,
     totalUnits: items.reduce((sum, item) => sum + Number(getItemExpectedQty(item) || 0), 0),
@@ -3893,6 +4146,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   const csvInputRef = useRef(null);
   const uploadedFileCacheRef = useRef({});
   const fbaLoadRequestRef = useRef(0);
+  const viewLoadRequestRef = useRef(0);
   const fbaUploadPanelRef = useRef(null);
   const [shipments, setShipments] = useState([]);
   const [statusFilter, setStatusFilter] = useState('all');
@@ -3932,6 +4186,17 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
   const showToast = (type, toastMessage) => {
     setToast({ type, message: toastMessage });
+  };
+
+  const closeViewModal = () => {
+    viewLoadRequestRef.current += 1;
+    setShowViewModal(false);
+    setSelectedShipment(null);
+    setSelectedShipmentBoxes([]);
+    setSelectedShipmentServices([]);
+    setSelectedShipmentDiscrepancies([]);
+    setSelectedShipmentFiles([]);
+    setLoadingShipmentFiles(false);
   };
 
   const getCachedUploadedFiles = (...shipmentsToMatch) => {
@@ -4567,7 +4832,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       }
 
       const items = productItems
-        .map((item) => {
+        .map((item, index) => {
           const bundleSizeValue = Number(item.bundleSize || 0);
           const bundlePayload = isPositiveBundleSize(bundleSizeValue)
             ? {
@@ -4596,6 +4861,12 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
             sku: item.sku.trim(),
             productName: item.productName.trim(),
             expectedQty: Number(item.expectedQty || 0),
+            itemIndex: index,
+            item_index: index,
+            lineItemIndex: index,
+            line_item_index: index,
+            displayOrder: index,
+            display_order: index,
             ...bundlePayload,
             fnskuLabel: item.fnskuLabel.trim(),
             fileName: item.fileName || undefined,
@@ -4892,7 +5163,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     }
   };
 
-  const loadShipmentDetails = async (shipmentId, fallbackShipment = null) => {
+  const loadShipmentDetails = async (shipmentId, fallbackShipment = null, { isCurrentRequest = () => true } = {}) => {
     const resolvedShipmentId = String(shipmentId || getShipmentId(fallbackShipment) || '').trim();
 
     if (!resolvedShipmentId) {
@@ -4930,11 +5201,14 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       initialFilesRequest,
     ]);
 
+    if (!isCurrentRequest()) return;
+
     if (shipmentResponse.status !== 'fulfilled') {
       throw new Error('Failed to load shipment details.');
     }
 
     const payload = await parseResponse(shipmentResponse.value);
+    if (!isCurrentRequest()) return;
     const rawDetail = extractShipmentDetail(payload);
     const detail = rawDetail && typeof rawDetail === 'object' ? rawDetail : {};
     const selectedFallback = buildSelectedShipmentFallback(fallbackShipment || {}, resolvedShipmentId);
@@ -4985,6 +5259,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
     if (boxesResponse.status === 'fulfilled') {
       loadedBoxes = await enrichBoxesWithItems(extractList(boxesResponse.value, ['boxes']), selectedItems);
+      if (!isCurrentRequest()) return;
       setSelectedShipmentBoxes(loadedBoxes);
     } else {
       setSelectedShipmentBoxes([]);
@@ -4993,6 +5268,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     if (servicesResponse.status === 'fulfilled') {
       try {
         const servicesPayload = await parseResponse(servicesResponse.value);
+        if (!isCurrentRequest()) return;
         loadedServiceTasks = extractServiceTasks(servicesPayload);
         setSelectedShipmentServices(loadedServiceTasks);
       } catch {
@@ -5005,6 +5281,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     if (discrepanciesResponse.status === 'fulfilled') {
       try {
         const discrepanciesPayload = await parseResponse(discrepanciesResponse.value);
+        if (!isCurrentRequest()) return;
         setSelectedShipmentDiscrepancies(extractList(discrepanciesPayload, ['discrepancies']));
       } catch {
         setSelectedShipmentDiscrepancies([]);
@@ -5018,6 +5295,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     if (filesResponse.status === 'fulfilled' && filesResponse.value) {
       try {
         const filesPayload = await parseResponse(filesResponse.value);
+        if (!isCurrentRequest()) return;
         const files = extractFiles(filesPayload);
         console.log('[PickPackPro][Client Files GET]', {
           endpoint: initialFilesEndpoint,
@@ -5072,7 +5350,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     ];
     const extraFileLookups = [
       ...shipmentFileLookupIds.map((entityId) => ({ entityType: 'shipment', entityId })),
-      ...lineItemFileLookupIds.map((entityId) => ({ entityType: 'item', entityId })),
+      ...lineItemFileLookupIds.flatMap((entityId) =>
+        ITEM_FILE_LOOKUP_ENTITY_TYPES.map((entityType) => ({ entityType, entityId }))
+      ),
       ...boxFileLookupIds.map((entityId) => ({ entityType: 'box', entityId })),
       ...serviceFileLookupIds.map((entityId) => ({ entityType: 'service', entityId })),
     ].filter(
@@ -5101,6 +5381,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           return files;
         })
       );
+
+      if (!isCurrentRequest()) return;
 
       extraFileResponses.forEach((response) => {
         if (response.status === 'fulfilled') loadedFiles.push(...response.value);
@@ -5134,6 +5416,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           }));
         })
       );
+
+      if (!isCurrentRequest()) return;
 
       boxLabelFileResponses.forEach((response) => {
         if (response.status === 'fulfilled') loadedFiles.push(...response.value);
@@ -5177,6 +5461,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           );
         })
       );
+
+      if (!isCurrentRequest()) return;
 
       itemLabelFileResponses.forEach((response) => {
         if (response.status === 'fulfilled') loadedFiles.push(...response.value);
@@ -5223,6 +5509,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         url: getFileUrl(file),
       })),
     });
+    if (!isCurrentRequest()) return;
     setSelectedShipmentFiles(selectedFiles);
     if (loadedFiles.length) {
       rememberUploadedFiles(loadedFiles, detail, selectedFallback, resolvedShipmentId, detailRecordId, detailReference);
@@ -5231,6 +5518,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   };
 
   const handleViewShipment = async (shipment) => {
+    const requestId = viewLoadRequestRef.current + 1;
+    viewLoadRequestRef.current = requestId;
+    const isCurrentRequest = () => viewLoadRequestRef.current === requestId;
     const fallbackShipment = typeof shipment === 'object'
       ? buildSelectedShipmentFallback(shipment)
       : buildSelectedShipmentFallback({ id: shipment }, shipment);
@@ -5247,14 +5537,16 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       setLoadingShipmentFiles(true);
       setShowViewModal(true);
       setShowTrackModal(false);
-      await loadShipmentDetails(shipmentId, fallbackShipment);
+      await loadShipmentDetails(shipmentId, fallbackShipment, { isCurrentRequest });
     } catch (requestError) {
-      setSelectedShipment(previewShipment);
-      setShowViewModal(true);
-      setShowTrackModal(false);
-      setError(`${requestError.message || 'Failed to load shipment details.'} Showing available shipment data.`);
+      if (isCurrentRequest()) {
+        setSelectedShipment(previewShipment);
+        setShowViewModal(true);
+        setShowTrackModal(false);
+        setError(`${requestError.message || 'Failed to load shipment details.'} Showing available shipment data.`);
+      }
     } finally {
-      setLoadingShipmentFiles(false);
+      if (isCurrentRequest()) setLoadingShipmentFiles(false);
     }
   };
 
@@ -6146,27 +6438,11 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         box?.meta?.qty,
         box?.meta?.units
       );
-    const rawContents = firstPresent(box?.contents, box?.box_contents, box?.items, box?.boxItems, box?.box_items, []);
-    let contents = [];
-
-    if (Array.isArray(rawContents)) {
-      contents = rawContents;
-    } else if (typeof rawContents === 'string') {
-      try {
-        const parsedContents = JSON.parse(rawContents);
-        contents = Array.isArray(parsedContents) ? parsedContents : parsedContents ? [parsedContents] : [];
-      } catch {
-        contents = rawContents.trim() ? [{ sku: rawContents.trim(), quantity: '' }] : [];
-      }
-    } else if (rawContents && typeof rawContents === 'object') {
-      contents = [rawContents];
-    }
-
+    const contents = getBoxItems(box);
     const shipmentItems = getLineItems(shipment);
     const boxDirectSku = getBoxDirectSku();
     const directBoxQuantity = getBoxDirectQuantity();
     const boxLineItemId = firstPresent(box?.shipmentItemId, box?.shipment_item_id, box?.lineItemId, box?.line_item_id, box?.itemId, box?.item_id);
-    const canUseBoxLevelQuantityFallback = contents.length <= 1;
     const fallbackItemByBoxReference = shipmentItems.find((item) => {
       const itemIds = getItemLabelMatchIds(item);
       const itemSku = String(getItemSku(item) || '').trim().toLowerCase();
@@ -6178,36 +6454,54 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     const fallbackItemByIndex = boxIndex >= 0 && shipmentItems.length ? shipmentItems[Math.min(boxIndex, shipmentItems.length - 1)] : null;
     const fallbackItem = fallbackItemByBoxReference || (shipmentItems.length === 1 ? shipmentItems[0] : null) || fallbackItemByIndex;
 
-    const contentRows = contents.map((content) => {
-      const shipmentItemId = getContentLineItemId(content);
-      const contentSku = getContentSku(content);
-      const matchedItem = shipmentItems.find((item) => {
-        const itemIds = getItemLabelMatchIds(item);
-        const itemSku = String(getItemSku(item) || '').trim().toLowerCase();
-        return Boolean(
-          (shipmentItemId && itemIds.includes(String(shipmentItemId))) ||
-            (contentSku && itemSku && contentSku.toLowerCase() === itemSku)
-        );
-      });
-      const sku = firstPresent(
-        contentSku,
-        getItemSku(matchedItem),
-        boxDirectSku,
-        getItemSku(fallbackItem)
-      );
-      const resolvedQuantity = firstPresent(
-        getContentQuantity(content),
-        canUseBoxLevelQuantityFallback ? directBoxQuantity : '',
-        canUseBoxLevelQuantityFallback ? getItemExpectedQty(matchedItem) : '',
-        canUseBoxLevelQuantityFallback ? getItemExpectedQty(fallbackItem) : '',
-        ''
-      );
+    const buildRows = (items = []) => {
+      const itemList = toArray(items);
+      const canUseBoxLevelQuantityFallback = itemList.length <= 1;
 
-      return { ...content, sku, quantity: resolvedQuantity, shipmentItemId };
-    }).filter((row) => normalizeDisplayValue(row?.sku) || row?.quantity !== '');
-    const displayContentRows = expandBoxContentRows(contentRows);
+      return itemList.map((content, contentIndex) => {
+        const contentRecord = content && typeof content === 'object' ? content : { sku: String(content || '').trim() };
+        const shipmentItemId = getContentLineItemId(contentRecord);
+        const contentSku = getContentSku(contentRecord);
+        const matchedItem = shipmentItems.find((item) => {
+          const itemIds = getItemLabelMatchIds(item);
+          const itemSku = String(getItemSku(item) || '').trim().toLowerCase();
+          return Boolean(
+            (shipmentItemId && itemIds.includes(String(shipmentItemId))) ||
+              (contentSku && itemSku && contentSku.toLowerCase() === itemSku)
+          );
+        });
+        const sku = firstPresent(
+          contentSku,
+          getItemSku(matchedItem),
+          boxDirectSku,
+          getItemSku(fallbackItem)
+        );
+        const resolvedQuantity = firstPresent(
+          getContentQuantity(contentRecord),
+          canUseBoxLevelQuantityFallback ? directBoxQuantity : '',
+          canUseBoxLevelQuantityFallback ? getItemExpectedQty(matchedItem) : '',
+          canUseBoxLevelQuantityFallback ? getItemExpectedQty(fallbackItem) : '',
+          ''
+        );
+
+        return {
+          ...contentRecord,
+          key: firstPresent(contentRecord?.id, contentRecord?.uuid, contentRecord?.boxItemId, contentRecord?.box_item_id, shipmentItemId, contentIndex),
+          sku,
+          quantity: resolvedQuantity,
+          shipmentItemId,
+        };
+      }).filter((row) => normalizeDisplayValue(row?.sku) || row?.quantity !== '');
+    };
+
+    const displayContentRows = expandBoxContentRows(buildRows(contents));
 
     if (displayContentRows.length) return displayContentRows;
+
+    const cachedRows = expandBoxContentRows(
+      buildRows(hydrateBoxItemsWithLineItems(getCachedBoxAllocationItems(box), shipmentItems))
+    );
+    if (cachedRows.length) return cachedRows;
 
     if (boxDirectSku || directBoxQuantity !== '' || fallbackItem) {
       const item = fallbackItem || {};
@@ -6226,7 +6520,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   const getBoxContentsSummary = (box = {}, shipment = {}, boxIndex = -1) => {
     const rows = getBoxContentRows(box, shipment, boxIndex);
     return rows.length
-      ? rows.map((row) => `${normalizeDisplayValue(row.sku) ? `SKU: ${row.sku}` : 'SKU pending'}${row.quantity !== '' ? ` x ${row.quantity}` : ''}`).join(', ')
+      ? rows.map((row) => `${normalizeDisplayValue(row.sku) || 'SKU pending'}${row.quantity !== '' ? ` x ${row.quantity}` : ''}`).join(', ')
       : '-';
   };
   const getPrimaryBoxSku = (box = {}, shipment = {}, boxIndex = -1) => {
@@ -6275,18 +6569,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     }, 0);
   };
   const getBoxRawContentItems = (box = {}) => {
-    const rawContents = firstPresent(box?.contents, box?.box_contents, box?.items, box?.boxItems, box?.box_items, []);
-
-    if (Array.isArray(rawContents)) return rawContents;
-    if (typeof rawContents === 'string') {
-      try {
-        const parsedContents = JSON.parse(rawContents);
-        return Array.isArray(parsedContents) ? parsedContents : parsedContents ? [parsedContents] : [];
-      } catch {
-        return rawContents.trim() ? [{ sku: rawContents.trim() }] : [];
-      }
-    }
-    return rawContents && typeof rawContents === 'object' ? [rawContents] : [];
+    return getBoxItems(box);
   };
   const getBoxDirectLineItemId = (box = {}) =>
     firstPresent(
@@ -6787,15 +7070,12 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                       const labelReady = isBoxLabelReadyInSection(box);
                       const uploadKey = `${shipmentId}-${boxId}`;
                       const isUploading = uploadingFbaBoxKey === uploadKey;
-                      const dims = [box?.length_cm, box?.width_cm, box?.height_cm]
-                        .filter((value) => Number(value) > 0)
-                        .map((value) => Number(value))
-                        .join('x');
-                      const dimStr = dims ? `${dims} CM` : '';
-                      const weightStr = Number(box?.weight_kg || 0) > 0 ? `${Number(box.weight_kg)} KG` : '';
                       const contentsStr = getBoxContentsSummary(box, shipment, boxIndex);
                       const primarySku = getPrimaryBoxSku(box, shipment, boxIndex);
                       const totalQuantity = getBoxTotalQuantity(box, shipment, boxIndex);
+                      const boxType = getBoxType(box);
+                      const boxNumber = firstPresent(box?.box_number, box?.boxNumber, boxIndex + 1);
+                      const boxSize = getBoxSize(box);
 
                       return (
                         <div
@@ -6814,13 +7094,13 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                           } cursor-pointer transition-colors hover:bg-[#f8fafc]`}
                         >
                           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#f1f5f9] text-sm font-bold text-[#132347]">
-                            {box?.box_number || boxIndex + 1}
+                            {boxNumber}
                           </div>
 
                           <div className="min-w-0">
                             <p className="text-sm font-medium text-[#132347]">
-                              {box?.box_type === 'pallet' ? 'Pallet' : 'Box'} #{box?.box_number || boxIndex + 1}
-                              {box?.box_size ? ` - ${box.box_size}` : ''}
+                              {boxType === 'pallet' ? 'Pallet' : 'Box'} #{boxNumber}
+                              {boxSize ? ` - ${boxSize}` : ''}
                             </p>
                             {contentsStr && contentsStr !== '-' ? (
                               <p className="mt-0.5 text-sm font-semibold text-[#132347]">
@@ -7622,7 +7902,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                         const contentSummary = getBoxContentsSummary(box, batchFbaUpload.shipment, index);
                         const totalQuantity = getBoxTotalQuantity(box, batchFbaUpload.shipment, index);
                         const boxNumber = firstPresent(box?.box_number, box?.boxNumber, index + 1);
-                        const boxType = box?.box_type === 'pallet' ? 'Pallet' : 'Box';
+                        const boxType = getBoxType(box) === 'pallet' ? 'Pallet' : 'Box';
+                        const boxSize = getBoxSize(box);
 
                         return (
                           <label key={boxId} className="flex cursor-pointer items-center gap-3 border-b border-[#f1f5f9] px-4 py-3 last:border-b-0">
@@ -7638,7 +7919,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                             </span>
                             <span className="min-w-0">
                               <span className="block text-sm font-semibold text-[#132347]">
-                                {boxType} #{boxNumber}{box?.box_size ? ` - ${box.box_size}` : ''}
+                                {boxType} #{boxNumber}{boxSize ? ` - ${boxSize}` : ''}
                               </span>
                               {contentSummary && contentSummary !== '-' ? <span className="block text-xs text-[#64748b]">Contents: {contentSummary}</span> : null}
                               {totalQuantity !== '' ? <span className="block text-xs text-[#64748b]">Units: {totalQuantity}</span> : null}
@@ -7730,19 +8011,27 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
               const primarySku = getPrimaryBoxSku(box, shipment, boxIndex);
               const totalQuantity = getBoxTotalQuantity(box, shipment, boxIndex);
               const labelReady = isBoxLabelReadyInSection(box);
-              const dims = [box?.length_cm, box?.width_cm, box?.height_cm]
-                .filter((value) => Number(value) > 0)
-                .map((value) => Number(value))
-                .join('x');
+              const boxType = getBoxType(box);
+              const boxSize = getBoxSize(box);
+              const dimensions = getBoxDimensions(box);
+              const weight = getBoxWeight(box);
+              const boxNumber = firstPresent(box?.box_number, box?.boxNumber, boxIndex + 1);
+              const clientName = getShipmentClientName(shipment);
+              const clientEmail = getShipmentClientEmail(shipment);
 
               return (
                 <>
-                  <div className="flex items-center justify-between border-b border-[#e2e8f0] px-6 py-4">
+                  <div className="flex items-start justify-between gap-4 border-b border-[#e2e8f0] px-6 py-4">
                     <div>
                       <h3 className="text-lg font-semibold text-[#132347]">
-                        {box?.box_type === 'pallet' ? 'Pallet' : 'Box'} #{box?.box_number || boxIndex + 1}
+                        {boxType === 'pallet' ? 'Pallet' : 'Box'} #{boxNumber}
                       </h3>
                       <p className="mt-1 text-xs text-[#6b7280]">{shipment?.reference || getShipmentId(shipment)}</p>
+                      {clientName || clientEmail ? (
+                        <p className="mt-1 text-xs font-semibold text-[#132347]">
+                          Client: {clientName || '-'}{clientEmail ? ` (${clientEmail})` : ''}
+                        </p>
+                      ) : null}
                       {primarySku || contentSummary !== '-' ? (
                         <p className="mt-1 text-sm font-semibold text-[#132347]">
                           Contents: {contentSummary !== '-' ? contentSummary : primarySku}
@@ -7762,21 +8051,19 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                     <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-5">
                       <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
                         <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Type</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{box?.box_type || 'box'}</p>
+                        <p className="mt-1 font-semibold text-[#132347]">{boxType}</p>
                       </div>
                       <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
                         <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Size</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{box?.box_size || '-'}</p>
+                        <p className="mt-1 font-semibold text-[#132347]">{boxSize || '-'}</p>
                       </div>
                       <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
                         <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Dimensions</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{dims ? `${dims} CM` : '-'}</p>
+                        <p className="mt-1 font-semibold text-[#132347]">{dimensions || '-'}</p>
                       </div>
                       <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
                         <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Weight</p>
-                        <p className="mt-1 font-semibold text-[#132347]">
-                          {Number(box?.weight_kg || 0) > 0 ? `${Number(box.weight_kg)} KG` : '-'}
-                        </p>
+                        <p className="mt-1 font-semibold text-[#132347]">{weight ? `${weight} KG` : '-'}</p>
                       </div>
                       <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
                         <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Contents</p>
@@ -7836,7 +8123,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                 >
                   <RefreshCw size={14} className={isRefreshingDetails ? 'animate-spin' : ''} />
                 </button>
-                <button onClick={() => { setShowViewModal(false); setSelectedShipment(null); }} className="rounded-lg p-1 hover:bg-gray-100">
+                <button onClick={closeViewModal} className="rounded-lg p-1 hover:bg-gray-100">
                   <X size={20} />
                 </button>
               </div>
@@ -7900,7 +8187,6 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                             );
                             const itemCustomServices = customServicesForView.filter((service) => isCustomServiceForItem(service, item, itemCount));
                             const labelFile = itemLabelFiles[index] || null;
-                            const labelFileName = getItemLabelFileName(item);
                             const labelFileUrl = labelFile ? getFileUrlCandidates(labelFile)[0] : '';
                             const labelFileIsImage = Boolean(labelFile && isImageFile(labelFile));
                             const itemOutboundBoxes = getBoxesForShipmentItem(item, trackBoxes, viewStats.items);
@@ -7937,7 +8223,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                                     ) : loadingShipmentFiles ? (
                                       <span className="font-medium text-gray-500">Loading label...</span>
                                     ) : (
-                                      <span className="font-medium text-gray-900">{labelFileName || '-'}</span>
+                                      <span className="font-medium text-gray-900">-</span>
                                     )}
                                   </p>
                                 </div>

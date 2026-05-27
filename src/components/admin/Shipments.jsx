@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
@@ -23,6 +23,13 @@ const API_BASE_URL = import.meta.env.DEV
   ? ''
   : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app';
+const SUPABASE_STORAGE_PUBLIC_BASE_URL = import.meta.env.VITE_SUPABASE_URL
+  ? `${String(import.meta.env.VITE_SUPABASE_URL).replace(/\/+$/, '')}/storage/v1/object/public`
+  : '';
+const SUPABASE_DEFAULT_STORAGE_BUCKET =
+  import.meta.env.VITE_SUPABASE_BUCKET_FNSKU_LABELS ||
+  import.meta.env.VITE_SUPABASE_STORAGE_BUCKET ||
+  'pickpackpro-files';
 const SHIPMENTS_PER_PAGE = 10;
 const DRAFT_CACHE_KEY = 'pickpackpro-shipment-drafts';
 const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
@@ -1776,6 +1783,70 @@ const isUsableFileUrlCandidate = (value = '') => {
   return url.includes('/');
 };
 
+const isStoragePathCandidate = (url = '') => {
+  const normalizedUrl = String(url || '').trim();
+  if (!normalizedUrl || normalizedUrl.startsWith('/') || /^(https?:|data:|blob:)/i.test(normalizedUrl)) return false;
+  if (/^api\//i.test(normalizedUrl)) return false;
+  return normalizedUrl.includes('/') && /\.[a-z0-9]{2,8}(?:$|\?)/i.test(normalizedUrl);
+};
+
+const safeDecodeStoragePath = (path = '') => {
+  let decodedPath = String(path || '');
+
+  for (let index = 0; index < 4; index += 1) {
+    try {
+      const nextPath = decodeURIComponent(decodedPath);
+      if (nextPath === decodedPath) break;
+      decodedPath = nextPath;
+    } catch {
+      break;
+    }
+  }
+
+  return decodedPath;
+};
+
+const encodeStoragePath = (path = '') =>
+  String(path || '')
+    .trim()
+    .replace(/^\/+/, '')
+    .split('/')
+    .map((part) => encodeURIComponent(safeDecodeStoragePath(part)))
+    .join('/');
+
+const buildStoragePublicUrl = (bucket = SUPABASE_DEFAULT_STORAGE_BUCKET, path = '') => {
+  const normalizedPath = String(path || '').trim().replace(/^\/+/, '');
+  if (!SUPABASE_STORAGE_PUBLIC_BASE_URL || !bucket || !isStoragePathCandidate(normalizedPath)) return '';
+  return `${SUPABASE_STORAGE_PUBLIC_BASE_URL}/${bucket}/${encodeStoragePath(normalizedPath)}`;
+};
+
+const encodeHttpUrlOnce = (url = '') => {
+  try {
+    return encodeURI(decodeURI(String(url || '').trim()));
+  } catch {
+    return encodeURI(String(url || '').trim()).replace(/%25([0-9a-f]{2})/gi, '%$1');
+  }
+};
+
+const encodeSupabasePublicObjectUrl = (url = '') => {
+  const value = String(url || '').trim();
+  const markers = ['/storage/v1/object/public/', '/storage/v1/render/image/public/'];
+  const marker = markers.find((currentMarker) => value.includes(currentMarker));
+  if (!marker) return '';
+
+  const hashIndex = value.indexOf('#');
+  const hash = hashIndex >= 0 ? value.slice(hashIndex) : '';
+  const withoutHash = hashIndex >= 0 ? value.slice(0, hashIndex) : value;
+  const queryIndex = withoutHash.indexOf('?');
+  const query = queryIndex >= 0 ? withoutHash.slice(queryIndex) : '';
+  const base = queryIndex >= 0 ? withoutHash.slice(0, queryIndex) : withoutHash;
+  const markerIndex = base.indexOf(marker);
+  const prefix = base.slice(0, markerIndex + marker.length);
+  const objectPath = base.slice(markerIndex + marker.length);
+
+  return objectPath ? `${prefix}${encodeStoragePath(objectPath)}${query}${hash}` : encodeHttpUrlOnce(value);
+};
+
 const firstUsableFileUrl = (...values) => {
   const value = values.find(isUsableFileUrlCandidate);
   return value === undefined || value === null ? '' : String(value).trim();
@@ -1893,7 +1964,10 @@ const resolveFileUrl = (url = '') => {
   const normalizedUrl = String(url || '').trim();
   if (!normalizedUrl || !isUsableFileUrlCandidate(normalizedUrl)) return '';
   if (/^(data:|blob:)/i.test(normalizedUrl)) return normalizedUrl;
-  if (/^https?:/i.test(normalizedUrl)) return encodeURI(normalizedUrl);
+  if (/^https?:/i.test(normalizedUrl)) return encodeSupabasePublicObjectUrl(normalizedUrl) || encodeHttpUrlOnce(normalizedUrl);
+  if (isStoragePathCandidate(normalizedUrl)) {
+    return buildStoragePublicUrl(SUPABASE_DEFAULT_STORAGE_BUCKET, normalizedUrl) || encodeHttpUrlOnce(`${BACKEND_BASE_URL}/${normalizedUrl.replace(/^\/+/, '')}`);
+  }
   return encodeURI(`${BACKEND_BASE_URL}${normalizedUrl.startsWith('/') ? normalizedUrl : `/${normalizedUrl}`}`);
 };
 
@@ -2100,6 +2174,21 @@ const getItemLabelFileName = (item = {}) =>
     item?.label_file_name,
     item?.fnskuLabelFileName,
     item?.fnsku_label_file_name,
+    item?.fnskuLabelFile?.name,
+    item?.fnskuLabelFile?.fileName,
+    item?.fnskuLabelFile?.file_name,
+    item?.fnsku_label_file?.name,
+    item?.fnsku_label_file?.fileName,
+    item?.fnsku_label_file?.file_name,
+    item?.labelFile?.name,
+    item?.labelFile?.fileName,
+    item?.labelFile?.file_name,
+    item?.label_file?.name,
+    item?.label_file?.fileName,
+    item?.label_file?.file_name,
+    item?.file?.name,
+    item?.file?.fileName,
+    item?.file?.file_name,
     item?.uploadedFiles?.name,
     item?.uploadedFiles?.fileName,
     item?.uploadedFiles?.file_name,
@@ -2261,6 +2350,8 @@ const getFileEntityId = (file = {}) =>
     file?.item_id,
     file?.lineItemId,
     file?.line_item_id,
+    file?.shipmentLineItemId,
+    file?.shipment_line_item_id,
     file?.shipmentItemId,
     file?.shipment_item_id,
     file?.boxId,
@@ -2275,6 +2366,8 @@ const getFileEntityId = (file = {}) =>
     getFileMeta(file)?.item_id,
     getFileMeta(file)?.lineItemId,
     getFileMeta(file)?.line_item_id,
+    getFileMeta(file)?.shipmentLineItemId,
+    getFileMeta(file)?.shipment_line_item_id,
     getFileMeta(file)?.shipmentItemId,
     getFileMeta(file)?.shipment_item_id,
     getFileMeta(file)?.boxId,
@@ -2287,6 +2380,18 @@ const getFileEntityId = (file = {}) =>
 
 const getFileEntityType = (file = {}) =>
   String(firstPresent(file?.entityType, file?.entity_type, file?.linkedEntityType, file?.linked_entity_type, getFileMeta(file)?.entityType, getFileMeta(file)?.entity_type, getFileMeta(file)?.linkedEntityType, getFileMeta(file)?.linked_entity_type)).trim().toLowerCase();
+
+const normalizeEntityType = (value = '') => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+
+const ITEM_FILE_ENTITY_TYPE_LIST = ['item', 'shipment_item', 'shipmentitem', 'shipment_line_item', 'shipmentlineitem', 'line_item', 'lineitem'];
+const ITEM_FILE_ENTITY_TYPES = new Set(ITEM_FILE_ENTITY_TYPE_LIST);
+const ITEM_FILE_LOOKUP_ENTITY_TYPES = ['item', 'shipment_item', 'shipment_line_item', 'line_item'];
+const SHIPMENT_FILE_ENTITY_TYPES = new Set(['shipment']);
+const BOX_FILE_ENTITY_TYPES = new Set(['box']);
+
+const isItemFileEntityType = (value = '') => ITEM_FILE_ENTITY_TYPES.has(normalizeEntityType(value));
+const isShipmentFileEntityType = (value = '') => SHIPMENT_FILE_ENTITY_TYPES.has(normalizeEntityType(value));
+const isBoxFileEntityType = (value = '') => BOX_FILE_ENTITY_TYPES.has(normalizeEntityType(value));
 
 const getFileRecordId = (file = {}) =>
   firstPresent(
@@ -2413,7 +2518,7 @@ const isFbaBoxLabelFile = (file = {}) => {
     type.includes('shipping_label') ||
     name.includes('shipping-label') ||
     name.includes('shipping_label') ||
-    (entityType === 'box' && type.includes('label'))
+    (isBoxFileEntityType(entityType) && type.includes('label'))
   );
 };
 
@@ -2521,7 +2626,7 @@ const getBoxFbaLabelFile = (box = {}, files = []) => {
       boxLookupIds.some((boxId) => file?.boxId === boxId || file?.box_id === boxId) ||
       directFiles.includes(file);
 
-    return sameLabelFile || (sameBox && (!entityType || entityType === 'box') && isFbaBoxLabelFile(file));
+    return sameLabelFile || (sameBox && (!entityType || isBoxFileEntityType(entityType)) && isFbaBoxLabelFile(file));
   }) || null;
 };
 
@@ -2593,7 +2698,7 @@ const getVisibleShipmentFiles = (files = [], shipment = {}, boxes = [], items = 
     const stablePath = getFileStablePath(file);
 
     if (
-      entityType === 'box' ||
+      isBoxFileEntityType(entityType) ||
       (entityId && boxLookupIds.includes(entityId)) ||
       (fileRecordId && boxLabelFileIds.has(fileRecordId)) ||
       (stablePath && boxLabelPaths.has(stablePath)) ||
@@ -2603,14 +2708,14 @@ const getVisibleShipmentFiles = (files = [], shipment = {}, boxes = [], items = 
     }
 
     if (
-      entityType === 'item' ||
+      isItemFileEntityType(entityType) ||
       (entityId && itemLookupIds.includes(entityId)) ||
       (isAnyItemLabelFile(file) && items.some((item) => fileMatchesLineItem(file, item)))
     ) {
       return false;
     }
 
-    if (entityType && entityType !== 'shipment') return false;
+    if (entityType && !isShipmentFileEntityType(entityType)) return false;
     return fileMatchesLookupIds(file, shipmentLookupIds);
   });
 };
@@ -2619,8 +2724,10 @@ const isFnskuLabelFile = (file = {}) => {
   const type = getFileTypeValue(file);
   const name = getFileName(file).toLowerCase();
   const entityType = getFileEntityType(file);
+  const url = getFileUrl(file).toLowerCase();
+  const stablePath = getFileStablePath(file);
 
-  return !isFbaBoxLabelFile(file) && (type.includes('fnsku') || name.includes('fnsku') || (entityType === 'item' && (type.includes('label') || isPdfFile(file) || isImageFile(file))));
+  return !isFbaBoxLabelFile(file) && (type.includes('fnsku') || name.includes('fnsku') || url.includes('fnsku') || stablePath.includes('fnsku') || (isItemFileEntityType(entityType) && (type.includes('label') || isPdfFile(file) || isImageFile(file) || isCsvFile(file))));
 };
 
 const isAnyItemLabelFile = (file = {}) => {
@@ -2634,8 +2741,8 @@ const getDisplayableItemFiles = (files = []) =>
   extractList(files, ['files']).filter((file) => {
     if (!getFileUrl(file) && !getFileName(file)) return false;
     const entityType = getFileEntityType(file);
-    if (entityType === 'box' || isFbaBoxLabelFile(file)) return false;
-    return isFnskuLabelFile(file) || isAnyItemLabelFile(file) || (entityType === 'item' && (isImageFile(file) || isPdfFile(file) || isCsvFile(file)));
+    if (isBoxFileEntityType(entityType) || isFbaBoxLabelFile(file)) return false;
+    return isFnskuLabelFile(file) || isAnyItemLabelFile(file) || (isItemFileEntityType(entityType) && (isImageFile(file) || isPdfFile(file) || isCsvFile(file)));
   });
 
 const fileMatchesLineItem = (file = {}, item = {}) => {
@@ -2662,17 +2769,13 @@ const findLineItemLabelFile = (item = {}, files = [], itemCount = 0, index = 0) 
     null;
 
   if (matchingFile) return matchingFile;
+  const indexedFile = fileList.find((file) => getFileItemIndex(file) === index);
+  if (indexedFile) return indexedFile;
   if (itemCount === 1 && fnskuLabelFiles.length === 1) return fnskuLabelFiles[0];
   if (itemCount === 1 && labelFiles.length === 1) return labelFiles[0];
   if (itemCount === 1 && pdfFiles.length === 1) return pdfFiles[0];
   if (itemCount === 1 && imageFiles.length === 1) return imageFiles[0];
   if (itemCount === 1 && csvFiles.length === 1) return csvFiles[0];
-  if (itemCount > 1 && fnskuLabelFiles.length === itemCount) return fnskuLabelFiles[index] || null;
-  if (itemCount > 1 && labelFiles.length === itemCount) return labelFiles[index] || null;
-  if (itemCount > 1 && pdfFiles.length === itemCount) return pdfFiles[index] || null;
-  if (itemCount > 1 && imageFiles.length === itemCount) return imageFiles[index] || null;
-  if (itemCount > 1 && csvFiles.length === itemCount) return csvFiles[index] || null;
-  if (itemCount > 1 && fileList.length === itemCount) return fileList[index] || null;
   if (itemCount === 1 && fileList.length === 1) return fileList[0];
   return null;
 };
@@ -2710,6 +2813,8 @@ const getFileCreatedTime = (file = {}) => {
     file?.created_at,
     file?.uploadedAt,
     file?.uploaded_at,
+    file?.updatedAt,
+    file?.updated_at,
     file?.uploadedAt,
     file?.uploaded_at,
     file?.uploadedAt,
@@ -2792,7 +2897,9 @@ const getFileCreatedTime = (file = {}) => {
     getFileMeta(file)?.createdAt,
     getFileMeta(file)?.created_at,
     getFileMeta(file)?.uploadedAt,
-    getFileMeta(file)?.uploaded_at
+    getFileMeta(file)?.uploaded_at,
+    getFileMeta(file)?.updatedAt,
+    getFileMeta(file)?.updated_at
   );
   const time = value ? new Date(value).getTime() : 0;
   return Number.isFinite(time) ? time : 0;
@@ -2836,25 +2943,79 @@ const isExactItemLabelFileMatch = (file = {}, item = {}) => {
   );
 };
 
+const fileMatchesAnyLineItem = (file = {}, itemList = []) =>
+  itemList.some((item) => fileMatchesLineItem(file, item) || isExactItemLabelFileMatch(file, item));
+
+const isSupportedItemLabelFile = (file = {}) => isPdfFile(file) || isImageFile(file) || isCsvFile(file);
+
+const isShipmentLevelItemLabelFile = (file = {}) => {
+  const entityType = getFileEntityType(file);
+  if (isBoxFileEntityType(entityType) || isItemFileEntityType(entityType) || isFbaBoxLabelFile(file)) return false;
+  if (entityType && !isShipmentFileEntityType(entityType)) return false;
+  return isSupportedItemLabelFile(file) && (isFnskuLabelFile(file) || isAnyItemLabelFile(file));
+};
+
+const isItemLabelCandidateFile = (file = {}, itemList = []) => {
+  if (!getFileUrl(file) && !getFileName(file)) return false;
+  const entityType = getFileEntityType(file);
+  if (isBoxFileEntityType(entityType) || isFbaBoxLabelFile(file)) return false;
+
+  if (isItemFileEntityType(entityType)) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
+  if (getFileItemIndex(file) !== null) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
+  if (fileMatchesAnyLineItem(file, itemList)) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
+  if (isShipmentLevelItemLabelFile(file)) return true;
+
+  return (isFnskuLabelFile(file) || isAnyItemLabelFile(file)) && itemList.length === 1;
+};
+
+const getLatestShipmentLabelBatchFiles = (candidateFiles = [], itemCount = 0) => {
+  if (!itemCount) return [];
+  const shipmentLabelFiles = candidateFiles
+    .map((file, index) => ({ file, index }))
+    .filter(({ file }) => isShipmentLevelItemLabelFile(file));
+
+  if (shipmentLabelFiles.length < itemCount) return [];
+
+  const latestFiles = shipmentLabelFiles
+    .sort((firstFile, secondFile) => {
+      if (Boolean(firstFile.file?.localPreview) !== Boolean(secondFile.file?.localPreview)) {
+        return firstFile.file?.localPreview ? -1 : 1;
+      }
+      const timeDifference = getFileCreatedTime(secondFile.file) - getFileCreatedTime(firstFile.file);
+      return timeDifference || secondFile.index - firstFile.index;
+    })
+    .slice(0, itemCount);
+
+  return latestFiles
+    .sort((firstFile, secondFile) => {
+      const firstIndex = getFileItemIndex(firstFile.file);
+      const secondIndex = getFileItemIndex(secondFile.file);
+      if (firstIndex !== null && secondIndex !== null && firstIndex !== secondIndex) return firstIndex - secondIndex;
+      if (firstIndex !== null && secondIndex === null) return -1;
+      if (firstIndex === null && secondIndex !== null) return 1;
+      const timeDifference = getFileCreatedTime(firstFile.file) - getFileCreatedTime(secondFile.file);
+      return timeDifference || firstFile.index - secondFile.index;
+    })
+    .map(({ file }) => file);
+};
+
 const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) => {
   const itemList = toArray(items);
   if (!itemList.length) return [];
 
   const itemInlineFiles = itemList.flatMap((item) => getItemInlineLabelFiles(item));
   const candidateFiles = mergeFileLists(itemInlineFiles, files, visibleFiles)
-    .filter((file) => {
-      if (!getFileUrl(file) && !getFileName(file)) return false;
-      const entityType = getFileEntityType(file);
-      if (entityType === 'box' || isFbaBoxLabelFile(file)) return false;
-      return isFnskuLabelFile(file) || isAnyItemLabelFile(file) || isPdfFile(file) || isImageFile(file) || isCsvFile(file);
-    })
+    .filter((file) => isItemLabelCandidateFile(file, itemList))
     .sort((firstFile, secondFile) => {
+      if (Boolean(firstFile?.localPreview) !== Boolean(secondFile?.localPreview)) return firstFile?.localPreview ? -1 : 1;
+      const timeDifference = getFileCreatedTime(secondFile) - getFileCreatedTime(firstFile);
+      if (timeDifference) return timeDifference;
       const firstIndex = getFileItemIndex(firstFile);
       const secondIndex = getFileItemIndex(secondFile);
       if (firstIndex !== null && secondIndex !== null && firstIndex !== secondIndex) return firstIndex - secondIndex;
       if (firstIndex !== null && secondIndex === null) return -1;
       if (firstIndex === null && secondIndex !== null) return 1;
-      return getFileCreatedTime(firstFile) - getFileCreatedTime(secondFile);
+      return 0;
     });
 
   const assignments = new Array(itemList.length).fill(null);
@@ -2870,9 +3031,24 @@ const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) 
     return true;
   };
 
+  const latestShipmentLabelBatch = getLatestShipmentLabelBatchFiles(candidateFiles, itemList.length);
+  if (latestShipmentLabelBatch.length === itemList.length) {
+    itemList.forEach((item, itemIndex) => {
+      const batchFile = latestShipmentLabelBatch[itemIndex];
+      if (batchFile) assignFile(itemIndex, batchFile, candidateFiles.indexOf(batchFile));
+    });
+  }
+
   itemList.forEach((item, itemIndex) => {
+    if (assignments[itemIndex]) return;
     const exactFile = getUnusedFiles().find((file) => isExactItemLabelFileMatch(file, item));
     if (exactFile) assignFile(itemIndex, exactFile, candidateFiles.indexOf(exactFile));
+  });
+
+  itemList.forEach((item, itemIndex) => {
+    if (assignments[itemIndex]) return;
+    const indexedFile = getUnusedFiles().find((file) => getFileItemIndex(file) === itemIndex);
+    if (indexedFile) assignFile(itemIndex, indexedFile, candidateFiles.indexOf(indexedFile));
   });
 
   itemList.forEach((item, itemIndex) => {
@@ -2887,19 +3063,9 @@ const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) 
     if (uniqueMatchedFile) assignFile(itemIndex, uniqueMatchedFile, candidateFiles.indexOf(uniqueMatchedFile));
   });
 
-  const remainingItemIndexes = assignments
-    .map((file, itemIndex) => (file ? -1 : itemIndex))
-    .filter((itemIndex) => itemIndex >= 0);
   const remainingFiles = getUnusedFiles();
-
-  if (remainingFiles.length === remainingItemIndexes.length) {
-    remainingItemIndexes.forEach((itemIndex, remainingIndex) => {
-      assignFile(itemIndex, remainingFiles[remainingIndex], candidateFiles.indexOf(remainingFiles[remainingIndex]));
-    });
-  } else if (candidateFiles.length >= itemList.length) {
-    remainingItemIndexes.forEach((itemIndex) => {
-      assignFile(itemIndex, candidateFiles[itemIndex], itemIndex);
-    });
+  if (itemList.length === 1 && remainingFiles.length === 1 && !assignments[0]) {
+    assignFile(0, remainingFiles[0], candidateFiles.indexOf(remainingFiles[0]));
   }
 
   return assignments;
@@ -2988,8 +3154,14 @@ const buildShipmentItems = (items) => {
   }
 
   const validItems = items
-    .map((item) => ({
+    .map((item, index) => ({
       ...item,
+      itemIndex: index,
+      item_index: index,
+      lineItemIndex: index,
+      line_item_index: index,
+      displayOrder: index,
+      display_order: index,
       sku: String(item.sku || '').trim(),
       productName: String(item.productName || '').trim(),
       expectedQty: Number(item.expectedQty || 0),
@@ -3037,6 +3209,12 @@ const buildShipmentItems = (items) => {
       sku: item.sku,
       productName: item.productName,
       expectedQty: item.expectedQty,
+      itemIndex: item.itemIndex,
+      item_index: item.item_index,
+      lineItemIndex: item.lineItemIndex,
+      line_item_index: item.line_item_index,
+      displayOrder: item.displayOrder,
+      display_order: item.display_order,
       ...bundlePayload,
       fnskuLabel: item.fnskuLabel,
       fileName: item.fileName || undefined,
@@ -3161,6 +3339,7 @@ const Shipments = () => {
   const [quickViewFiles, setQuickViewFiles] = useState([]);
   const [isQuickViewLoading, setIsQuickViewLoading] = useState(false);
   const [quickViewError, setQuickViewError] = useState('');
+  const quickViewRequestIdRef = useRef(0);
   const [createForm, setCreateForm] = useState(initialCreateForm);
   const [createItems, setCreateItems] = useState([createEmptyProductItem()]);
   const [isLoading, setIsLoading] = useState(false);
@@ -3320,6 +3499,9 @@ const Shipments = () => {
   };
 
   const handleQuickViewShipment = async (shipment) => {
+    const requestId = quickViewRequestIdRef.current + 1;
+    quickViewRequestIdRef.current = requestId;
+    const isCurrentRequest = () => quickViewRequestIdRef.current === requestId;
     const previewShipment = normalizeShipment(shipment || {});
     setQuickViewShipment(previewShipment);
     setQuickViewItems(applyBundleSizesFromNotes(getShipmentLineItems(shipment), shipment));
@@ -3333,7 +3515,7 @@ const Shipments = () => {
     const lookupCandidates = getShipmentLookupCandidates(shipment, previewShipment);
 
     if (!lookupCandidates.length) {
-      setQuickViewError('Shipment identifier is missing for this row.');
+      if (isCurrentRequest()) setQuickViewError('Shipment identifier is missing for this row.');
       return;
     }
 
@@ -3431,7 +3613,7 @@ const Shipments = () => {
           .map((item) => String(getLineItemRecordId(item) || '').trim())
           .filter(isUuidValue)
           .filter(Boolean)
-          .map((entityId) => ({ entityType: 'item', entityId })),
+          .flatMap((entityId) => ITEM_FILE_LOOKUP_ENTITY_TYPES.map((entityType) => ({ entityType, entityId }))),
         ...boxesForView
           .flatMap((box) => getBoxLookupIds(box))
           .filter(Boolean)
@@ -3521,6 +3703,7 @@ const Shipments = () => {
       );
       const inlineItemLabelFiles = itemsForView.flatMap((item) => getItemInlineLabelFiles(item));
 
+      if (!isCurrentRequest()) return;
       setQuickViewShipment(resolvedShipment);
       setQuickViewItems(itemsForView);
       setQuickViewServices(
@@ -3534,10 +3717,25 @@ const Shipments = () => {
       setQuickViewBoxes(boxesForView);
       setQuickViewFiles(mergeFileLists(initialFiles, extraFiles, fbaLabelFiles, itemLabelFiles, inlineItemLabelFiles));
     } catch (requestError) {
-      setQuickViewError(`${requestError.message || 'Failed to load shipment detail.'} Showing table data.`);
+      if (isCurrentRequest()) {
+        setQuickViewError(`${requestError.message || 'Failed to load shipment detail.'} Showing table data.`);
+      }
     } finally {
-      setIsQuickViewLoading(false);
+      if (isCurrentRequest()) setIsQuickViewLoading(false);
     }
+  };
+
+  const closeQuickViewModal = () => {
+    quickViewRequestIdRef.current += 1;
+    setShowQuickViewModal(false);
+    setQuickViewShipment(null);
+    setQuickViewItems([]);
+    setQuickViewServices([]);
+    setQuickViewDiscrepancies([]);
+    setQuickViewBoxes([]);
+    setQuickViewFiles([]);
+    setQuickViewError('');
+    setIsQuickViewLoading(false);
   };
 
   const requestDeleteShipment = (shipment) => {
@@ -3593,13 +3791,7 @@ const Shipments = () => {
       if (quickViewShipment) {
         const quickViewKeys = getShipmentLookupCandidates(quickViewShipment, normalizeShipment(quickViewShipment));
         if (quickViewKeys.some((key) => deletedKeys.has(key))) {
-          setShowQuickViewModal(false);
-          setQuickViewShipment(null);
-          setQuickViewItems([]);
-          setQuickViewServices([]);
-          setQuickViewDiscrepancies([]);
-          setQuickViewBoxes([]);
-          setQuickViewFiles([]);
+          closeQuickViewModal();
         }
       }
 
@@ -3884,8 +4076,35 @@ const Shipments = () => {
               formData.append('entityType', lineItemId ? 'item' : 'shipment');
               formData.append('entityId', lineItemId || createdShipmentId);
               formData.append('fileType', 'fnsku_label');
-              formData.append('sku', getLineItemSku(savedLineItem) || getLineItemSku(item) || item.sku || '');
-              formData.append('fnsku', getLineItemFnsku(savedLineItem) || getLineItemFnsku(item) || item.fnskuLabel || '');
+              const sku = getLineItemSku(savedLineItem) || getLineItemSku(item) || item.sku || '';
+              const fnsku = getLineItemFnsku(savedLineItem) || getLineItemFnsku(item) || item.fnskuLabel || '';
+              formData.append('sku', sku);
+              formData.append('fnsku', fnsku);
+              formData.append('itemIndex', String(index));
+              formData.append('item_index', String(index));
+              formData.append('lineItemIndex', String(index));
+              formData.append('line_item_index', String(index));
+              if (lineItemId) {
+                formData.append('lineItemId', lineItemId);
+                formData.append('line_item_id', lineItemId);
+                formData.append('shipmentItemId', lineItemId);
+                formData.append('shipment_item_id', lineItemId);
+              }
+              formData.append(
+                'metadata',
+                JSON.stringify({
+                  itemIndex: index,
+                  item_index: index,
+                  lineItemIndex: index,
+                  line_item_index: index,
+                  lineItemId: lineItemId,
+                  line_item_id: lineItemId,
+                  shipmentItemId: lineItemId,
+                  shipment_item_id: lineItemId,
+                  sku,
+                  fnsku,
+                })
+              );
 
               const uploadResponse = await fetch(`${API_BASE_URL}/api/files`, {
                 method: 'POST',
@@ -4507,16 +4726,7 @@ const Shipments = () => {
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      setShowQuickViewModal(false);
-                      setQuickViewShipment(null);
-                      setQuickViewItems([]);
-                      setQuickViewServices([]);
-                      setQuickViewDiscrepancies([]);
-                      setQuickViewBoxes([]);
-                      setQuickViewFiles([]);
-                      setQuickViewError('');
-                    }}
+                    onClick={closeQuickViewModal}
                     className="rounded-full p-2 text-gray-500 hover:bg-gray-100"
                     aria-label="Close shipment popup"
                   >
@@ -4739,9 +4949,7 @@ const Shipments = () => {
                                   isDiscrepancyForItem(discrepancy, item, quickViewItems, discrepancyIndex)
                                 );
                                 const itemCustomServices = customServicesForView.filter((service) => isCustomServiceForItem(service, item, itemCount));
-                                const labelFile = itemLabelFileAssignments[index] || findLineItemLabelFile(item, quickViewFiles, itemCount, index);
-                                const labelFileName = getItemLabelFileName(item);
-                                const labelFileDisplayName = labelFileName ? cleanFileDisplayName(labelFileName) : '';
+                                const labelFile = itemLabelFileAssignments[index] || (itemCount === 1 ? findLineItemLabelFile(item, quickViewFiles, itemCount, index) : null);
                                 const labelFileUrl = labelFile ? resolveFileUrl(getFileUrl(labelFile)) : '';
                                 const labelFileIsImage = Boolean(labelFile && labelFileUrl && isImageFile(labelFile));
                                 const itemBoxes = getBoxesForItem(item);
@@ -4784,7 +4992,7 @@ const Shipments = () => {
                                             )}
                                           </div>
                                         ) : (
-                                          <span className="font-medium text-gray-900">{labelFileDisplayName || '-'}</span>
+                                          <span className="font-medium text-gray-900">-</span>
                                         )}
                                       </div>
                                     </div>

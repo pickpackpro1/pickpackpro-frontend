@@ -382,6 +382,44 @@ const toPayload = (form) => ({
   active: form.active,
 });
 
+const normalizeProductIdentityValue = (value = '') => String(value || '').trim().toLowerCase();
+
+const findProductWithSameClientSku = (products = [], form = {}, currentProductId = '') => {
+  const clientId = normalizeProductIdentityValue(form.clientId);
+  const sku = normalizeProductIdentityValue(form.sku);
+  const productId = String(currentProductId || '').trim();
+
+  if (!clientId || !sku) return null;
+
+  return products.find((product) => {
+    const currentId = String(product?.id || '').trim();
+    if (productId && currentId === productId) return false;
+
+    return (
+      normalizeProductIdentityValue(product?.clientId) === clientId &&
+      normalizeProductIdentityValue(product?.sku) === sku
+    );
+  }) || null;
+};
+
+const isDuplicateProductSkuError = (message = '') => {
+  const normalizedMessage = String(message || '').toLowerCase();
+  return Boolean(
+    normalizedMessage.includes('unique constraint') &&
+      normalizedMessage.includes('client_id') &&
+      normalizedMessage.includes('sku')
+  );
+};
+
+const getDuplicateProductSkuMessage = (form = {}, duplicateProduct = null) => {
+  const sku = String(form.sku || '').trim() || duplicateProduct?.sku || 'this SKU';
+  const productName = duplicateProduct?.productName || duplicateProduct?.product_name || duplicateProduct?.name || '';
+
+  return productName
+    ? `SKU "${sku}" already exists for this client on "${productName}". Please edit that product or use a different SKU.`
+    : `SKU "${sku}" already exists for this client. Please edit the existing product or use a different SKU.`;
+};
+
 const toFormNumberValue = (value) => {
   if (value === null || value === undefined || String(value).trim() === '') return '';
   const number = Number(value);
@@ -434,6 +472,7 @@ const Products = () => {
   const [imageFile, setImageFile] = useState(null);
   const [currentProductImageUrl, setCurrentProductImageUrl] = useState('');
   const [imagePreviewUrl, setImagePreviewUrl] = useState('');
+  const [productFormError, setProductFormError] = useState('');
   const importInputRef = useRef(null);
   const clientFilterRef = useRef(null);
   const formClientRef = useRef(null);
@@ -614,6 +653,7 @@ const Products = () => {
 
   const selectFormClient = (clientId = '') => {
     const nextClient = clientOptions.find((client) => client.id === clientId);
+    setProductFormError('');
     setProductForm((prev) => ({ ...prev, clientId }));
     setFormClientSearch(nextClient?.label || '');
     setIsFormClientOpen(false);
@@ -731,6 +771,7 @@ const Products = () => {
   const openCreateModal = () => {
     setEditingProductId('');
     setProductForm(initialProductForm);
+    setProductFormError('');
     setImageFile(null);
     setCurrentProductImageUrl('');
     setFormClientSearch('');
@@ -740,6 +781,7 @@ const Products = () => {
 
   const closeProductFormModal = () => {
     setShowFormModal(false);
+    setProductFormError('');
     setImageFile(null);
     setCurrentProductImageUrl('');
     setImagePreviewUrl('');
@@ -770,6 +812,7 @@ const Products = () => {
     }
 
     setEditingProductId(productId);
+    setProductFormError('');
     setProductForm({
       clientId: productForEdit.clientId,
       productName: productForEdit.productName,
@@ -810,14 +853,24 @@ const Products = () => {
 
   const handleSaveProduct = async () => {
     if (!productForm.clientId.trim() || !productForm.productName.trim() || !productForm.sku.trim()) {
-      setError('Client, product name, and SKU are required.');
+      const message = 'Client, product name, and SKU are required.';
+      setProductFormError(message);
+      setError(message);
       return;
     }
-    
+
+    const duplicateProduct = findProductWithSameClientSku(products, productForm, editingProductId);
+    if (duplicateProduct) {
+      const message = getDuplicateProductSkuMessage(productForm, duplicateProduct);
+      setProductFormError(message);
+      setError(message);
+      return;
+    }
 
     try {
       setIsSaving(true);
       setError('');
+      setProductFormError('');
       setMessage('');
       const response = await fetch(
         `${API_BASE_URL}${editingProductId ? `/api/products/${editingProductId}` : '/api/products'}`,
@@ -861,7 +914,11 @@ const Products = () => {
       setImagePreviewUrl('');
       await loadProducts();
     } catch (requestError) {
-      setError(requestError.message);
+      const message = isDuplicateProductSkuError(requestError.message)
+        ? getDuplicateProductSkuMessage(productForm)
+        : requestError.message;
+      setProductFormError(message);
+      setError(message);
     } finally {
       setIsSaving(false);
     }
@@ -1794,7 +1851,10 @@ const Products = () => {
                     type="text"
                     placeholder="Product Name"
                     value={productForm.productName}
-                    onChange={(e) => setProductForm((prev) => ({ ...prev, productName: e.target.value }))}
+                    onChange={(e) => {
+                      setProductFormError('');
+                      setProductForm((prev) => ({ ...prev, productName: e.target.value }));
+                    }}
                     className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
                   />
                 </label>
@@ -1804,7 +1864,10 @@ const Products = () => {
                     type="text"
                     placeholder="SKU"
                     value={productForm.sku}
-                    onChange={(e) => setProductForm((prev) => ({ ...prev, sku: e.target.value }))}
+                    onChange={(e) => {
+                      setProductFormError('');
+                      setProductForm((prev) => ({ ...prev, sku: e.target.value }));
+                    }}
                     className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
                   />
                 </label>
@@ -1931,6 +1994,11 @@ const Products = () => {
                     className="hidden"
                   />
                 </label>
+                {productFormError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 md:col-span-2">
+                    {productFormError}
+                  </div>
+                ) : null}
               </div>
 
               <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-200 bg-gray-50 rounded-b-xl">
