@@ -51,6 +51,32 @@ const extractAuthUser = (payload) =>
   payload ||
   {};
 
+const buildSupabaseFallbackUser = (user = {}, email = "") => {
+  const metadata = {
+    ...(user?.user_metadata || {}),
+    ...(user?.app_metadata || {}),
+  };
+  const role =
+    metadata.role ||
+    metadata.user_role ||
+    metadata.account_role ||
+    user?.role ||
+    "";
+
+  return {
+    id: user?.id || user?.user_id || "",
+    userId: user?.id || user?.user_id || "",
+    email: user?.email || email,
+    name:
+      metadata.full_name ||
+      metadata.fullName ||
+      metadata.name ||
+      user?.email ||
+      email,
+    role,
+  };
+};
+
 const getPayloadMessage = (payload, fallback) =>
   payload?.message || payload?.error || payload?.details || fallback;
 
@@ -70,28 +96,45 @@ const loginWithSupabaseFallback = async (email, password) => {
 
   const accessToken = data?.session?.access_token;
   const refreshToken = data?.session?.refresh_token;
+  const fallbackUser = buildSupabaseFallbackUser(data?.user || {}, email);
 
   if (!accessToken) {
     throw new Error("Login service did not return a session token.");
   }
 
-  const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-    cache: "no-store",
-    skipApiToast: true,
-  });
-  const profilePayload = await readResponsePayload(response);
+  let profilePayload = null;
+  let verifiedUser = fallbackUser;
 
-  if (!response.ok) {
-    throw new Error(
-      getPayloadMessage(profilePayload, "Login succeeded, but your profile could not be verified.")
-    );
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+      cache: "no-store",
+      skipApiToast: true,
+    });
+    profilePayload = await readResponsePayload(response);
+
+    if (response.ok) {
+      verifiedUser = extractAuthUser(profilePayload);
+    } else if (!isTemporaryBackendFailure(response.status)) {
+      throw new Error(
+        getPayloadMessage(profilePayload, "Login succeeded, but your profile could not be verified.")
+      );
+    }
+  } catch (profileError) {
+    const isTemporaryProfileError =
+      profileError?.name === "TypeError" ||
+      String(profileError?.message || "").toLowerCase().includes("failed to fetch") ||
+      String(profileError?.message || "").toLowerCase().includes("network");
+
+    if (!isTemporaryProfileError) throw profileError;
   }
 
-  const verifiedUser = extractAuthUser(profilePayload);
+  if (!verifiedUser?.role) {
+    throw new Error("Login succeeded, but your account role could not be verified while the backend is unavailable.");
+  }
 
   return {
     ...profilePayload,

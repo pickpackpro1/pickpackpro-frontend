@@ -1886,6 +1886,38 @@ const formatQuantityValue = (value) => {
   return Number.isInteger(quantity) ? String(quantity) : quantity.toFixed(2).replace(/\.?0+$/, "");
 };
 
+const normalizeCompletionStatus = (value = "") =>
+  String(value || "").trim().toLowerCase().replace(/\s+/g, "_");
+
+const getShipmentCompletionBlockers = (lineItemList = [], boxList = []) =>
+  toArray(lineItemList)
+    .map((lineItem) => {
+      const requiredQuantity = getLineItemBoxableQuantity(lineItem);
+      if (!Number.isFinite(requiredQuantity) || requiredQuantity <= 0) return null;
+
+      const boxedQuantity = getAllocatedQuantityForLineItem(lineItem, boxList, lineItemList);
+      const remainingQuantity = Math.max(0, requiredQuantity - boxedQuantity);
+      if (remainingQuantity <= 0.000001) return null;
+
+      return {
+        sku: firstPresent(getItemSku(lineItem), getLineItemId(lineItem), "SKU"),
+        requiredQuantity,
+        boxedQuantity,
+        remainingQuantity,
+      };
+    })
+    .filter(Boolean);
+
+const formatShipmentCompletionBlockerMessage = (blockers = []) => {
+  const visibleBlockers = blockers.slice(0, 3).map((blocker) =>
+    `${blocker.sku}: ${formatQuantityValue(blocker.remainingQuantity)} units remaining (boxed ${formatQuantityValue(blocker.boxedQuantity)} of ${formatQuantityValue(blocker.requiredQuantity)})`
+  );
+  const extraCount = blockers.length - visibleBlockers.length;
+  const extraMessage = extraCount > 0 ? ` ${extraCount} more SKU(s) also need boxing.` : "";
+
+  return `Shipment cannot be marked complete yet. Add all remaining SKU quantities to boxes first. ${visibleBlockers.join("; ")}.${extraMessage}`;
+};
+
 const getLineItemOptionValue = (item = {}) => String(getLineItemId(item) || getItemSku(item) || "").trim();
 
 const fetchBoxItemsByBoxId = async (box = {}) => {
@@ -3790,9 +3822,18 @@ const ShipmentsStaff = () => {
   const handleStatusUpdate = async (nextStatus = statusValue) => {
     if (!selectedShipmentId) return;
 
+    setError("");
+    setMessage("");
+
+    if (["completed", "complete"].includes(normalizeCompletionStatus(nextStatus))) {
+      const completionBlockers = getShipmentCompletionBlockers(lineItems, boxes);
+      if (completionBlockers.length) {
+        setError(formatShipmentCompletionBlockerMessage(completionBlockers));
+        return;
+      }
+    }
+
     try {
-      setError("");
-      setMessage("");
       const response = await fetch(`${API_BASE_URL}/api/shipments/${selectedShipmentId}/status`, {
         method: "PATCH",
         headers: buildHeaders(true),

@@ -49,6 +49,8 @@ const isNetworkAuthError = (error) =>
   String(error?.message || "").toLowerCase().includes("failed to fetch") ||
   String(error?.message || "").toLowerCase().includes("network");
 
+const isTemporaryBackendFailure = (status) => [502, 503, 504].includes(Number(status));
+
 const decodeBase64Url = (value = "") => {
   try {
     const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
@@ -169,6 +171,9 @@ const refreshSessionToken = async (session) => {
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
           return null;
+        }
+        if (isTemporaryBackendFailure(response.status)) {
+          return session;
         }
         continue;
       }

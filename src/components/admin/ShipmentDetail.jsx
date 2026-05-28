@@ -1316,19 +1316,98 @@ const formatQuantityValue = (value) => {
   return Number.isInteger(quantity) ? String(quantity) : quantity.toFixed(2).replace(/\.?0+$/, '');
 };
 
-const postBoxItemAllocation = async ({ boxId, shipmentItemId, quantity }) => {
-  const request = {
-    shipmentItemId: String(shipmentItemId || '').trim(),
-    quantity: Number(quantity || 0),
-  };
-  const itemResponse = await fetch(`${API_BASE_URL}/api/boxes/${encodeURIComponent(boxId)}/items`, {
-    method: 'POST',
-    headers: buildHeaders(true),
-    body: JSON.stringify(request),
-  });
-  const payload = await parseResponse(itemResponse);
+const normalizeCompletionStatus = (value = '') =>
+  String(value || '').trim().toLowerCase().replace(/\s+/g, '_');
 
-  return { payload, status: itemResponse.status, request };
+const getShipmentCompletionBlockers = (lineItemList = [], boxList = []) =>
+  toArray(lineItemList)
+    .map((lineItem) => {
+      const requiredQuantity = getLineItemBoxableQuantity(lineItem);
+      if (!Number.isFinite(requiredQuantity) || requiredQuantity <= 0) return null;
+
+      const boxedQuantity = getAllocatedQuantityForLineItem(lineItem, boxList, lineItemList);
+      const remainingQuantity = Math.max(0, requiredQuantity - boxedQuantity);
+      if (remainingQuantity <= 0.000001) return null;
+
+      return {
+        sku: firstPresent(getItemSku(lineItem), getLineItemId(lineItem), 'SKU'),
+        requiredQuantity,
+        boxedQuantity,
+        remainingQuantity,
+      };
+    })
+    .filter(Boolean);
+
+const formatShipmentCompletionBlockerMessage = (blockers = []) => {
+  const visibleBlockers = blockers.slice(0, 3).map((blocker) =>
+    `${blocker.sku}: ${formatQuantityValue(blocker.remainingQuantity)} units remaining (boxed ${formatQuantityValue(blocker.boxedQuantity)} of ${formatQuantityValue(blocker.requiredQuantity)})`
+  );
+  const extraCount = blockers.length - visibleBlockers.length;
+  const extraMessage = extraCount > 0 ? ` ${extraCount} more SKU(s) also need boxing.` : '';
+
+  return `Shipment cannot be marked complete yet. Add all remaining SKU quantities to boxes first. ${visibleBlockers.join('; ')}.${extraMessage}`;
+};
+
+const buildBoxItemAllocationPayloads = (shipmentItemId = '', quantity = 0) => {
+  const normalizedShipmentItemId = String(shipmentItemId || '').trim();
+  const normalizedQuantity = Number(quantity || 0);
+
+  return [
+    { shipmentItemId: normalizedShipmentItemId, quantity: normalizedQuantity },
+    { shipment_item_id: normalizedShipmentItemId, quantity: normalizedQuantity },
+    { lineItemId: normalizedShipmentItemId, quantity: normalizedQuantity },
+    { line_item_id: normalizedShipmentItemId, quantity: normalizedQuantity },
+  ];
+};
+
+const postBoxItemAllocation = async ({ boxId, shipmentItemId, quantity, skuLabel = '' }) => {
+  let lastError = null;
+  const payloads = buildBoxItemAllocationPayloads(shipmentItemId, quantity);
+
+  for (const [attemptIndex, request] of payloads.entries()) {
+    try {
+      console.log('[PickPackPro][Box Item POST]', {
+        boxId,
+        sku: skuLabel,
+        attempt: attemptIndex + 1,
+        request,
+      });
+
+      const itemResponse = await fetch(`${API_BASE_URL}/api/boxes/${encodeURIComponent(boxId)}/items`, {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify(request),
+      });
+      const payload = await parseResponse(itemResponse);
+
+      console.log('[PickPackPro][Box Item POST response]', {
+        boxId,
+        sku: skuLabel,
+        attempt: attemptIndex + 1,
+        status: itemResponse.status,
+        request,
+        response: payload,
+      });
+
+      return { payload, status: itemResponse.status, request };
+    } catch (error) {
+      lastError = error;
+      console.error('[PickPackPro][Box Item POST failed]', {
+        boxId,
+        sku: skuLabel,
+        attempt: attemptIndex + 1,
+        status: error?.status,
+        payload: error?.payload,
+        responseText: error?.responseText,
+        message: error?.message,
+        request,
+      });
+
+      if (![400, 422].includes(Number(error?.status))) throw error;
+    }
+  }
+
+  throw lastError || new Error('Box item allocation could not be saved.');
 };
 
 const fetchBoxItemsByBoxId = async (box = {}) => {
@@ -3288,6 +3367,15 @@ const ShipmentDetail = () => {
     try {
       setError('');
       setMessage('');
+
+      if (['completed', 'complete'].includes(normalizeCompletionStatus(nextStatus))) {
+        const completionBlockers = getShipmentCompletionBlockers(lineItems, boxes);
+        if (completionBlockers.length) {
+          setError(formatShipmentCompletionBlockerMessage(completionBlockers));
+          return;
+        }
+      }
+
       const response = await fetch(`${API_BASE_URL}/api/shipments/${id}/status`, {
         method: 'PATCH',
         headers: buildHeaders(true),
@@ -3623,6 +3711,65 @@ const ShipmentDetail = () => {
           maxQuantity: allocation.maxQuantity,
         })),
       });
+
+      if (!isPallet && newBoxId && allocations.length) {
+        let boxForAllocation = await enrichBoxWithItems(newBox, lineItems);
+
+        for (const allocation of allocations) {
+          const skuLabel = getItemSku(allocation.lineItem) || allocation.lineItemValue;
+          const alreadySavedQuantity =
+            boxForAllocation?.__boxItemsSource === 'api'
+              ? getAllocatedQuantityForLineItem(allocation.lineItem, [boxForAllocation], lineItems)
+              : 0;
+
+          if (alreadySavedQuantity >= allocation.quantity) {
+            continue;
+          }
+
+          const selectedLineItemId = String(
+            getBoxAllocationLineItemId(allocation.lineItem) || getShipmentLineItemId(allocation.lineItem) || ''
+          ).trim();
+
+          if (!isUuidValue(selectedLineItemId)) {
+            allocationWarning += ` ${skuLabel} allocation skipped: selected line item UUID is missing.`;
+            console.error('[PickPackPro][Box Item POST skipped]', {
+              boxId: newBoxId,
+              sku: skuLabel,
+              reason: 'Selected line item UUID is missing.',
+              lineItem: allocation.lineItem,
+            });
+            continue;
+          }
+
+          try {
+            await postBoxItemAllocation({
+              boxId: newBoxId,
+              shipmentItemId: selectedLineItemId,
+              quantity: allocation.quantity,
+              skuLabel,
+            });
+
+            if (allocation.quantity < allocation.requestedQuantity) {
+              allocationWarning += ` ${skuLabel} allocation adjusted to ${formatQuantityValue(allocation.quantity)} units (max available ${formatQuantityValue(allocation.maxQuantity)}).`;
+            }
+
+            boxForAllocation = await enrichBoxWithItems({ ...boxForAllocation, id: newBoxId }, lineItems);
+          } catch (allocationError) {
+            boxForAllocation = await enrichBoxWithItems(boxForAllocation, lineItems);
+            const refreshedAllocatedQuantity = getAllocatedQuantityForLineItem(allocation.lineItem, [boxForAllocation], lineItems);
+
+            if (refreshedAllocatedQuantity >= allocation.quantity) {
+              continue;
+            }
+
+            if (/max allocatable:\s*0/i.test(String(allocationError?.message || ''))) {
+              allocationWarning += ` ${skuLabel} allocation skipped: this SKU is already fully boxed.`;
+            } else {
+              allocationWarning += ` ${skuLabel} allocation could not be saved: ${allocationError.message}`;
+            }
+          }
+        }
+      }
 
       if (!isPallet && !newBoxId && allocations.length) {
         allocationWarning = ' SKU allocation skipped: new box id was not returned.';
