@@ -2548,6 +2548,44 @@ const getFileBoxId = (file = {}) =>
     parseFileMeta(file?.meta)?.box_id
   );
 
+const toLookupIdList = (value) => {
+  if (Array.isArray(value)) return value.flatMap(toLookupIdList);
+  if (!value) return [];
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed !== value) return toLookupIdList(parsed);
+    } catch {
+      // Fall back to comma-separated IDs below.
+    }
+
+    return trimmed.split(',').map((part) => part.trim()).filter(Boolean);
+  }
+
+  return [value];
+};
+
+const getFileBoxIds = (file = {}) => [
+  getFileBoxId(file),
+  file?.boxIds,
+  file?.box_ids,
+  file?.metadata?.boxIds,
+  file?.metadata?.box_ids,
+  file?.meta?.boxIds,
+  file?.meta?.box_ids,
+  parseFileMeta(file?.metadata)?.boxIds,
+  parseFileMeta(file?.metadata)?.box_ids,
+  parseFileMeta(file?.meta)?.boxIds,
+  parseFileMeta(file?.meta)?.box_ids,
+]
+  .flatMap(toLookupIdList)
+  .map((value) => String(value || '').trim())
+  .filter(Boolean);
+
 const getFileBoxNumber = (file = {}) =>
   firstPresent(
     file?.boxNumber,
@@ -2583,12 +2621,51 @@ const getFileSearchText = (file = {}) =>
     .map((value) => String(value || '').toLowerCase())
     .join(' ');
 
+const normalizeShipmentReferenceToken = (value = '') =>
+  String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+const extractShipmentReferenceTokens = (value = '') => {
+  const text = String(value || '');
+  return [...text.matchAll(/shp[\s_-]*\d{8}[\s_-]*\d{4}/gi)]
+    .map((match) => normalizeShipmentReferenceToken(match[0]))
+    .filter(Boolean);
+};
+
+const getShipmentContextReferenceTokens = (shipment = {}, box = {}) => [
+  getShipmentReference(shipment),
+  shipment?.reference,
+  shipment?.shipmentNumber,
+  shipment?.shipment_number,
+  box?.shipmentReference,
+  box?.shipment_reference,
+  box?.shipment?.reference,
+  box?.shipment?.shipmentNumber,
+  box?.shipment?.shipment_number,
+]
+  .map((value) => String(value || '').trim())
+  .filter((value) => value && value.toLowerCase() !== 'n/a')
+  .flatMap((value) => {
+    const parsedRefs = extractShipmentReferenceTokens(value);
+    return parsedRefs.length ? parsedRefs : [normalizeShipmentReferenceToken(value)];
+  })
+  .filter(Boolean);
+
+const fileMatchesShipmentContext = (file = {}, shipment = {}, box = {}) => {
+  const expectedRefs = getShipmentContextReferenceTokens(shipment, box);
+  if (!expectedRefs.length) return true;
+
+  const fileRefs = extractShipmentReferenceTokens(getFileSearchText(file));
+  if (!fileRefs.length) return true;
+
+  return fileRefs.some((fileRef) => expectedRefs.includes(fileRef));
+};
+
 const fileMatchesBoxIdentity = (file = {}, box = {}) => {
   const boxIds = getBoxLookupIds(box).map((value) => String(value || '').trim()).filter(Boolean);
   if (!boxIds.length) return false;
 
-  const fileBoxId = String(getFileBoxId(file) || '').trim();
-  if (fileBoxId && boxIds.includes(fileBoxId)) return true;
+  const fileBoxIds = getFileBoxIds(file);
+  if (fileBoxIds.some((fileBoxId) => boxIds.includes(fileBoxId))) return true;
 
   const fileEntityId = String(getFileEntityId(file) || '').trim();
   if (fileEntityId && boxIds.includes(fileEntityId)) return true;
@@ -3537,8 +3614,6 @@ const isPickPackProBrandFile = (file = {}) => {
 };
 
 const isFbaBoxLabelFile = (file = {}) => {
-  if (isPickPackProBrandFile(file)) return false;
-
   const type = getFileTypeValue(file);
   const name = getFileName(file).toLowerCase();
   const stablePath = getFileStablePath(file);
@@ -3569,7 +3644,7 @@ const getBoxInlineFiles = (box = {}) => [
   ...extractList(box?.fba_labels, ['files']),
 ];
 
-const getBoxDirectFbaLabelFile = (box = {}) => {
+const getBoxDirectFbaLabelFile = (box = {}, shipmentContext = {}) => {
   const labelUrl = firstPresent(
     box?.fbaLabelUrl,
     box?.fba_label_url,
@@ -3644,21 +3719,21 @@ const getBoxDirectFbaLabelFile = (box = {}) => {
     file_type: 'fba_shipping_label',
   };
 
-  return isPickPackProBrandFile(labelFile) ? null : labelFile;
+  return fileMatchesShipmentContext(labelFile, shipmentContext, box) ? labelFile : null;
 };
 
 const hasDirectFbaLabelRecord = (box = {}) =>
   Boolean(getBoxExplicitFbaLabelFileId(box) || getBoxDirectFbaLabelFile(box));
 
-const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) => {
-  const directLabelFile = getBoxDirectFbaLabelFile(box);
+const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0, shipmentContext = {}) => {
+  const directLabelFile = getBoxDirectFbaLabelFile(box, shipmentContext);
   if (directLabelFile) return directLabelFile;
 
   const boxLookupIds = getBoxLookupIds(box);
   const labelFileId = String(getBoxFbaLabelFileId(box) || '').trim();
   const directFiles = getBoxInlineFiles(box);
-  const allFiles = mergeFileLists(directFiles, extractList(files, ['files'])).filter(
-    (file) => !isPickPackProBrandFile(file)
+  const allFiles = mergeFileLists(directFiles, extractList(files, ['files'])).filter((file) =>
+    fileMatchesShipmentContext(file, shipmentContext, box)
   );
   const sameBoxFile = (file = {}) => {
     const entityId = String(getFileEntityId(file) || '').trim();
@@ -3697,7 +3772,7 @@ const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) =
   return null;
 };
 
-const isFileUsedAsBoxLabel = (file = {}, boxes = [], boxLabelFiles = []) => {
+const isFileUsedAsBoxLabel = (file = {}, boxes = [], boxLabelFiles = [], shipmentContext = {}) => {
   const fileId = String(getFileRecordId(file) || '').trim();
   const filePath = getFileStablePath(file);
 
@@ -3716,6 +3791,8 @@ const isFileUsedAsBoxLabel = (file = {}, boxes = [], boxLabelFiles = []) => {
   if (!fileLooksLikeBoxLabel) return false;
 
   return boxes.some((box) => {
+    if (!fileMatchesShipmentContext(file, shipmentContext, box)) return false;
+
     const boxIds = getBoxLookupIds(box);
     const labelFileId = String(getBoxFbaLabelFileId(box) || '').trim();
     return Boolean(
@@ -4771,14 +4848,14 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         }
 
         if (shipmentId && boxes.length) {
-          shipmentFileLookups.push({ shipmentId, boxes });
+          shipmentFileLookups.push({ shipment, shipmentId, boxes });
         }
 
         boxes.forEach((box) => {
           const boxId = getBoxItemsLookupId(box);
           if (!boxId) return;
           nextFilesMap[boxId] = null;
-          fileLookups.push({ boxId, box });
+          fileLookups.push({ shipment, boxId, box });
         });
       });
 
@@ -4791,14 +4868,14 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
       const [fileResults, shipmentFileResults] = await Promise.all([
         Promise.allSettled(
-          fileLookups.map(async ({ boxId, box }) => {
+          fileLookups.map(async ({ shipment, boxId, box }) => {
             const filesResponse = await fetch(`${API_BASE_URL}/api/files?entityType=box&entityId=${encodeURIComponent(boxId)}`, {
               method: 'GET',
               headers: buildHeaders(),
               cache: 'no-store',
             });
             const files = extractFiles(await parseResponse(filesResponse));
-            const matchingFiles = files.filter((file) => fileMatchesBoxIdentity(file, box));
+            const matchingFiles = files.filter((file) => fileMatchesShipmentContext(file, shipment, box) && fileMatchesBoxIdentity(file, box));
             const file = matchingFiles.find(isFbaBoxLabelFile) || null;
             return {
               boxId,
@@ -4819,14 +4896,14 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           })
         ),
         Promise.allSettled(
-          shipmentFileLookups.map(async ({ shipmentId, boxes }) => {
+          shipmentFileLookups.map(async ({ shipment, shipmentId, boxes }) => {
             const filesResponse = await fetch(`${API_BASE_URL}/api/files?entityType=shipment&entityId=${encodeURIComponent(shipmentId)}`, {
               method: 'GET',
               headers: buildHeaders(),
               cache: 'no-store',
             });
             const files = extractFiles(await parseResponse(filesResponse)).filter(isFbaBoxLabelFile);
-            return { boxes, files };
+            return { shipment, boxes, files };
           })
         ),
       ]);
@@ -4841,11 +4918,11 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
       shipmentFileResults.forEach((result) => {
         if (result.status !== 'fulfilled') return;
-        const { boxes, files } = result.value;
+        const { shipment, boxes, files } = result.value;
         boxes.forEach((box) => {
           const boxId = getBoxItemsLookupId(box);
           if (!boxId) return;
-          const matchedFile = files.find((file) => fileMatchesBoxIdentity(file, box));
+          const matchedFile = files.find((file) => fileMatchesShipmentContext(file, shipment, box) && fileMatchesBoxIdentity(file, box));
           if (matchedFile) {
             hydratedFilesMap[boxId] = {
               ...matchedFile,
@@ -6423,9 +6500,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   const trackBoxes = extractList(selectedShipmentBoxes, ['boxes']);
   const trackFiles = extractList(selectedShipmentFiles, ['files']);
   const boxLabelFiles = trackBoxes
-    .map((box, index) => getBoxFbaLabelFile(box, trackFiles, trackBoxes, index))
+    .map((box, index) => getBoxFbaLabelFile(box, trackFiles, trackBoxes, index, selectedShipment))
     .filter(Boolean);
-  const visibleShipmentFiles = mergeDisplayFileList(trackFiles).filter((file) => !isFileUsedAsBoxLabel(file, trackBoxes, boxLabelFiles));
+  const visibleShipmentFiles = mergeDisplayFileList(trackFiles).filter((file) => !isFileUsedAsBoxLabel(file, trackBoxes, boxLabelFiles, selectedShipment));
   const selectedShipmentViewStats = getShipmentViewStats(selectedShipment || {});
   const detailServices = mergeServiceTasks(
     extractServiceTasks(selectedShipmentServices),
@@ -6449,12 +6526,12 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     );
 
     if (directUploaded) return true;
-    if (getBoxFbaLabelFile(box, trackFiles, trackBoxes, index)) return true;
+    if (getBoxFbaLabelFile(box, trackFiles, trackBoxes, index, selectedShipment)) return true;
 
     return trackFiles.some((file) => {
       const entityId = getFileEntityId(file);
 
-      return entityId === boxId && isFbaBoxLabelFile(file) && fileMatchesBoxIdentity(file, box);
+      return entityId === boxId && isFbaBoxLabelFile(file) && fileMatchesShipmentContext(file, selectedShipment, box) && fileMatchesBoxIdentity(file, box);
     });
   };
   const isBoxLabelReadyInSection = (box, filesMap = fbaLabelFilesMap) => {
@@ -6470,7 +6547,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         box?.fba_label_uploaded ||
         box?.labelUploaded ||
         box?.label_uploaded ||
-        (mappedFile && isFbaBoxLabelFile(mappedFile) && fileMatchesBoxIdentity(mappedFile, box))
+        (mappedFile && isFbaBoxLabelFile(mappedFile) && fileMatchesShipmentContext(mappedFile, selectedShipment, box) && fileMatchesBoxIdentity(mappedFile, box))
     );
   };
   const awaitingFbaRows = fbaLabelShipments
@@ -6948,9 +7025,10 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       box,
       mergeFileLists(mappedFbaLabelFile ? [mappedFbaLabelFile] : [], trackFiles),
       trackBoxes,
-      index
+      index,
+      selectedShipment
     );
-    const fbaLabelFile = rawFbaLabelFile && !isPickPackProBrandFile(rawFbaLabelFile) ? rawFbaLabelFile : null;
+    const fbaLabelFile = rawFbaLabelFile || null;
     const fbaLabelUrl = resolveFileUrl(getFileUrl(fbaLabelFile));
     const fbaLabelImage = fbaLabelFile && fbaLabelUrl && isImageFile(fbaLabelFile);
     const labelReady = Boolean(fbaLabelFile);

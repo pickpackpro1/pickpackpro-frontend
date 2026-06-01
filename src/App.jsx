@@ -4,28 +4,69 @@ import FullPageLoader from "./components/common/FullPageLoader";
 import ToastHost from "./components/common/ToastHost";
 import { clearSession, getAuthToken, getDashboardPath, getRefreshToken, getSession, saveSession } from "./utils/auth";
 
-const Dashboard = lazy(() => import("./components/admin/Dashboard"));
-const Receiving = lazy(() => import("./components/admin/Receiving"));
-const Shipments = lazy(() => import("./components/admin/Shipments"));
-const AwaitingFbaLabels = lazy(() => import("./components/admin/AwaitingFbaLabels"));
-const ShipmentDetail = lazy(() => import("./components/admin/ShipmentDetail"));
-const Dispatch = lazy(() => import("./components/admin/Dispatch"));
-const Clients = lazy(() => import("./components/admin/Clients"));
-const Billing = lazy(() => import("./components/admin/Billing"));
-const Products = lazy(() => import("./components/admin/Products"));
-const AuditLog = lazy(() => import("./components/admin/AuditLog"));
-const Settings = lazy(() => import("./components/admin/Settings"));
-const MyTasks = lazy(() => import("./components/staff/MyTasks"));
-const ShipmentsStaff = lazy(() => import("./components/staff/ShipmentsStaff"));
-const DispatchStaff = lazy(() => import("./components/staff/DispatchStaff"));
-const ReceivingStaff = lazy(() => import("./components/staff/ReceivingStaff"));
-const Login = lazy(() => import("./pages/Login"));
-const SetPassword = lazy(() => import("./pages/SetPassword"));
-const ClientDashboard = lazy(() => import("./components/clientspannel/ClientDashboard"));
-const ClientShipments = lazy(() => import("./components/clientspannel/ClientShipments"));
-const InvoicesClient = lazy(() => import("./components/clientspannel/InvoicesClient"));
-const ProductsClient = lazy(() => import("./components/clientspannel/ProductsClient"));
-const Account = lazy(() => import("./components/clientspannel/Account"));
+const CHUNK_RELOAD_STORAGE_KEY = "pickpackpro-chunk-reload-v1";
+
+const isDynamicImportLoadError = (error) => {
+  const message = String(error?.message || error || "").toLowerCase();
+  return (
+    message.includes("failed to fetch dynamically imported module") ||
+    message.includes("expected a javascript-or-wasm module script") ||
+    message.includes("strict mime type checking") ||
+    message.includes("loading chunk") ||
+    message.includes("chunkloaderror")
+  );
+};
+
+const lazyWithChunkReload = (importer) =>
+  lazy(() =>
+    importer()
+      .then((module) => {
+        try {
+          sessionStorage.removeItem(CHUNK_RELOAD_STORAGE_KEY);
+        } catch {
+          // Ignore storage failures.
+        }
+        return module;
+      })
+      .catch((error) => {
+        if (typeof window !== "undefined" && isDynamicImportLoadError(error)) {
+          try {
+            if (!sessionStorage.getItem(CHUNK_RELOAD_STORAGE_KEY)) {
+              sessionStorage.setItem(CHUNK_RELOAD_STORAGE_KEY, "1");
+              window.location.reload();
+              return new Promise(() => {});
+            }
+          } catch {
+            window.location.reload();
+            return new Promise(() => {});
+          }
+        }
+        throw error;
+      })
+  );
+
+const Dashboard = lazyWithChunkReload(() => import("./components/admin/Dashboard"));
+const Receiving = lazyWithChunkReload(() => import("./components/admin/Receiving"));
+const Shipments = lazyWithChunkReload(() => import("./components/admin/Shipments"));
+const AwaitingFbaLabels = lazyWithChunkReload(() => import("./components/admin/AwaitingFbaLabels"));
+const ShipmentDetail = lazyWithChunkReload(() => import("./components/admin/ShipmentDetail"));
+const Dispatch = lazyWithChunkReload(() => import("./components/admin/Dispatch"));
+const Clients = lazyWithChunkReload(() => import("./components/admin/Clients"));
+const Billing = lazyWithChunkReload(() => import("./components/admin/Billing"));
+const Products = lazyWithChunkReload(() => import("./components/admin/Products"));
+const AuditLog = lazyWithChunkReload(() => import("./components/admin/AuditLog"));
+const Settings = lazyWithChunkReload(() => import("./components/admin/Settings"));
+const MyTasks = lazyWithChunkReload(() => import("./components/staff/MyTasks"));
+const ShipmentsStaff = lazyWithChunkReload(() => import("./components/staff/ShipmentsStaff"));
+const DispatchStaff = lazyWithChunkReload(() => import("./components/staff/DispatchStaff"));
+const ReceivingStaff = lazyWithChunkReload(() => import("./components/staff/ReceivingStaff"));
+const Login = lazyWithChunkReload(() => import("./pages/Login"));
+const SetPassword = lazyWithChunkReload(() => import("./pages/SetPassword"));
+const ClientDashboard = lazyWithChunkReload(() => import("./components/clientspannel/ClientDashboard"));
+const ClientShipments = lazyWithChunkReload(() => import("./components/clientspannel/ClientShipments"));
+const InvoicesClient = lazyWithChunkReload(() => import("./components/clientspannel/InvoicesClient"));
+const ProductsClient = lazyWithChunkReload(() => import("./components/clientspannel/ProductsClient"));
+const Account = lazyWithChunkReload(() => import("./components/clientspannel/Account"));
 
 const API_BASE_URL = '';
 
