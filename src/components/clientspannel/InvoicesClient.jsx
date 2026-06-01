@@ -240,7 +240,7 @@ const normalizeInvoice = (invoice, index = 0) => {
     vat: Number(invoice?.vat || invoice?.vatAmount || invoice?.vat_amount || invoice?.tax || invoice?.taxAmount || invoice?.tax_amount || 0),
     total: Number(invoice?.total || invoice?.grandTotal || invoice?.grand_total || invoice?.amount || 0),
     due: invoice?.dueDate || invoice?.due_date || invoice?.dueAt || invoice?.due_at || '',
-    date: invoice?.createdAt || invoice?.created_at || invoice?.invoiceDate || invoice?.invoice_date || invoice?.date || '',
+    date: invoice?.invoiceDate || invoice?.invoice_date || invoice?.date || invoice?.createdAt || invoice?.created_at || '',
     status: invoice?.status || invoice?.paymentStatus || invoice?.payment_status || 'Pending',
     client: invoice?.client?.companyName || invoice?.client?.company_name || invoice?.clientName || invoice?.client_name || invoice?.client || '',
     lineItems,
@@ -275,6 +275,10 @@ const getInvoiceLookupCandidates = (invoice = {}) => [
       invoice?.reference,
       invoice?.raw?.reference,
       invoice?.invoice,
+      invoice?.invoiceNumber,
+      invoice?.invoice_number,
+      invoice?.raw?.invoiceNumber,
+      invoice?.raw?.invoice_number,
     ]
       .map((value) => String(value || '').trim())
       .filter(Boolean)
@@ -313,7 +317,7 @@ const fetchInvoicePdfFile = async (invoice) => {
             payload?.error ||
             payload?.details ||
             (typeof payload === 'string' ? payload : '') ||
-            `Invoice PDF request failed with status ${response.status}`
+            `Invoice download request failed with status ${response.status}`
         );
       }
 
@@ -330,7 +334,7 @@ const fetchInvoicePdfFile = async (invoice) => {
           };
         }
 
-        throw new Error(payload?.message || payload?.error || 'Invoice PDF response did not include a downloadable file.');
+        throw new Error(payload?.message || payload?.error || 'Invoice download response did not include a downloadable file.');
       }
 
       const blob = await response.blob();
@@ -560,7 +564,7 @@ const InvoicesClient = () => {
       ...rows.map((item, index) => {
         const description = firstPresent(item?.description, item?.serviceType, item?.service_type, item?.name, `Line ${index + 1}`);
         const quantity = firstPresent(item?.quantity, item?.qty, item?.units, '');
-        const rate = firstPresent(item?.rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, '');
+        const rate = firstPresent(item?.rate, item?.unitRate, item?.unit_rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, '');
         const total = firstPresent(item?.total, item?.amount, item?.lineTotal, item?.line_total, 0);
         return `${index + 1}. ${description}${quantity !== '' ? ` | Qty ${quantity}` : ''}${rate !== '' ? ` | Rate ${formatCurrency(rate)}` : ''} | ${formatCurrency(total)}`;
       }),
@@ -818,7 +822,7 @@ const InvoicesClient = () => {
                             disabled={downloadingInvoiceId === invoice.id}
                             className="rounded-md border border-[#fde7d5] px-3 py-1.5 text-xs font-medium text-[#ff8c2f] hover:bg-[#fff7ed] disabled:cursor-not-allowed disabled:opacity-60"
                           >
-                            {downloadingInvoiceId === invoice.id ? '...' : 'PDF'}
+                            {downloadingInvoiceId === invoice.id ? '...' : 'Download'}
                           </button>
                         </div>
                       </td>
@@ -852,7 +856,7 @@ const InvoicesClient = () => {
                       className="inline-flex items-center gap-2 rounded-lg border border-[#fde7d5] px-3 py-2 text-xs font-semibold text-[#ff8c2f] hover:bg-[#fff7ed] disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <Download size={14} />
-                      PDF
+                      Download
                     </button>
                     <button
                       type="button"
@@ -905,7 +909,7 @@ const InvoicesClient = () => {
                                 {firstPresent(item?.description, item?.serviceType, item?.service_type, item?.name, `Line ${index + 1}`)}
                               </td>
                               <td className="px-4 py-3 text-right text-[#64748b]">{firstPresent(getInvoiceLineItemQuantity(item), '-')}</td>
-                              <td className="px-4 py-3 text-right text-[#64748b]">{formatCurrency(firstPresent(item?.rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, 0))}</td>
+                              <td className="px-4 py-3 text-right text-[#64748b]">{formatCurrency(firstPresent(item?.rate, item?.unitRate, item?.unit_rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, 0))}</td>
                               <td className="px-4 py-3 text-right font-semibold text-[#132347]">{formatCurrency(firstPresent(item?.total, item?.amount, item?.lineTotal, item?.line_total, 0))}</td>
                             </tr>
                           ))

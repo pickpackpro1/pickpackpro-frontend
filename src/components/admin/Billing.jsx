@@ -3,7 +3,7 @@ import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import { getSession } from '../../utils/auth';
-import { FileText, CheckCircle, AlertCircle, Download, Eye, RefreshCw, Info, ArrowRight, X } from 'lucide-react';
+import { FileText, CheckCircle, AlertCircle, Download, Eye, RefreshCw, Info, ArrowRight, X, Send } from 'lucide-react';
 
 const API_BASE_URL = '';
 const BILLING_PAGE_SIZE = 20;
@@ -65,13 +65,12 @@ const extractShipments = (payload) => {
   return [];
 };
 
-const getCurrentMonthRange = () => {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), 1);
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-  const format = (date) =>
-    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-  return { periodStart: format(start), periodEnd: format(end) };
+const extractPricing = (payload) => {
+  const data = payload?.data || payload || {};
+  return {
+    catalog: data?.catalog || data?.serviceCatalog || data?.service_catalog || [],
+    clientPrices: data?.clientPrices || data?.client_price_lists || data?.prices || [],
+  };
 };
 
 const getMonthValue = () => {
@@ -130,6 +129,34 @@ const firstPresent = (...values) => {
   });
 
   return value === undefined || value === null ? '' : value;
+};
+
+const parseJsonValue = (value, fallback) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (Array.isArray(value) || typeof value === 'object') return value;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+
+const toArrayValue = (value) => {
+  const parsed = parseJsonValue(value, value);
+  if (Array.isArray(parsed)) return parsed;
+  if (typeof parsed === 'string' && parsed.trim()) {
+    return parsed
+      .split(/[;,]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+};
+
+const toObjectValue = (value) => {
+  const parsed = parseJsonValue(value, {});
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
 };
 
 const isUuidValue = (value = '') =>
@@ -333,7 +360,7 @@ const getInvoicePaidDate = (invoice = {}) =>
   );
 
 const getInvoiceDateValue = (invoice = {}) =>
-  firstPresent(invoice?.date, invoice?.createdAt, invoice?.created_at, invoice?.invoiceDate, invoice?.invoice_date, invoice?.raw?.createdAt, invoice?.raw?.created_at, invoice?.raw?.invoiceDate, invoice?.raw?.invoice_date);
+  firstPresent(invoice?.date, invoice?.invoiceDate, invoice?.invoice_date, invoice?.createdAt, invoice?.created_at, invoice?.raw?.date, invoice?.raw?.invoiceDate, invoice?.raw?.invoice_date, invoice?.raw?.createdAt, invoice?.raw?.created_at);
 
 const isDateInCurrentMonth = (value) => {
   if (!value) return false;
@@ -362,20 +389,24 @@ const isInvoiceOverdue = (invoice = {}) => {
   return dueDate < today;
 };
 
-const normalizeInvoice = (invoice) => ({
-  id: invoice?.id || invoice?.uuid || invoice?.reference || '',
-  ref: invoice?.reference || invoice?.invoiceNumber || invoice?.id || 'N/A',
-  clientId: getInvoiceClientId(invoice),
-  client: getInlineInvoiceClientDisplay(invoice) || '-',
-  date: invoice?.createdAt || invoice?.created_at || invoice?.invoiceDate || '',
-  due: invoice?.dueDate || invoice?.due_date || '',
-  subtotal: getInvoiceSubtotalValue(invoice),
-  vat: getInvoiceVatValue(invoice),
-  total: getInvoiceTotalValue(invoice),
-  status: invoice?.status || 'draft',
-  lineItems: extractInvoiceLineItems(invoice),
-  raw: invoice,
-});
+const normalizeInvoice = (invoice) => {
+  const lineItems = extractInvoiceLineItems(invoice);
+
+  return {
+    id: firstPresent(invoice?.id, invoice?.uuid, invoice?.invoiceId, invoice?.invoice_id, invoice?.reference, invoice?.invoice_number),
+    ref: firstPresent(invoice?.reference, invoice?.invoiceNumber, invoice?.invoice_number, invoice?.number, invoice?.invoiceNo, invoice?.invoice_no, invoice?.id, 'N/A'),
+    clientId: getInvoiceClientId(invoice),
+    client: getInlineInvoiceClientDisplay(invoice) || '-',
+    date: firstPresent(invoice?.invoiceDate, invoice?.invoice_date, invoice?.date, invoice?.createdAt, invoice?.created_at),
+    due: firstPresent(invoice?.dueDate, invoice?.due_date, invoice?.dueAt, invoice?.due_at),
+    subtotal: getInvoiceSubtotalValue(invoice, lineItems),
+    vat: getInvoiceVatValue(invoice, lineItems),
+    total: getInvoiceTotalValue(invoice, lineItems),
+    status: invoice?.status || 'draft',
+    lineItems,
+    raw: invoice,
+  };
+};
 
 const getInvoiceLookupCandidates = (invoice = {}) => [
   ...new Set(
@@ -401,8 +432,34 @@ const getInvoiceLookupCandidates = (invoice = {}) => [
   ),
 ];
 
+const getInvoiceRouteId = (invoice = {}) => {
+  const candidates = getInvoiceLookupCandidates(invoice);
+  return candidates.find(isUuidValue) || candidates[0] || '';
+};
+
 const getInvoiceDetailPayload = (payload) =>
   payload?.invoice || payload?.data?.invoice || payload?.data?.row || payload?.data?.record || payload?.data || payload;
+
+const getContentDispositionFileName = (contentDisposition = '') => {
+  const encodedMatch = String(contentDisposition || '').match(/filename\*=UTF-8''([^;]+)/i);
+  if (encodedMatch?.[1]) {
+    try {
+      return decodeURIComponent(encodedMatch[1].replaceAll('"', '').trim());
+    } catch {
+      return encodedMatch[1].replaceAll('"', '').trim();
+    }
+  }
+
+  const match = String(contentDisposition || '').match(/filename="?([^";]+)"?/i);
+  return match?.[1]?.trim() || '';
+};
+
+const sanitizeFileName = (value = 'invoice') =>
+  String(value || 'invoice')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'invoice';
 
 const fetchInvoiceLineItems = async (lookupCandidates = []) => {
   for (const lookupId of lookupCandidates) {
@@ -441,6 +498,12 @@ const getShipmentLineItems = (shipment = {}) =>
   shipment?.items ||
   [];
 
+const getShipmentOutboundBoxes = (shipment = {}) =>
+  shipment?.outbound_boxes ||
+  shipment?.outboundBoxes ||
+  shipment?.boxes ||
+  [];
+
 const getShipmentArrivalDate = (shipment = {}) =>
   shipment?.actual_arrival_date ||
   shipment?.actualArrivalDate ||
@@ -470,26 +533,128 @@ const getShipmentReceivedUnits = (shipment = {}) => {
   return lineItemUnits || Number(shipment?.receivedUnits || shipment?.received_units || shipment?.units || 0);
 };
 
+const getLineItemBillingUnits = (item = {}) =>
+  toNumber(
+    firstPresent(
+      item?.qty_received,
+      item?.qtyReceived,
+      item?.receivedQty,
+      item?.received_qty,
+      item?.actualQty,
+      item?.actual_qty,
+      0
+    )
+  );
+
+const getServiceCatalogEntry = (catalog = [], serviceCode = '') =>
+  catalog.find((service) => String(service?.code || '').trim() === String(serviceCode || '').trim()) || null;
+
+const getClientCustomPrice = (clientPrices = [], clientId = '', serviceCode = '') =>
+  clientPrices
+    .filter(
+      (price) =>
+        String(price?.client_id || price?.clientId || '').trim() === String(clientId || '').trim() &&
+        String(price?.service_code || price?.serviceCode || price?.serviceType || '').trim() === String(serviceCode || '').trim()
+    )
+    .sort((left, right) => new Date(right?.effective_from || right?.effectiveFrom || 0) - new Date(left?.effective_from || left?.effectiveFrom || 0))[0] ||
+  null;
+
+const getServiceRate = ({ catalog, clientPrices, clientId, serviceCode, tier, allowRateFallback = false }) => {
+  const customPrice = getClientCustomPrice(clientPrices, clientId, serviceCode);
+  if (customPrice) return toNumber(customPrice?.rate ?? customPrice?.pricePerUnit ?? customPrice?.price_per_unit);
+
+  const service = getServiceCatalogEntry(catalog, serviceCode);
+  const tierPricing = toObjectValue(service?.default_tier_pricing ?? service?.defaultTierPricing);
+  const tierKey = String(tier || 'silver').toLowerCase();
+  const directRate = firstPresent(tierPricing?.[tierKey], tierPricing?.[tier], allowRateFallback ? tierPricing?.rate : '');
+
+  return directRate === '' ? 0 : toNumber(directRate);
+};
+
+const getVatRate = (client = {}, service = {}) => {
+  const clientVatRegistered = Boolean(client?.vat_registered ?? client?.vatRegistered);
+  const vatApplicable = Boolean(service?.vat_applicable ?? service?.vatApplicable);
+  return clientVatRegistered && vatApplicable ? 0.2 : 0;
+};
+
+const getBoxBillingServiceCode = (box = {}) => {
+  const boxType = String(box?.box_type || box?.boxType || '').toLowerCase();
+  const boxSize = String(box?.box_size || box?.boxSize || '').toLowerCase();
+
+  if (boxType === 'pallet') return 'pallet_forwarding';
+  if (boxType === 'box' && boxSize === 'medium') return 'medium_box';
+  if (boxType === 'box' && boxSize === 'large') return 'large_box';
+  return '';
+};
+
+const calculateMonthlyInvoiceEstimate = ({ client, clientId, shipments, tier, pricingData }) => {
+  const catalog = pricingData?.catalog || [];
+  const clientPrices = pricingData?.clientPrices || [];
+  let subtotal = 0;
+  let vat = 0;
+
+  shipments.forEach((shipment) => {
+    getShipmentLineItems(shipment).forEach((item) => {
+      const billingUnits = getLineItemBillingUnits(item);
+      if (!billingUnits) return;
+
+      const selectedServices = toArrayValue(item?.services_selected ?? item?.servicesSelected ?? item?.services);
+      const serviceStatuses = toObjectValue(item?.service_status ?? item?.serviceStatus);
+
+      selectedServices.forEach((serviceCode) => {
+        if (String(serviceStatuses?.[serviceCode] || '').toLowerCase() !== 'done') return;
+
+        const service = getServiceCatalogEntry(catalog, serviceCode);
+        const unitRate = getServiceRate({ catalog, clientPrices, clientId, serviceCode, tier });
+        const amount = billingUnits * unitRate;
+        const vatAmount = amount * getVatRate(client, service || {});
+
+        subtotal += amount;
+        vat += vatAmount;
+      });
+    });
+
+    getShipmentOutboundBoxes(shipment).forEach((box) => {
+      if (!(box?.dispatched_at || box?.dispatchedAt)) return;
+
+      const serviceCode = getBoxBillingServiceCode(box);
+      if (!serviceCode) return;
+
+      const service = getServiceCatalogEntry(catalog, serviceCode);
+      const unitRate = getServiceRate({ catalog, clientPrices, clientId, serviceCode, tier, allowRateFallback: true });
+      const vatAmount = unitRate * getVatRate(client, service || {});
+
+      subtotal += unitRate;
+      vat += vatAmount;
+    });
+  });
+
+  return {
+    subtotal,
+    vat,
+    total: subtotal + vat,
+  };
+};
+
 const needsShipmentPreviewDetail = (shipment = {}) =>
   !getShipmentArrivalDate(shipment) || !getShipmentLineItems(shipment).length;
 
 const Billing = () => {
-  const currentMonthRange = getCurrentMonthRange();
   const [activeTab, setActiveTab] = useState('invoices');
   const [invoicePage, setInvoicePage] = useState(1);
   const [monthlyPage, setMonthlyPage] = useState(1);
   const [selectedInvoice, setSelectedInvoice] = useState(null);
   const [invoices, setInvoices] = useState([]);
   const [clients, setClients] = useState([]);
+  const [pricingData, setPricingData] = useState({ catalog: [], clientPrices: [] });
   const [monthlyForm, setMonthlyForm] = useState({
     billingMonth: getMonthValue(),
-    invoiceDate: currentMonthRange.periodEnd,
-    paymentTerms: 'net_30',
   });
   const [previewData, setPreviewData] = useState([]);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [invoiceActionKey, setInvoiceActionKey] = useState('');
 
   const clientLookup = useMemo(() => {
     const lookup = new Map();
@@ -555,6 +720,20 @@ const Billing = () => {
     }
   };
 
+  const loadPricing = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/pricing`, {
+        method: 'GET',
+        headers: buildHeaders(),
+        cache: 'no-store',
+      });
+      const payload = await parseResponse(response);
+      setPricingData(extractPricing(payload));
+    } catch {
+      setPricingData({ catalog: [], clientPrices: [] });
+    }
+  };
+
   const fetchShipmentPreviewDetail = async (shipment) => {
     const shipmentId = getShipmentId(shipment);
     if (!shipmentId || !needsShipmentPreviewDetail(shipment)) return shipment;
@@ -571,6 +750,7 @@ const Billing = () => {
         ...shipment,
         ...detail,
         shipment_line_items: getShipmentLineItems(detail).length ? getShipmentLineItems(detail) : getShipmentLineItems(shipment),
+        outbound_boxes: getShipmentOutboundBoxes(detail).length ? getShipmentOutboundBoxes(detail) : getShipmentOutboundBoxes(shipment),
       };
     } catch {
       return shipment;
@@ -621,6 +801,13 @@ const Billing = () => {
               client?.pricing_tier_override ??
               client?.pricingTierOverride ??
               (units >= 5000 ? 'platinum' : units >= 2000 ? 'gold' : 'silver');
+            const estimate = calculateMonthlyInvoiceEstimate({
+              client,
+              clientId,
+              shipments: filtered,
+              tier,
+              pricingData,
+            });
 
             return {
               clientId,
@@ -628,9 +815,9 @@ const Billing = () => {
               tier,
               units,
               shipments: filtered.length,
-              subtotal: 0,
-              vat: 0,
-              total: 0,
+              subtotal: estimate.subtotal,
+              vat: estimate.vat,
+              total: estimate.total,
             };
           } catch {
             return null;
@@ -654,6 +841,7 @@ const Billing = () => {
   useEffect(() => {
     loadInvoices();
     loadClients();
+    loadPricing();
   }, []);
 
   useEffect(() => {
@@ -662,7 +850,7 @@ const Billing = () => {
     } else if (activeTab === 'monthly') {
       setPreviewData([]);
     }
-  }, [activeTab, clients, monthlyForm.billingMonth]);
+  }, [activeTab, clients, monthlyForm.billingMonth, pricingData]);
 
   const displayInvoices = useMemo(
     () =>
@@ -782,8 +970,8 @@ const Billing = () => {
   };
 
   const handleDownloadPdf = async (invoice) => {
-    const invoiceId = getInvoiceLookupCandidates(invoice)[0];
-    const invoiceRef = invoice?.ref || invoice?.reference || invoice?.invoiceNumber || invoiceId;
+    const invoiceId = getInvoiceRouteId(invoice);
+    const invoiceRef = invoice?.ref || invoice?.reference || invoice?.invoiceNumber || invoice?.invoice_number || invoiceId;
 
     try {
       setError('');
@@ -795,20 +983,93 @@ const Billing = () => {
         headers: buildHeaders(),
       });
 
-      if (!response.ok) throw new Error('Failed to download PDF');
+      if (!response.ok) throw new Error('Failed to download invoice document');
 
       const blob = await response.blob();
+      const contentType = response.headers.get('content-type') || '';
+      const dispositionName = getContentDispositionFileName(response.headers.get('content-disposition') || '');
+      const extension = contentType.toLowerCase().includes('pdf') || dispositionName.toLowerCase().endsWith('.pdf') ? 'pdf' : 'html';
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `${invoiceRef || invoiceId}.html`;
+      link.download = dispositionName || `${sanitizeFileName(invoiceRef || invoiceId)}.${extension}`;
       document.body.appendChild(link);
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
-      setMessage('Invoice PDF downloaded.');
+      setMessage('Invoice document downloaded.');
     } catch (downloadError) {
       setError(downloadError.message);
+    }
+  };
+
+  const mergeUpdatedInvoice = (invoicePayload, fallbackInvoice = {}) => {
+    const updatedInvoice = normalizeInvoice({
+      ...(fallbackInvoice.raw || {}),
+      ...fallbackInvoice,
+      ...(invoicePayload || {}),
+    });
+
+    setInvoices((currentInvoices) =>
+      currentInvoices.map((currentInvoice) =>
+        getInvoiceLookupCandidates(currentInvoice).some((key) => getInvoiceLookupCandidates(updatedInvoice).includes(key))
+          ? { ...currentInvoice, ...updatedInvoice }
+          : currentInvoice
+      )
+    );
+
+    setSelectedInvoice((currentSelected) => {
+      if (!currentSelected) return currentSelected;
+      const matchesSelected = getInvoiceLookupCandidates(currentSelected).some((key) => getInvoiceLookupCandidates(updatedInvoice).includes(key));
+      return matchesSelected ? { ...currentSelected, ...updatedInvoice } : currentSelected;
+    });
+  };
+
+  const handleSendInvoice = async (invoice) => {
+    const invoiceId = getInvoiceRouteId(invoice);
+
+    try {
+      setError('');
+      setMessage('');
+      if (!invoiceId) throw new Error('Invoice identifier is missing.');
+      setInvoiceActionKey(`${invoiceId}:send`);
+
+      const response = await fetch(`${API_BASE_URL}/api/invoices/${encodeURIComponent(invoiceId)}/send`, {
+        method: 'POST',
+        headers: buildHeaders(),
+      });
+      const payload = await parseResponse(response);
+      const invoicePayload = payload?.data?.invoice || payload?.invoice || getInvoiceDetailPayload(payload);
+      mergeUpdatedInvoice(invoicePayload, invoice);
+      setMessage('Invoice sent.');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setInvoiceActionKey('');
+    }
+  };
+
+  const handleUpdateInvoiceStatus = async (invoice, status) => {
+    const invoiceId = getInvoiceRouteId(invoice);
+
+    try {
+      setError('');
+      setMessage('');
+      if (!invoiceId) throw new Error('Invoice identifier is missing.');
+      setInvoiceActionKey(`${invoiceId}:${status}`);
+
+      const response = await fetch(`${API_BASE_URL}/api/invoices/${encodeURIComponent(invoiceId)}/status`, {
+        method: 'PATCH',
+        headers: buildHeaders(true),
+        body: JSON.stringify({ status }),
+      });
+      const payload = await parseResponse(response);
+      mergeUpdatedInvoice(getInvoiceDetailPayload(payload), invoice);
+      setMessage(`Invoice marked as ${status}.`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setInvoiceActionKey('');
     }
   };
 
@@ -832,8 +1093,6 @@ const Billing = () => {
               clientId: row.clientId,
               periodStart,
               periodEnd,
-              invoiceDate: monthlyForm.invoiceDate,
-              paymentTerms: monthlyForm.paymentTerms,
             }),
           }).then(parseResponse)
         )
@@ -922,22 +1181,54 @@ const Billing = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {paginatedInvoices.map((invoice) => (
-                      <tr key={invoice.id} className="transition-colors hover:bg-gray-50">
-                        <td className="px-6 py-3.5"><div className="flex items-center gap-2"><FileText size={14} className="text-gray-400" /><span className="text-sm font-medium text-gray-900">{invoice.ref}</span></div></td>
-                        <td className="px-6 py-3.5 text-sm text-gray-700">{invoice.client}</td>
-                        <td className="px-6 py-3.5 text-sm text-gray-500">{formatDate(invoice.date)}</td>
-                        <td className="px-6 py-3.5 text-sm text-gray-500">{formatDate(invoice.due)}</td>
-                        <td className="px-6 py-3.5 text-sm font-medium text-gray-900">{formatCurrency(invoice.total)}</td>
-                        <td className="px-6 py-3.5"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${String(invoice.status).toLowerCase() === 'paid' ? 'bg-green-100 text-green-700' : String(invoice.status).toLowerCase() === 'overdue' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'}`}>{invoice.status}</span></td>
-                        <td className="px-6 py-3.5 text-center">
-                          <div className="flex items-center justify-center gap-1">
-                            <button type="button" onClick={() => handleViewInvoice(invoice)} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900]" title="View Invoice" aria-label={`View ${invoice.ref}`}><Eye size={16} /></button>
-                            <button type="button" onClick={() => handleDownloadPdf(invoice)} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900]" title="Download PDF" aria-label={`Download ${invoice.ref} PDF`}><Download size={16} /></button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {paginatedInvoices.map((invoice) => {
+                      const routeId = getInvoiceRouteId(invoice);
+                      const status = String(invoice.status || '').toLowerCase();
+                      const isActionPending = invoiceActionKey.startsWith(`${routeId}:`);
+                      const canSend = status === 'draft';
+                      const canMarkPaid = !['paid', 'cancelled', 'canceled'].includes(status);
+
+                      return (
+                        <tr key={invoice.id} className="transition-colors hover:bg-gray-50">
+                          <td className="px-6 py-3.5"><div className="flex items-center gap-2"><FileText size={14} className="text-gray-400" /><span className="text-sm font-medium text-gray-900">{invoice.ref}</span></div></td>
+                          <td className="px-6 py-3.5 text-sm text-gray-700">{invoice.client}</td>
+                          <td className="px-6 py-3.5 text-sm text-gray-500">{formatDate(invoice.date)}</td>
+                          <td className="px-6 py-3.5 text-sm text-gray-500">{formatDate(invoice.due)}</td>
+                          <td className="px-6 py-3.5 text-sm font-medium text-gray-900">{formatCurrency(invoice.total)}</td>
+                          <td className="px-6 py-3.5"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${status === 'paid' ? 'bg-green-100 text-green-700' : status === 'overdue' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'}`}>{invoice.status}</span></td>
+                          <td className="px-6 py-3.5 text-center">
+                            <div className="flex items-center justify-center gap-1">
+                              <button type="button" onClick={() => handleViewInvoice(invoice)} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900]" title="View Invoice" aria-label={`View ${invoice.ref}`}><Eye size={16} /></button>
+                              <button type="button" onClick={() => handleDownloadPdf(invoice)} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900]" title="Download invoice document" aria-label={`Download ${invoice.ref} invoice document`}><Download size={16} /></button>
+                              {canSend ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleSendInvoice(invoice)}
+                                  disabled={isActionPending}
+                                  className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900] disabled:cursor-not-allowed disabled:opacity-50"
+                                  title="Send invoice"
+                                  aria-label={`Send ${invoice.ref}`}
+                                >
+                                  <Send size={16} />
+                                </button>
+                              ) : null}
+                              {canMarkPaid ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateInvoiceStatus(invoice, 'paid')}
+                                  disabled={isActionPending}
+                                  className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-green-600 disabled:cursor-not-allowed disabled:opacity-50"
+                                  title="Mark paid"
+                                  aria-label={`Mark ${invoice.ref} paid`}
+                                >
+                                  <CheckCircle size={16} />
+                                </button>
+                              ) : null}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {isLoading ? (
                       <tr>
                         <td colSpan="7" className="px-6 py-10 text-center text-sm text-gray-500">
@@ -997,7 +1288,7 @@ const Billing = () => {
               </div>
 
               <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5">
-                <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                <div className="grid grid-cols-1 gap-5 md:max-w-sm">
                   <label className="block">
                     <span className="mb-2 block text-sm font-medium text-slate-600">Billing Month</span>
                     <select
@@ -1008,27 +1299,6 @@ const Billing = () => {
                       {getRecentMonthOptions().map((value) => {
                         return <option key={value} value={value}>{formatMonthLabel(value)}</option>;
                       })}
-                    </select>
-                  </label>
-                  <label className="block">
-                    <span className="mb-2 block text-sm font-medium text-slate-600">Invoice Date</span>
-                    <input
-                      type="date"
-                      value={monthlyForm.invoiceDate}
-                      onChange={(event) => setMonthlyForm((current) => ({ ...current, invoiceDate: event.target.value }))}
-                      className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-[#ff6900]"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="mb-2 block text-sm font-medium text-slate-600">Payment Terms</span>
-                    <select
-                      value={monthlyForm.paymentTerms}
-                      onChange={(event) => setMonthlyForm((current) => ({ ...current, paymentTerms: event.target.value }))}
-                      className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-[#ff6900]"
-                    >
-                      <option value="net_30">Net 30 Days</option>
-                      <option value="net_15">Net 15 Days</option>
-                      <option value="due_on_receipt">Due on Receipt</option>
                     </select>
                   </label>
                 </div>
@@ -1184,7 +1454,7 @@ const Billing = () => {
                           <tr key={item?.id || index}>
                             <td className="px-4 py-2">{item?.description || item?.serviceType || item?.service_type || item?.name || '-'}</td>
                             <td className="px-4 py-2">{item?.quantity || item?.qty || item?.units || '-'}</td>
-                            <td className="px-4 py-2">{formatCurrency(item?.rate || item?.unitPrice || item?.unit_price || item?.pricePerUnit)}</td>
+                            <td className="px-4 py-2">{formatCurrency(item?.rate || item?.unitRate || item?.unit_rate || item?.unitPrice || item?.unit_price || item?.pricePerUnit)}</td>
                             <td className="px-4 py-2">{formatCurrency(item?.total || item?.amount || item?.lineTotal || item?.line_total)}</td>
                           </tr>
                         ))
