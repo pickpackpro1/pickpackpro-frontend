@@ -3504,13 +3504,19 @@ const isImageFile = (file = {}) => {
 const isFbaBoxLabelFile = (file = {}) => {
   const type = getFileTypeValue(file);
   const name = getFileName(file).toLowerCase();
+  const stablePath = getFileStablePath(file);
   const entityType = getFileEntityType(file);
+  const fileText = `${name} ${stablePath}`;
+  const hasFbaLabelName =
+    /(?:^|[/\s_-])fba[\s_-]*label(?:[\s_.-]|$)/i.test(fileText) ||
+    /(?:^|[/\s_-])fba[\s_-]*shipping[\s_-]*label(?:[\s_.-]|$)/i.test(fileText);
 
   return (
     type.includes('fba_shipping_label') ||
     type.includes('fba-shipping-label') ||
     type.includes('fba_label') ||
     type.includes('shipping_label') ||
+    hasFbaLabelName ||
     name.includes('shipping-label') ||
     name.includes('shipping_label') ||
     (isBoxFileEntityType(entityType) && (type.includes('fba') || type.includes('shipping_label')))
@@ -3621,6 +3627,7 @@ const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) =
     return Boolean(
       (entityId && boxLookupIds.includes(entityId)) ||
         boxLookupIds.some((boxId) => file?.boxId === boxId || file?.box_id === boxId) ||
+        fileMatchesBox(file, box) ||
         directFiles.includes(file) ||
         (isBoxFileEntityType(entityType) && allBoxes.length === 1 && boxIndex === 0)
     );
@@ -3629,6 +3636,7 @@ const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) =
   return (
     allFiles.find((file) => labelFileId && String(getFileRecordId(file) || '').trim() === labelFileId) ||
     allFiles.find((file) => sameBoxFile(file) && isFbaBoxLabelFile(file)) ||
+    (allBoxes.length === 1 && boxIndex === 0 ? allFiles.find((file) => isFbaBoxLabelFile(file)) : null) ||
     null
   );
 };
