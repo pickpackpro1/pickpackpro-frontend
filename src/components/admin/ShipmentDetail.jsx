@@ -7,7 +7,7 @@ import { getSession } from '../../utils/auth';
 import { showToast } from '../../utils/toast';
 import { ArrowDown, ArrowLeft, ChevronDown, RefreshCw, X, CheckCircle2, Plus } from 'lucide-react';
 
-const API_BASE_URL = import.meta.env.DEV ? '' : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 const BUNDLE_SIZE_NOTE_PREFIX = 'Bundle Sizes:';
 const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
 

@@ -27,9 +27,7 @@ const InvoicesClient = lazy(() => import("./components/clientspannel/InvoicesCli
 const ProductsClient = lazy(() => import("./components/clientspannel/ProductsClient"));
 const Account = lazy(() => import("./components/clientspannel/Account"));
 
-const API_BASE_URL = import.meta.env.DEV
-  ? ""
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 
 const getSessionUserId = (session) =>
   session?.userId || session?.id || session?.uuid || session?.user_id || "";

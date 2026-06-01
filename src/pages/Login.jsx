@@ -8,9 +8,7 @@ import {
   saveSession,
 } from "../utils/auth";
 
-const API_BASE_URL = import.meta.env.DEV
-  ? ""
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 
 const hasSupabaseConfig = Boolean(
   import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY

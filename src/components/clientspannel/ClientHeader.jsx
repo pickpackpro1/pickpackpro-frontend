@@ -10,9 +10,7 @@ import {
 import { getSession } from "../../utils/auth";
 import { getClientIdFromSources, getClientTierFromSources } from "../../utils/clientTier";
 
-const API_BASE_URL = import.meta.env.DEV
-  ? ""
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 
 const pageTitles = {
   "/dashboard": "Dashboard",

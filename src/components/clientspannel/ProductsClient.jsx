@@ -21,9 +21,7 @@ import {
   getProductWeightValue,
 } from '../../utils/productFields';
 
-const API_BASE_URL = import.meta.env.DEV
-  ? ''
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();

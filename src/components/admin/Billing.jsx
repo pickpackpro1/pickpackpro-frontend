@@ -5,9 +5,7 @@ import FullPageLoader from '../common/FullPageLoader';
 import { getSession } from '../../utils/auth';
 import { FileText, CheckCircle, AlertCircle, Download, Eye, RefreshCw, Info, ArrowRight, X } from 'lucide-react';
 
-const API_BASE_URL = import.meta.env.DEV
-  ? ''
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 const BILLING_PAGE_SIZE = 20;
 
 const buildHeaders = (includeJson = false) => {

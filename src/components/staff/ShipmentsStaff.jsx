@@ -24,9 +24,7 @@ import FullPageLoader from "../common/FullPageLoader";
 import { getSession } from "../../utils/auth";
 import { showToast } from "../../utils/toast";
 
-const API_BASE_URL = import.meta.env.DEV
-  ? ""
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 const SUPABASE_STORAGE_PUBLIC_BASE_URL = import.meta.env.VITE_SUPABASE_URL
   ? `${String(import.meta.env.VITE_SUPABASE_URL).replace(/\/+$/, "")}/storage/v1/object/public`
   : "";

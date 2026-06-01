@@ -10,7 +10,7 @@ const DRAFT_CACHE_KEY = 'pickpackpro-shipment-drafts';
 const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
 const SHIPMENTS_PER_PAGE = 10;
 const BACKEND_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
-const API_BASE_URL = import.meta.env.DEV ? '' : BACKEND_BASE_URL;
+const API_BASE_URL = '';
 const SUPABASE_STORAGE_PUBLIC_BASE_URL = import.meta.env.VITE_SUPABASE_URL
   ? `${String(import.meta.env.VITE_SUPABASE_URL).replace(/\/+$/, '')}/storage/v1/object/public`
   : '';

@@ -21,9 +21,7 @@ import {
 
 const SETTINGS_ACTIVE_TAB_KEY = 'pickpackpro-settings-active-tab';
 const PENDING_USER_EDIT_KEY = 'pending-settings-user-edit';
-const API_BASE_URL = import.meta.env.DEV
-  ? ''
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 const SETTINGS_TAB_IDS = ['general', 'users', 'pricing', 'notifications'];
 
 const getInitialSettingsTab = () => {

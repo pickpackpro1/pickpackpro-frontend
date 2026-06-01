@@ -1,8 +1,6 @@
 import { getSession } from "./auth";
 
-const API_BASE_URL = import.meta.env.DEV
-  ? ""
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 
 let notificationsEndpointUnavailable = false;
 const READ_NOTIFICATION_CACHE_PREFIX = "pickpackpro-read-notifications";

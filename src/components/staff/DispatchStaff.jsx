@@ -7,9 +7,7 @@ import { getSession } from "../../utils/auth";
 import { useNavigate } from "react-router-dom";
 import { API_MUTATION_EVENT_NAME } from "../../utils/toast";
 
-const API_BASE_URL = import.meta.env.DEV
-  ? ""
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();

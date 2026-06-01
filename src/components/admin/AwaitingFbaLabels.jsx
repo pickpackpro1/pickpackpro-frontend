@@ -4,9 +4,7 @@ import Layout from './adminlayout/Layout';
 import { getSession } from '../../utils/auth';
 import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
 
-const API_BASE_URL = import.meta.env.DEV
-  ? ''
-  : (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app');
+const API_BASE_URL = '';
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app';
 const SAFE_FILE_UPLOAD_BYTES = 3 * 1024 * 1024;
 const IMAGE_UPLOAD_MAX_DIMENSION = 2400;
