@@ -98,6 +98,15 @@ const formatMonthLabel = (monthValue) => {
   return date.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 };
 
+const getRecentMonthOptions = (count = 6) => {
+  const now = new Date();
+
+  return Array.from({ length: count }, (_, offset) => {
+    const date = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  });
+};
+
 const formatCurrency = (value) =>
   new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(value || 0));
 
@@ -525,6 +534,7 @@ const Billing = () => {
         headers: buildHeaders(),
       });
       const payload = await parseResponse(response);
+      console.log('[PickPackPro][Billing][GET /api/invoices]', payload);
       setInvoices(extractInvoices(payload).map(normalizeInvoice));
     } catch (requestError) {
       setError(requestError.message);
@@ -586,6 +596,13 @@ const Billing = () => {
               { method: 'GET', headers: buildHeaders(), cache: 'no-store' }
             );
             const payload = await parseResponse(response);
+            console.log('[PickPackPro][Billing][Monthly GET /api/shipments]', {
+              month: monthValue,
+              clientId,
+              periodStart,
+              periodEnd,
+              payload,
+            });
             const shipmentRows = extractShipments(payload);
             const shipments = await Promise.all(shipmentRows.map(fetchShipmentPreviewDetail));
             const filtered = shipments.filter((shipment) => {
@@ -623,7 +640,14 @@ const Billing = () => {
         })
       );
 
-      setPreviewData(rows.filter(Boolean));
+      const previewRows = rows.filter(Boolean);
+      console.log('[PickPackPro][Billing][Monthly preview rows]', {
+        month: monthValue,
+        periodStart,
+        periodEnd,
+        rows: previewRows,
+      });
+      setPreviewData(previewRows);
     } catch {
       setPreviewData([]);
     }
@@ -983,10 +1007,7 @@ const Billing = () => {
                       onChange={(event) => setMonthlyForm((current) => ({ ...current, billingMonth: event.target.value }))}
                       className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-[#ff6900]"
                     >
-                      {[0, 1, 2, 3, 4, 5].map((offset) => {
-                        const date = new Date();
-                        date.setMonth(date.getMonth() - offset);
-                        const value = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+                      {getRecentMonthOptions().map((value) => {
                         return <option key={value} value={value}>{formatMonthLabel(value)}</option>;
                       })}
                     </select>

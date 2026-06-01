@@ -611,8 +611,7 @@ const getDraftCacheKeys = (...shipments) =>
 const getBundleSizeEntriesFromDraftCache = (shipment = {}, items = []) => {
   const cache = readDraftCache();
   const itemList = Array.isArray(items) ? items : [];
-  const exactDrafts = getDraftCacheKeys(shipment).map((key) => cache[key]).filter(Boolean);
-  const drafts = exactDrafts.length ? exactDrafts : Object.values(cache);
+  const drafts = getDraftCacheKeys(shipment).map((key) => cache[key]).filter(Boolean);
 
   return drafts.flatMap((draft) =>
     (Array.isArray(draft?.productItems) ? draft.productItems : [])
@@ -620,11 +619,14 @@ const getBundleSizeEntriesFromDraftCache = (shipment = {}, items = []) => {
         sku: getLineItemSku(item),
         fnsku: getLineItemFnsku(item),
         bundleSize: Number(getLineItemBundleSize(item) || 0),
+        hasBundling: Boolean(item?.needsBundling || item?.needs_bundling || toArray(item?.services).some(isBundlingServiceValue)),
       }))
       .filter((entry) =>
+        entry.hasBundling &&
         isPositiveBundleSize(entry.bundleSize) &&
           itemList.some((item) => getBundleSizeForLineItem(item, [entry]))
       )
+      .map(({ hasBundling, ...entry }) => entry)
   );
 };
 
@@ -640,6 +642,68 @@ const applyBundleSizesFromNotes = (items = [], shipment = {}) => {
       : item;
   });
 };
+
+const getLineItemDisplayOrder = (item = {}) => {
+  const value = firstPresent(
+    item?.displayOrder,
+    item?.display_order,
+    item?.itemIndex,
+    item?.item_index,
+    item?.lineItemIndex,
+    item?.line_item_index,
+    item?.sortOrder,
+    item?.sort_order,
+    item?.position,
+    item?.sequence,
+    item?.rowNumber,
+    item?.row_number
+  );
+  const order = Number(value);
+  return Number.isFinite(order) ? order : null;
+};
+
+const parseLineItemSequenceOrder = (value = '', prefixes = []) => {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const match = text.match(new RegExp(`^(?:${prefixes.join('|')})[\\s_-]*0*(\\d+)$`, 'i'));
+  if (!match) return null;
+  const order = Number(match[1]);
+  return Number.isFinite(order) ? order : null;
+};
+
+const getLineItemNaturalDisplayOrder = (item = {}) =>
+  parseLineItemSequenceOrder(getLineItemProductName(item), ['product', 'prod', 'pp', 'p']) ??
+  parseLineItemSequenceOrder(getLineItemSku(item), ['sku', 'product', 'prod', 'pp', 'p']) ??
+  parseLineItemSequenceOrder(getLineItemFnsku(item), ['fnsku', 'f', 'sku', 'product', 'prod', 'pp', 'p']);
+
+const sortLineItemsForDisplay = (items = []) =>
+  (Array.isArray(items) ? [...items] : []).sort((firstItem, secondItem) => {
+    const firstNaturalOrder = getLineItemNaturalDisplayOrder(firstItem);
+    const secondNaturalOrder = getLineItemNaturalDisplayOrder(secondItem);
+
+    if (firstNaturalOrder !== null && secondNaturalOrder !== null && firstNaturalOrder !== secondNaturalOrder) {
+      return firstNaturalOrder - secondNaturalOrder;
+    }
+
+    if (firstNaturalOrder !== null && secondNaturalOrder === null) return -1;
+    if (firstNaturalOrder === null && secondNaturalOrder !== null) return 1;
+
+    const firstOrder = getLineItemDisplayOrder(firstItem);
+    const secondOrder = getLineItemDisplayOrder(secondItem);
+
+    if (firstOrder !== null && secondOrder !== null && firstOrder !== secondOrder) {
+      return firstOrder - secondOrder;
+    }
+
+    if (firstOrder !== null && secondOrder === null) return -1;
+    if (firstOrder === null && secondOrder !== null) return 1;
+
+    return String(getLineItemProductName(firstItem) || getLineItemSku(firstItem) || '').localeCompare(
+      String(getLineItemProductName(secondItem) || getLineItemSku(secondItem) || ''),
+      undefined,
+      { numeric: true, sensitivity: 'base' }
+    );
+  });
 
 const buildShipmentNotes = (notes = '', items = []) =>
   [String(notes || '').trim(), buildBundleSizeNote(items)].filter(Boolean).join('\n');
@@ -668,18 +732,41 @@ const getLineItemServiceLabels = (item = {}) => [
   ]),
 ];
 
-const getLineItemRecordId = (item = {}) =>
+const getLineItemEntityId = (item = {}) =>
   firstPresent(
     item?.id,
     item?.uuid,
+    item?.shipmentLineItemId,
+    item?.shipment_line_item_id,
     item?.lineItemId,
     item?.line_item_id,
     item?.shipmentItemId,
     item?.shipment_item_id,
     item?.itemId,
     item?.item_id,
+    item?.lineItem?.id,
+    item?.lineItem?.uuid,
+    item?.line_item?.id,
+    item?.line_item?.uuid,
+    item?.shipmentLineItem?.id,
+    item?.shipmentLineItem?.uuid,
+    item?.shipment_line_item?.id,
+    item?.shipment_line_item?.uuid,
+    item?.shipmentItem?.id,
+    item?.shipmentItem?.uuid,
+    item?.shipment_item?.id,
+    item?.shipment_item?.uuid,
+    item?.item?.id,
+    item?.item?.uuid
+  );
+
+const getLineItemRecordId = (item = {}) =>
+  firstPresent(
+    getLineItemEntityId(item),
     item?.productId,
-    item?.product_id
+    item?.product_id,
+    item?.product?.id,
+    item?.product?.uuid
   );
 
 const serviceTaskKeys = [
@@ -2188,15 +2275,7 @@ const getItemLabelFileName = (item = {}) =>
     item?.label_file?.file_name,
     item?.file?.name,
     item?.file?.fileName,
-    item?.file?.file_name,
-    item?.uploadedFiles?.name,
-    item?.uploadedFiles?.fileName,
-    item?.uploadedFiles?.file_name,
-    item?.uploadedFiles?.original_filename,
-    item?.uploaded_files?.name,
-    item?.uploaded_files?.fileName,
-    item?.uploaded_files?.file_name,
-    item?.uploaded_files?.original_filename
+    item?.file?.file_name
   );
 
 const getItemLabelFileId = (item = {}) =>
@@ -2216,11 +2295,7 @@ const getItemLabelFileId = (item = {}) =>
     item?.fnskuLabelFile?.id,
     item?.fnskuLabelFile?.uuid,
     item?.fnsku_label_file?.id,
-    item?.fnsku_label_file?.uuid,
-    item?.uploadedFiles?.id,
-    item?.uploadedFiles?.uuid,
-    item?.uploaded_files?.id,
-    item?.uploaded_files?.uuid
+    item?.fnsku_label_file?.uuid
   );
 
 const normalizeItemFileMatchValue = (value = '') => {
@@ -2234,7 +2309,35 @@ const rawFileMatchesLineItem = (file = {}, item = {}) => {
   const fileRecordId = String(getFileRecordId(file) || '').trim();
   const fileSku = normalizeItemFileMatchValue(getFileSku(file));
   const fileFnsku = normalizeItemFileMatchValue(getFileFnsku(file));
-  const itemId = String(getLineItemRecordId(item) || '').trim();
+  const itemIds = [
+    getLineItemEntityId(item),
+    item?.id,
+    item?.uuid,
+    item?.shipmentLineItemId,
+    item?.shipment_line_item_id,
+    item?.lineItemId,
+    item?.line_item_id,
+    item?.shipmentItemId,
+    item?.shipment_item_id,
+    item?.itemId,
+    item?.item_id,
+    item?.lineItem?.id,
+    item?.lineItem?.uuid,
+    item?.line_item?.id,
+    item?.line_item?.uuid,
+    item?.shipmentLineItem?.id,
+    item?.shipmentLineItem?.uuid,
+    item?.shipment_line_item?.id,
+    item?.shipment_line_item?.uuid,
+    item?.shipmentItem?.id,
+    item?.shipmentItem?.uuid,
+    item?.shipment_item?.id,
+    item?.shipment_item?.uuid,
+    item?.item?.id,
+    item?.item?.uuid,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
   const itemLabelFileId = String(getItemLabelFileId(item) || '').trim();
   const itemSku = normalizeItemFileMatchValue(getLineItemSku(item));
   const itemFnsku = normalizeItemFileMatchValue(getLineItemFnsku(item));
@@ -2242,7 +2345,7 @@ const rawFileMatchesLineItem = (file = {}, item = {}) => {
 
   return Boolean(
     (itemLabelFileId && fileRecordId && itemLabelFileId === fileRecordId) ||
-      (itemId && entityId && itemId === entityId) ||
+      (entityId && itemIds.includes(entityId)) ||
       (itemSku && fileSku && itemSku === fileSku) ||
       (itemFnsku && fileFnsku && itemFnsku === fileFnsku) ||
       (itemSku && fileName.includes(itemSku)) ||
@@ -2281,8 +2384,6 @@ const getItemDirectLabelFile = (item = {}) => {
     item?.fnsku_label_file,
     item?.labelFile,
     item?.label_file,
-    item?.uploadedFiles,
-    item?.uploaded_files,
     item?.label,
     item?.file,
   ].find(hasFileShape);
@@ -2432,6 +2533,48 @@ const getFileFnsku = (file = {}) =>
     getFileMeta(file)?.fbaFnsku,
     getFileMeta(file)?.fba_fnsku
   );
+
+const getFileProductName = (file = {}) =>
+  firstPresent(
+    file?.productName,
+    file?.product_name,
+    file?.itemName,
+    file?.item_name,
+    getFileMeta(file)?.productName,
+    getFileMeta(file)?.product_name,
+    getFileMeta(file)?.itemName,
+    getFileMeta(file)?.item_name
+  );
+
+const isAutoGeneratedProductName = (value = '') =>
+  /^product[\s_-]*\d+$/i.test(String(value || '').trim());
+
+const getAutoGeneratedProductAlias = (value = '') => {
+  const match = String(value || '').trim().match(/^product[\s_-]*0*(\d+)$/i);
+  return match ? `p${Number(match[1])}` : '';
+};
+
+const getLineItemDisplayProductName = (item = {}, labelFile = null) => {
+  const directProductName = firstPresent(
+    item?.productName,
+    item?.product_name,
+    item?.itemName,
+    item?.item_name,
+    item?.name
+  );
+  const fileProductName = getFileProductName(labelFile || {});
+  const productName = getLineItemProductName(item);
+
+  if (fileProductName && (!directProductName || isAutoGeneratedProductName(productName))) {
+    return fileProductName;
+  }
+
+  if (isAutoGeneratedProductName(productName)) {
+    return getAutoGeneratedProductAlias(productName) || productName;
+  }
+
+  return directProductName || fileProductName || productName;
+};
 
 const getFileStablePath = (file = {}) => {
   const rawPath = firstPresent(
@@ -2906,7 +3049,7 @@ const getFileCreatedTime = (file = {}) => {
 };
 
 const getItemLabelMatchIds = (item = {}) => [
-  getLineItemRecordId(item),
+  getLineItemEntityId(item),
   item?.id,
   item?.uuid,
   item?.shipmentLineItemId,
@@ -2961,7 +3104,7 @@ const isItemLabelCandidateFile = (file = {}, itemList = []) => {
   if (isBoxFileEntityType(entityType) || isFbaBoxLabelFile(file)) return false;
 
   if (isItemFileEntityType(entityType)) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
-  if (getFileItemIndex(file) !== null) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
+  if (getFileItemIndex(file) !== null) return isSupportedItemLabelFile(file) && (isFnskuLabelFile(file) || isAnyItemLabelFile(file));
   if (fileMatchesAnyLineItem(file, itemList)) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
   if (isShipmentLevelItemLabelFile(file)) return true;
 
@@ -3079,6 +3222,38 @@ const getLineItemFiles = (item = {}, files = [], itemCount = 0, index = 0) => {
   if (itemCount === 1) return mergeFileLists(fileList);
   if (fileList.length === itemCount && fileList[index]) return [fileList[index]];
   return [];
+};
+
+const getLineItemUploadMatchKey = (item = {}, index = 0) =>
+  String(getLineItemEntityId(item) || getLineItemSku(item) || getLineItemFnsku(item) || `index:${index}`);
+
+const findCreatedLineItemForUpload = (sourceItem = {}, fallbackIndex = 0, createdLineItems = [], usedKeys = new Set()) => {
+  const sourceSku = normalizeItemFileMatchValue(getLineItemSku(sourceItem));
+  const sourceFnsku = normalizeItemFileMatchValue(getLineItemFnsku(sourceItem));
+  const sourceProduct = normalizeItemFileMatchValue(getLineItemProductName(sourceItem));
+  const sourceOrder = getLineItemDisplayOrder(sourceItem);
+  const candidates = toArray(createdLineItems).map((lineItem, index) => ({ lineItem, index }));
+  const isUnused = ({ lineItem, index }) => !usedKeys.has(getLineItemUploadMatchKey(lineItem, index));
+  const useMatch = (match) => {
+    const resolvedMatch = match?.lineItem || {};
+    if (match) usedKeys.add(getLineItemUploadMatchKey(resolvedMatch, match.index));
+    return resolvedMatch;
+  };
+  const findBy = (predicate) => candidates.find((candidate) => isUnused(candidate) && predicate(candidate.lineItem, candidate.index));
+
+  return useMatch(
+    findBy((lineItem) => {
+      const candidateSku = normalizeItemFileMatchValue(getLineItemSku(lineItem));
+      const candidateFnsku = normalizeItemFileMatchValue(getLineItemFnsku(lineItem));
+      return sourceSku && sourceFnsku && sourceSku === candidateSku && sourceFnsku === candidateFnsku;
+    }) ||
+      findBy((lineItem) => sourceSku && sourceSku === normalizeItemFileMatchValue(getLineItemSku(lineItem))) ||
+      findBy((lineItem) => sourceFnsku && sourceFnsku === normalizeItemFileMatchValue(getLineItemFnsku(lineItem))) ||
+      findBy((lineItem) => sourceProduct && sourceProduct === normalizeItemFileMatchValue(getLineItemProductName(lineItem))) ||
+      findBy((lineItem) => sourceOrder !== null && sourceOrder === getLineItemDisplayOrder(lineItem)) ||
+      candidates.find((candidate) => candidate.index === fallbackIndex && isUnused(candidate)) ||
+      candidates.find(isUnused)
+  );
 };
 
 const getShipmentUnits = (shipment = {}) => {
@@ -3227,12 +3402,24 @@ const buildShipmentItems = (items) => {
 };
 
 const extractCreatedShipmentId = (payload) =>
-  payload?.shipment?.id ||
-  payload?.data?.shipment?.id ||
-  payload?.data?.id ||
-  payload?.id ||
-  payload?.uuid ||
-  '';
+  firstPresent(
+    payload?.shipment?.id,
+    payload?.shipment?.uuid,
+    payload?.shipment?.shipmentId,
+    payload?.shipment?.shipment_id,
+    payload?.data?.shipment?.id,
+    payload?.data?.shipment?.uuid,
+    payload?.data?.shipment?.shipmentId,
+    payload?.data?.shipment?.shipment_id,
+    payload?.data?.id,
+    payload?.data?.uuid,
+    payload?.data?.shipmentId,
+    payload?.data?.shipment_id,
+    payload?.id,
+    payload?.uuid,
+    payload?.shipmentId,
+    payload?.shipment_id
+  );
 
 const extractCreatedShipmentStatus = (payload) =>
   payload?.shipment?.status ||
@@ -3504,7 +3691,7 @@ const Shipments = () => {
     const isCurrentRequest = () => quickViewRequestIdRef.current === requestId;
     const previewShipment = normalizeShipment(shipment || {});
     setQuickViewShipment(previewShipment);
-    setQuickViewItems(applyBundleSizesFromNotes(getShipmentLineItems(shipment), shipment));
+    setQuickViewItems(sortLineItemsForDisplay(applyBundleSizesFromNotes(getShipmentLineItems(shipment), shipment)));
     setQuickViewServices([]);
     setQuickViewDiscrepancies([]);
     setQuickViewBoxes([]);
@@ -3548,9 +3735,11 @@ const Shipments = () => {
       }
 
       const detailItems = getShipmentLineItems(loadedDetail);
-      const itemsForView = applyBundleSizesFromNotes(
-        detailItems.length ? detailItems : getShipmentLineItems(shipment),
-        { ...shipment, ...loadedDetail }
+      const itemsForView = sortLineItemsForDisplay(
+        applyBundleSizesFromNotes(
+          detailItems.length ? detailItems : getShipmentLineItems(shipment),
+          { ...shipment, ...loadedDetail }
+        )
       );
       const resolvedShipment = normalizeShipment({ ...shipment, ...loadedDetail });
       const resolvedShipmentId = getShipmentId(loadedDetail) || getShipmentId(shipment) || lookupCandidates[0];
@@ -3702,8 +3891,58 @@ const Shipments = () => {
         result.status === 'fulfilled' ? result.value : []
       );
       const inlineItemLabelFiles = itemsForView.flatMap((item) => getItemInlineLabelFiles(item));
+      const mergedQuickViewFiles = mergeFileLists(initialFiles, extraFiles, fbaLabelFiles, itemLabelFiles, inlineItemLabelFiles);
+      const visibleQuickViewShipmentFiles = getVisibleShipmentFiles(
+        mergedQuickViewFiles,
+        resolvedShipment,
+        boxesForView,
+        itemsForView
+      );
+      const itemLabelAssignmentsForLog = getItemLabelFileAssignments(
+        itemsForView,
+        mergedQuickViewFiles,
+        visibleQuickViewShipmentFiles
+      );
 
       if (!isCurrentRequest()) return;
+      console.log('[PickPackPro][Admin View Popup]', {
+        shipmentId: resolvedShipmentId,
+        detail: loadedDetail,
+        items: itemsForView.map((item, index) => ({
+          index,
+          product: getLineItemDisplayProductName(item, itemLabelAssignmentsForLog[index]),
+          sku: getLineItemSku(item),
+          fnsku: getLineItemFnsku(item),
+          expectedQty: getLineItemExpectedQty(item),
+          assignedFnskuLabelFile: itemLabelAssignmentsForLog[index]
+            ? {
+                name: getFileDisplayName(itemLabelAssignmentsForLog[index]),
+                type: getFileTypeValue(itemLabelAssignmentsForLog[index]),
+                entityType: getFileEntityType(itemLabelAssignmentsForLog[index]),
+                entityId: getFileEntityId(itemLabelAssignmentsForLog[index]),
+                sku: getFileSku(itemLabelAssignmentsForLog[index]),
+                fnsku: getFileFnsku(itemLabelAssignmentsForLog[index]),
+                itemIndex: getFileItemIndex(itemLabelAssignmentsForLog[index]),
+                lookupSource: itemLabelAssignmentsForLog[index]?.lookupSource || itemLabelAssignmentsForLog[index]?.lookup_source,
+                url: getFileUrl(itemLabelAssignmentsForLog[index]),
+              }
+            : null,
+        })),
+        files: mergedQuickViewFiles.map((file, index) => ({
+          index,
+          name: getFileDisplayName(file),
+          type: getFileTypeValue(file),
+          entityType: getFileEntityType(file),
+          entityId: getFileEntityId(file),
+          sku: getFileSku(file),
+          fnsku: getFileFnsku(file),
+          itemIndex: getFileItemIndex(file),
+          lookupSource: file?.lookupSource || file?.lookup_source,
+          isFnskuLabel: isFnskuLabelFile(file),
+          isItemLabel: isAnyItemLabelFile(file),
+          url: getFileUrl(file),
+        })),
+      });
       setQuickViewShipment(resolvedShipment);
       setQuickViewItems(itemsForView);
       setQuickViewServices(
@@ -3715,7 +3954,7 @@ const Shipments = () => {
       );
       setQuickViewDiscrepancies(associatedResults[1].status === 'fulfilled' ? associatedResults[1].value : []);
       setQuickViewBoxes(boxesForView);
-      setQuickViewFiles(mergeFileLists(initialFiles, extraFiles, fbaLabelFiles, itemLabelFiles, inlineItemLabelFiles));
+      setQuickViewFiles(mergedQuickViewFiles);
     } catch (requestError) {
       if (isCurrentRequest()) {
         setQuickViewError(`${requestError.message || 'Failed to load shipment detail.'} Showing table data.`);
@@ -3997,8 +4236,8 @@ const Shipments = () => {
       const items = buildShipmentItems(createItems);
       const notes = buildShipmentNotes(createForm.notes, items);
       const labelFileInputs = createItems
-        .filter((item) => item.sku || item.productName || item.expectedQty || item.fnskuLabel || item.services?.length)
         .map((item, index) => ({ item, index, file: item.file }))
+        .filter(({ item }) => item.sku || item.productName || item.expectedQty || item.fnskuLabel || item.services?.length)
         .filter(({ file }) => file && typeof file === 'object' && file.name);
       const response = await fetch(`${API_BASE_URL}/api/shipments`, {
         method: 'POST',
@@ -4060,26 +4299,23 @@ const Shipments = () => {
         }
 
         if (labelFileInputs.length) {
+          const usedCreatedLineItemKeys = new Set();
           const uploadResults = await Promise.allSettled(
-            labelFileInputs.map(async ({ file, index }) => {
-              const savedLineItem = createdLineItems[index] || {};
-              const lineItemId =
-                savedLineItem?.id ||
-                savedLineItem?.uuid ||
-                savedLineItem?.lineItemId ||
-                savedLineItem?.line_item_id ||
-                savedLineItem?.shipmentItemId ||
-                savedLineItem?.shipment_item_id ||
-                '';
+            labelFileInputs.map(async ({ file, item, index }) => {
+              const savedLineItem = findCreatedLineItemForUpload(item, index, createdLineItems, usedCreatedLineItemKeys);
+              const lineItemId = getLineItemEntityId(savedLineItem);
               const formData = new FormData();
               formData.append('file', file, file.name);
               formData.append('entityType', lineItemId ? 'item' : 'shipment');
               formData.append('entityId', lineItemId || createdShipmentId);
               formData.append('fileType', 'fnsku_label');
-              const sku = getLineItemSku(savedLineItem) || getLineItemSku(item) || item.sku || '';
-              const fnsku = getLineItemFnsku(savedLineItem) || getLineItemFnsku(item) || item.fnskuLabel || '';
+              const sku = getLineItemSku(item) || item.sku || getLineItemSku(savedLineItem) || '';
+              const fnsku = getLineItemFnsku(item) || item.fnskuLabel || getLineItemFnsku(savedLineItem) || '';
+              const productName = getLineItemProductName(item) || item.productName || getLineItemProductName(savedLineItem) || '';
               formData.append('sku', sku);
               formData.append('fnsku', fnsku);
+              formData.append('productName', productName);
+              formData.append('product_name', productName);
               formData.append('itemIndex', String(index));
               formData.append('item_index', String(index));
               formData.append('lineItemIndex', String(index));
@@ -4087,24 +4323,29 @@ const Shipments = () => {
               if (lineItemId) {
                 formData.append('lineItemId', lineItemId);
                 formData.append('line_item_id', lineItemId);
+                formData.append('shipmentLineItemId', lineItemId);
+                formData.append('shipment_line_item_id', lineItemId);
                 formData.append('shipmentItemId', lineItemId);
                 formData.append('shipment_item_id', lineItemId);
               }
-              formData.append(
-                'metadata',
-                JSON.stringify({
-                  itemIndex: index,
-                  item_index: index,
-                  lineItemIndex: index,
-                  line_item_index: index,
-                  lineItemId: lineItemId,
-                  line_item_id: lineItemId,
-                  shipmentItemId: lineItemId,
-                  shipment_item_id: lineItemId,
-                  sku,
-                  fnsku,
-                })
-              );
+              const metadata = {
+                itemIndex: index,
+                item_index: index,
+                lineItemIndex: index,
+                line_item_index: index,
+                lineItemId: lineItemId,
+                line_item_id: lineItemId,
+                shipmentLineItemId: lineItemId,
+                shipment_line_item_id: lineItemId,
+                shipmentItemId: lineItemId,
+                shipment_item_id: lineItemId,
+                sku,
+                fnsku,
+                productName,
+                product_name: productName,
+              };
+              formData.append('metadata', JSON.stringify(metadata));
+              formData.append('meta', JSON.stringify(metadata));
 
               const uploadResponse = await fetch(`${API_BASE_URL}/api/files`, {
                 method: 'POST',
@@ -4952,12 +5193,13 @@ const Shipments = () => {
                                 const labelFile = itemLabelFileAssignments[index] || (itemCount === 1 ? findLineItemLabelFile(item, quickViewFiles, itemCount, index) : null);
                                 const labelFileUrl = labelFile ? resolveFileUrl(getFileUrl(labelFile)) : '';
                                 const labelFileIsImage = Boolean(labelFile && labelFileUrl && isImageFile(labelFile));
+                                const itemDisplayProductName = getLineItemDisplayProductName(item, labelFile);
                                 const itemBoxes = getBoxesForItem(item);
 
                                 return (
                                   <div key={item?.id || item?.uuid || `${getLineItemSku(item)}-${index}`} className="rounded-lg border border-gray-200 bg-gray-50 p-4">
                                     <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                                      <p><span className="text-xs uppercase text-gray-500">Product</span><br /><span className="font-medium text-gray-900">{getLineItemProductName(item) || '-'}</span></p>
+                                      <p><span className="text-xs uppercase text-gray-500">Product</span><br /><span className="font-medium text-gray-900">{itemDisplayProductName || '-'}</span></p>
                                       <p><span className="text-xs uppercase text-gray-500">SKU</span><br /><span className="font-medium text-gray-900">{getLineItemSku(item) || '-'}</span></p>
                                       <p><span className="text-xs uppercase text-gray-500">FNSKU</span><br /><span className="font-medium text-gray-900">{getLineItemFnsku(item) || '-'}</span></p>
                                       <p><span className="text-xs uppercase text-gray-500">Expected Qty</span><br /><span className="font-medium text-gray-900">{getLineItemExpectedQty(item) || 0}</span></p>

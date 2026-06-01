@@ -282,8 +282,11 @@ const getShipmentNoteText = (shipment = {}) =>
       stripNoteLine(
         stripNoteLine(
           stripNoteLine(
-            stripNoteLine(getRawShipmentNotes(shipment), 'QC inspection requested'),
-            BUNDLE_SIZE_NOTE_PREFIX
+            stripNoteLine(
+              stripNoteLine(getRawShipmentNotes(shipment), 'QC inspection requested'),
+              BUNDLE_SIZE_NOTE_PREFIX
+            ),
+            'Product Names:'
           ),
           'Tracking:'
         ),
@@ -825,7 +828,19 @@ const getBoxItemLineItemId = (item = {}) =>
   );
 
 const getBoxItemSku = (item = {}) => {
-  if (typeof item === 'string') return item.trim();
+  if (typeof item === 'string') {
+    const value = item.trim();
+    const parenthesizedSku = value.match(/\(([^)]+)\)/);
+    if (parenthesizedSku && /\b(units?|qty|quantity)\b/i.test(value)) return parenthesizedSku[1].trim();
+
+    const trailingQuantity = value.match(/^(.+?)\s*(?:x|:|\*)\s*\d+(?:\.\d+)?\s*(?:units?)?$/i);
+    if (trailingQuantity) return trailingQuantity[1].trim();
+
+    const leadingQuantity = value.match(/^\d+(?:\.\d+)?\s*(?:units?|qty|quantity)\s*(?:of|for)?\s*(.+)$/i);
+    if (leadingQuantity) return leadingQuantity[1].trim();
+
+    return value;
+  }
 
   return firstPresent(
     item?.sku,
@@ -855,7 +870,10 @@ const getBoxItemQuantity = (item = {}) => {
   if (typeof item === 'number') return Number.isFinite(item) ? item : '';
   if (typeof item === 'string') {
     const quantityMatch = item.match(/(?:qty|quantity|units?)?\s*[:x-]\s*(\d+(?:\.\d+)?)/i);
-    return quantityMatch ? quantityMatch[1] : '';
+    if (quantityMatch) return quantityMatch[1];
+
+    const leadingQuantityMatch = item.match(/^(\d+(?:\.\d+)?)\s*(?:units?|qty|quantity)\b/i);
+    return leadingQuantityMatch ? leadingQuantityMatch[1] : '';
   }
 
   return firstPresent(
@@ -1003,11 +1021,11 @@ const normalizeBoxAllocationItems = (items = []) =>
     })
     .filter((item) => getBoxItemSku(item) && getBoxItemQuantity(item) !== '');
 
-const getCachedBoxAllocationItems = (box = {}) => {
+const getCachedBoxAllocationItems = (box = {}, lineItemList = []) => {
   const cache = readBoxAllocationCache();
   const keys = getBoxAllocationCacheKeys(box);
   const cachedItems = keys.map((key) => cache[key]).find((items) => toArray(items).length);
-  return normalizeBoxAllocationItems(cachedItems || []);
+  return getShipmentScopedBoxItems(normalizeBoxAllocationItems(cachedItems || []), lineItemList);
 };
 
 const saveCachedBoxAllocationItems = (box = {}, items = [], extraKeys = []) => {
@@ -1044,8 +1062,8 @@ const getBoxSkuCollectionValue = (...values) => {
   return [...new Set(skus)].join(', ');
 };
 
-const getBoxUnits = (box = {}) => {
-  const items = getBoxItems(box);
+const getBoxUnits = (box = {}, lineItemList = []) => {
+  const items = getShipmentScopedBoxItems(getBoxItems(box), lineItemList);
   const itemQuantities = items
     .map((item) => getBoxItemQuantity(item))
     .filter((quantity) => quantity !== '' && quantity !== undefined && quantity !== null);
@@ -1110,7 +1128,7 @@ const isSameLineItemForAllocation = (left = {}, right = {}) => {
 
   return Boolean(
     leftIds.some((leftId) => rightIds.includes(leftId)) ||
-      (leftSku && rightSku && leftSku === rightSku)
+      (leftSku && rightSku && skuValuesMatch(leftSku, rightSku))
   );
 };
 
@@ -1122,12 +1140,61 @@ const isSameBoxLineItem = (boxItem = {}, lineItem = {}) => {
 
   return Boolean(
     (boxLineItemId && lineItemIds.includes(boxLineItemId)) ||
-      (lineItemSku && boxItemSku && lineItemSku === boxItemSku)
+      (lineItemSku && boxItemSku && skuValuesMatch(lineItemSku, boxItemSku))
   );
 };
 
 const normalizeAllocationSku = (value = '') =>
-  String(value || '').trim().toLowerCase();
+  normalizeSkuMatchValue(value);
+
+const normalizeSkuMatchValue = (value = '') =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+
+const skuValuesMatch = (left = '', right = '') => {
+  const normalizedLeft = normalizeSkuMatchValue(left);
+  const normalizedRight = normalizeSkuMatchValue(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+};
+
+const findLineItemForSkuValue = (skuValue = '', lineItemList = []) =>
+  toArray(lineItemList).find((lineItem) => skuValuesMatch(getItemSku(lineItem), skuValue));
+
+const getShipmentScopedSkuParts = (value = '', lineItemList = []) => {
+  const lineItems = toArray(lineItemList);
+  if (!lineItems.length) return [];
+
+  return String(value || '')
+    .split(/[,|;]/)
+    .map((part) => {
+      const candidate = part.trim();
+      if (!candidate) return null;
+
+      const sku = getBoxItemSku(candidate);
+      const matchedLineItem = findLineItemForSkuValue(sku, lineItems);
+      if (!matchedLineItem) return null;
+
+      return {
+        sku: getItemSku(matchedLineItem),
+        quantity: getBoxItemQuantity(candidate),
+      };
+    })
+    .filter(Boolean);
+};
+
+const getShipmentScopedSkuCollectionValue = (value = '', lineItemList = []) => {
+  const lineItems = toArray(lineItemList);
+  if (!lineItems.length) return value;
+
+  return getShipmentScopedSkuParts(value, lineItems)
+    .map((part) =>
+      part.quantity !== '' ? `${part.sku}: ${formatQuantityValue(part.quantity)}` : part.sku
+    )
+    .filter(Boolean)
+    .join(', ');
+};
 
 const getBoxDisplaySkuValues = (box = {}) => {
   const values = [
@@ -1164,7 +1231,7 @@ const getBoxDisplaySkuValues = (box = {}) => {
 
 const getAllocatedQuantityForLineItem = (lineItem = {}, boxList = [], lineItemList = []) =>
   toArray(boxList).reduce((sum, box, boxIndex) => {
-    const boxItems = getBoxItems(box);
+    const boxItems = getShipmentScopedBoxItems(getBoxItems(box), lineItemList);
     const lineItemSku = normalizeAllocationSku(getItemSku(lineItem));
     const boxDisplaySkus = getBoxDisplaySkuValues(box);
     const boxMatchesDisplayedSku = Boolean(lineItemSku && boxDisplaySkus.includes(lineItemSku));
@@ -1173,7 +1240,7 @@ const getAllocatedQuantityForLineItem = (lineItem = {}, boxList = [], lineItemLi
       ? getItemExpectedQty(fallbackLineItem)
       : '';
     const displayedSkuQuantity = boxMatchesDisplayedSku
-      ? firstPresent(getBoxUnits(box), fallbackQuantity, getItemExpectedQty(lineItem), 0)
+      ? firstPresent(getBoxUnits(box, lineItemList), fallbackQuantity, getItemExpectedQty(lineItem), 0)
       : '';
 
     if (boxItems.length) {
@@ -1186,7 +1253,7 @@ const getAllocatedQuantityForLineItem = (lineItem = {}, boxList = [], lineItemLi
       if (itemQuantity > 0) return sum + itemQuantity;
 
       if (fallbackLineItem && isSameLineItemForAllocation(fallbackLineItem, lineItem)) {
-        const boxQuantity = Number(firstPresent(getBoxUnits(box), fallbackQuantity, 0));
+        const boxQuantity = Number(firstPresent(getBoxUnits(box, lineItemList), fallbackQuantity, 0));
         return sum + (Number.isFinite(boxQuantity) ? boxQuantity : 0);
       }
 
@@ -1204,7 +1271,7 @@ const getAllocatedQuantityForLineItem = (lineItem = {}, boxList = [], lineItemLi
     }
 
     if (fallbackLineItem && isSameLineItemForAllocation(fallbackLineItem, lineItem)) {
-      const boxQuantity = Number(firstPresent(getBoxUnits(box), fallbackQuantity, 0));
+      const boxQuantity = Number(firstPresent(getBoxUnits(box, lineItemList), fallbackQuantity, 0));
       return sum + (Number.isFinite(boxQuantity) ? boxQuantity : 0);
     }
 
@@ -1229,7 +1296,7 @@ const findLineItemForBoxItem = (boxItem = {}, lineItemList = []) => {
 
     return Boolean(
       (boxItemId && lineItemIds.includes(boxItemId)) ||
-        (boxItemSku && lineItemSku && boxItemSku === lineItemSku)
+        (boxItemSku && lineItemSku && skuValuesMatch(boxItemSku, lineItemSku))
     );
   });
 };
@@ -1237,18 +1304,26 @@ const findLineItemForBoxItem = (boxItem = {}, lineItemList = []) => {
 const hydrateBoxItemWithLineItem = (boxItem = {}, lineItemList = []) => {
   const matchedLineItem = findLineItemForBoxItem(boxItem, lineItemList);
   const matchedLineItemId = matchedLineItem ? firstPresent(getBoxAllocationLineItemId(matchedLineItem), getShipmentLineItemId(matchedLineItem), getLineItemId(matchedLineItem)) : '';
-  const sku = getBoxItemSku(boxItem) || getItemSku(matchedLineItem || {});
+  const rawSku = getBoxItemSku(boxItem);
+  const matchedSku = getItemSku(matchedLineItem || {});
+  const sku = matchedSku || rawSku;
   const quantity = getBoxItemQuantity(boxItem);
 
   return {
     ...boxItem,
+    ...(rawSku && matchedSku && rawSku !== matchedSku
+      ? {
+          sourceSku: rawSku,
+          source_sku: rawSku,
+        }
+      : {}),
     ...(matchedLineItemId && !getBoxItemLineItemId(boxItem)
       ? {
           shipmentItemId: matchedLineItemId,
           shipment_item_id: matchedLineItemId,
         }
       : {}),
-    ...(sku && !getBoxItemSku(boxItem)
+    ...(sku
       ? {
           sku,
           sellerSku: sku,
@@ -1265,6 +1340,14 @@ const hydrateBoxItemWithLineItem = (boxItem = {}, lineItemList = []) => {
 
 const hydrateBoxItemsWithLineItems = (boxItems = [], lineItemList = []) =>
   toArray(boxItems).map((boxItem) => hydrateBoxItemWithLineItem(boxItem, lineItemList));
+
+const getShipmentScopedBoxItems = (boxItems = [], lineItemList = []) => {
+  const lineItems = toArray(lineItemList);
+  const hydratedItems = hydrateBoxItemsWithLineItems(boxItems, lineItems);
+
+  if (!lineItems.length) return hydratedItems;
+  return hydratedItems.filter((boxItem) => findLineItemForBoxItem(boxItem, lineItems));
+};
 
 const getPositiveQuantity = (value) => {
   const quantity = Number(value || 0);
@@ -1355,6 +1438,8 @@ const buildBoxItemAllocationPayloads = (shipmentItemId = '', quantity = 0) => {
   return [
     { shipmentItemId: normalizedShipmentItemId, quantity: normalizedQuantity },
     { shipment_item_id: normalizedShipmentItemId, quantity: normalizedQuantity },
+    { shipmentLineItemId: normalizedShipmentItemId, quantity: normalizedQuantity },
+    { shipment_line_item_id: normalizedShipmentItemId, quantity: normalizedQuantity },
     { lineItemId: normalizedShipmentItemId, quantity: normalizedQuantity },
     { line_item_id: normalizedShipmentItemId, quantity: normalizedQuantity },
   ];
@@ -1449,7 +1534,7 @@ const enrichBoxWithItems = async (box = {}, lineItemList = []) => {
     (getBoxItemLineItemId(item) || getBoxItemSku(item)) && getBoxItemQuantity(item) !== ''
   );
   const boxItems = await fetchBoxItemsByBoxId(box);
-  const hydratedBoxItems = hydrateBoxItemsWithLineItems(boxItems, lineItemList);
+  const hydratedBoxItems = getShipmentScopedBoxItems(boxItems, lineItemList);
 
   if (hydratedBoxItems.length) {
     console.log('[PickPackPro][Box Items merged]', {
@@ -1470,7 +1555,7 @@ const enrichBoxWithItems = async (box = {}, lineItemList = []) => {
     };
   }
 
-  const cachedItems = hydrateBoxItemsWithLineItems(getCachedBoxAllocationItems(box), lineItemList);
+  const cachedItems = getCachedBoxAllocationItems(box, lineItemList);
   if (cachedItems.length) {
     return {
       ...box,
@@ -1484,7 +1569,8 @@ const enrichBoxWithItems = async (box = {}, lineItemList = []) => {
   }
 
   if (hasUsableItems) {
-    const hydratedExistingItems = hydrateBoxItemsWithLineItems(existingItems, lineItemList);
+    const hydratedExistingItems = getShipmentScopedBoxItems(existingItems, lineItemList);
+    if (!hydratedExistingItems.length) return box;
 
     return {
       ...box,
@@ -1509,8 +1595,9 @@ const enrichBoxesWithItems = async (boxList = [], lineItemList = []) => {
   );
 };
 
-const getBoxSkuValue = (box = {}, files = []) => {
-  const items = getBoxItems(box);
+const getBoxSkuValue = (box = {}, files = [], lineItemList = []) => {
+  const lineItems = toArray(lineItemList);
+  const items = getShipmentScopedBoxItems(getBoxItems(box), lineItems);
   const itemSkus = items
     .map((item) => {
       const sku = String(getBoxItemSku(item) || '').trim();
@@ -1539,9 +1626,13 @@ const getBoxSkuValue = (box = {}, files = []) => {
     box?.meta?.sku_list
   );
 
-  if (skuCollection) return skuCollection;
+  const scopedSkuCollection = lineItems.length
+    ? getShipmentScopedSkuCollectionValue(skuCollection, lineItems)
+    : skuCollection;
 
-  return firstPresent(
+  if (scopedSkuCollection) return scopedSkuCollection;
+
+  const directSku = firstPresent(
     box?.sku,
     box?.sellerSku,
     box?.seller_sku,
@@ -1558,10 +1649,13 @@ const getBoxSkuValue = (box = {}, files = []) => {
     getBoxItemSku(items[0]),
     getFileSku(getBoxFbaLabelFile(box, files))
   );
+
+  return lineItems.length ? getShipmentScopedSkuCollectionValue(directSku, lineItems) : directSku;
 };
 
-const getBoxSkuSummary = (box = {}, files = []) => {
-  const itemSummaries = getBoxItems(box)
+const getBoxSkuSummary = (box = {}, files = [], lineItemList = []) => {
+  const lineItems = toArray(lineItemList);
+  const itemSummaries = getShipmentScopedBoxItems(getBoxItems(box), lineItems)
     .map((item) => {
       const sku = getBoxItemSku(item);
       const quantity = getBoxItemQuantity(item);
@@ -1575,12 +1669,12 @@ const getBoxSkuSummary = (box = {}, files = []) => {
 
   if (itemSummaries.length) return itemSummaries.join(', ');
 
-  const sku = getBoxSkuValue(box, files);
-  const units = getBoxUnits(box);
+  const sku = getBoxSkuValue(box, files, lineItems);
+  const units = getBoxUnits(box, lineItems);
 
-  if (sku && units !== '') return `${formatQuantityValue(units)} UNITS (${sku})`;
+  if (sku && units !== '' && !String(sku).includes(':')) return `${formatQuantityValue(units)} UNITS (${sku})`;
   if (sku) return sku;
-  if (units) return `${formatQuantityValue(units)} UNITS`;
+  if (units && !lineItems.length) return `${formatQuantityValue(units)} UNITS`;
   return '';
 };
 
@@ -3685,6 +3779,7 @@ const ShipmentDetail = () => {
       const response = createResult.response;
       const newBox = boxPayload?.box || boxPayload?.data?.box || boxPayload?.data || boxPayload;
       const newBoxId = getBoxRecordId(newBox) || newBox?.id;
+      const allocationIncludedInCreate = !isPallet && allocationPayloadItems.length && createResult.request !== payload;
 
       if (!isPallet && allocationPayloadItems.length) {
         saveCachedBoxAllocationItems(
@@ -3712,7 +3807,13 @@ const ShipmentDetail = () => {
         })),
       });
 
-      if (!isPallet && newBoxId && allocations.length) {
+      if (allocationIncludedInCreate) {
+        console.log('[PickPackPro][Box Item POST skipped]', {
+          boxId: newBoxId,
+          reason: 'Allocation items were included in the create box request.',
+          allocationPayloadItems,
+        });
+      } else if (!isPallet && newBoxId && allocations.length) {
         let boxForAllocation = await enrichBoxWithItems(newBox, lineItems);
 
         for (const allocation of allocations) {
@@ -4392,11 +4493,11 @@ const ShipmentDetail = () => {
                       const fallbackLineItem = lineItems.length === 1
                         ? lineItems[0]
                         : lineItems[Math.min(index, Math.max(lineItems.length - 1, 0))];
-                      const boxUnits = firstPresent(getBoxUnits(box), getItemExpectedQty(fallbackLineItem || {}), '');
+                      const boxUnits = firstPresent(getBoxUnits(box, lineItems), getItemExpectedQty(fallbackLineItem || {}), '');
                       const boxStatus = getBoxDisplayStatus(box, currentStatus);
-                      const boxSku = firstPresent(getBoxSkuValue(box, files), getItemSku(fallbackLineItem || {}));
+                      const boxSku = firstPresent(getBoxSkuValue(box, files, lineItems), getItemSku(fallbackLineItem || {}));
                       const skuSummary = firstPresent(
-                        getBoxSkuSummary(box, files),
+                        getBoxSkuSummary(box, files, lineItems),
                         boxSku && boxUnits !== '' ? `${formatQuantityValue(boxUnits)} UNITS (${boxSku})` : boxSku
                       );
                       const shipmentDispatchedOrCompleted = ['dispatched', 'completed', 'complete'].includes(currentStatus);
@@ -4510,9 +4611,9 @@ const ShipmentDetail = () => {
                     <p className="whitespace-pre-line text-[15px] leading-7 text-[#132347]">
                       {getShipmentNoteText(shipment) || 'No shipment notes added.'}
                     </p>
-                    <div className="mt-5 border-t border-[#e8edf5] pt-4 text-[12px]">
+                    {/* <div className="mt-5 border-t border-[#e8edf5] pt-4 text-[12px]">
                       <span className="text-[#9aa8bd]">Last edited: {shipment?.updated_at || shipment?.updatedAt || '2 hours ago'} </span>
-                    </div>
+                    </div> */}
                   </div>
                 </div>
 
@@ -4948,6 +5049,7 @@ const ShipmentDetail = () => {
                 <button
                   type="button"
                   disabled={isCreatingBox}
+                  aria-busy={isCreatingBox}
                   onClick={async () => {
                     const created = await handleCreateBox(boxType === 'pallet');
                     if (created) {
@@ -4960,7 +5062,7 @@ const ShipmentDetail = () => {
                   {isCreatingBox ? (
                     <>
                       <RefreshCw size={14} className="animate-spin" />
-                      Adding...
+                      Add Box...
                     </>
                   ) : (
                     'Add Box'
