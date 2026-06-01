@@ -2156,10 +2156,14 @@ const getBoxFbaLabelFileId = (box = {}) =>
     box?.fba_label_file_id,
     box?.shippingLabelFileId,
     box?.shipping_label_file_id,
+    box?.labelFileId,
+    box?.label_file_id,
     box?.fbaLabel?.id,
     box?.fba_label?.id,
     box?.shippingLabel?.id,
-    box?.shipping_label?.id
+    box?.shipping_label?.id,
+    box?.label?.id,
+    box?.file?.id
   );
 
 const getBoxExplicitFbaLabelFileId = (box = {}) =>
@@ -2170,10 +2174,14 @@ const getBoxExplicitFbaLabelFileId = (box = {}) =>
     box?.fba_label_file_id,
     box?.shippingLabelFileId,
     box?.shipping_label_file_id,
+    box?.labelFileId,
+    box?.label_file_id,
     box?.fbaLabel?.id,
     box?.fba_label?.id,
     box?.shippingLabel?.id,
-    box?.shipping_label?.id
+    box?.shipping_label?.id,
+    box?.label?.id,
+    box?.file?.id
   );
 
 const getBoxStatus = (box = {}) =>
@@ -3501,7 +3509,26 @@ const isImageFile = (file = {}) => {
   );
 };
 
+const isPickPackProBrandFile = (file = {}) => {
+  const fileText = [
+    getFileName(file),
+    getFileUrl(file),
+    getFileStablePath(file),
+  ].join(' ').toLowerCase();
+
+  return (
+    fileText.includes('ppp-orange-logo') ||
+    fileText.includes('orange-logo-wide') ||
+    fileText.includes('pickpackpro-logo') ||
+    fileText.includes('pick-pack-pro-logo') ||
+    /ppp.*logo|logo.*ppp|pickpackpro.*logo|logo.*pickpackpro/.test(fileText) ||
+    /pick\s*pack\s*pro.*logo|logo.*pick\s*pack\s*pro/.test(fileText)
+  );
+};
+
 const isFbaBoxLabelFile = (file = {}) => {
+  if (isPickPackProBrandFile(file)) return false;
+
   const type = getFileTypeValue(file);
   const name = getFileName(file).toLowerCase();
   const stablePath = getFileStablePath(file);
@@ -3520,22 +3547,6 @@ const isFbaBoxLabelFile = (file = {}) => {
     name.includes('shipping-label') ||
     name.includes('shipping_label') ||
     (isBoxFileEntityType(entityType) && (type.includes('fba') || type.includes('shipping_label')))
-  );
-};
-
-const isPickPackProBrandFile = (file = {}) => {
-  const fileText = [
-    getFileName(file),
-    getFileUrl(file),
-    getFileStablePath(file),
-  ].join(' ').toLowerCase();
-
-  return (
-    fileText.includes('ppp-orange-logo') ||
-    fileText.includes('orange-logo-wide') ||
-    fileText.includes('pickpackpro-logo') ||
-    fileText.includes('pick-pack-pro-logo') ||
-    /pick\s*pack\s*pro.*logo|logo.*pick\s*pack\s*pro/.test(fileText)
   );
 };
 
@@ -3564,6 +3575,15 @@ const getBoxDirectFbaLabelFile = (box = {}) => {
     box?.shipping_label?.url,
     box?.shippingLabel?.fileUrl,
     box?.shipping_label?.file_url,
+    box?.labelUrl,
+    box?.label_url,
+    box?.label?.url,
+    box?.label?.fileUrl,
+    box?.label?.file_url,
+    box?.labelFileUrl,
+    box?.label_file_url,
+    box?.labelPath,
+    box?.label_path,
     box?.fbaLabelPath,
     box?.fba_label_path,
     box?.fbaShippingLabelPath,
@@ -3587,11 +3607,16 @@ const getBoxDirectFbaLabelFile = (box = {}) => {
     box?.shipping_label?.name,
     box?.shippingLabel?.fileName,
     box?.shipping_label?.file_name,
+    box?.labelFileName,
+    box?.label_file_name,
+    box?.label?.name,
+    box?.label?.fileName,
+    box?.label?.file_name,
     labelUrl
   );
   const boxId = getBoxLookupIds(box).find(Boolean);
 
-  return {
+  const labelFile = {
     id: getBoxFbaLabelFileId(box) || `box-label-${boxId || fileName}`,
     name: fileName,
     fileName,
@@ -3608,6 +3633,8 @@ const getBoxDirectFbaLabelFile = (box = {}) => {
     fileType: 'fba_shipping_label',
     file_type: 'fba_shipping_label',
   };
+
+  return isPickPackProBrandFile(labelFile) ? null : labelFile;
 };
 
 const hasDirectFbaLabelRecord = (box = {}) =>
@@ -3620,7 +3647,9 @@ const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) =
   const boxLookupIds = getBoxLookupIds(box);
   const labelFileId = String(getBoxFbaLabelFileId(box) || '').trim();
   const directFiles = getBoxInlineFiles(box);
-  const allFiles = mergeFileLists(directFiles, extractList(files, ['files']));
+  const allFiles = mergeFileLists(directFiles, extractList(files, ['files'])).filter(
+    (file) => !isPickPackProBrandFile(file)
+  );
   const sameBoxFile = (file = {}) => {
     const entityType = getFileEntityType(file);
     const entityId = String(getFileEntityId(file) || '').trim();
