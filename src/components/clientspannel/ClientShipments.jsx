@@ -3658,11 +3658,29 @@ const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) =
         (isBoxFileEntityType(entityType) && allBoxes.length === 1 && boxIndex === 0)
     );
   };
-  const fetchedLabelFile =
-    allFiles.find((file) => labelFileId && String(getFileRecordId(file) || '').trim() === labelFileId) ||
-    allFiles.find((file) => sameBoxFile(file) && isFbaBoxLabelFile(file)) ||
-    (allBoxes.length === 1 && boxIndex === 0 ? allFiles.find((file) => isFbaBoxLabelFile(file)) : null) ||
-    null;
+  const candidateFiles = allFiles
+    .filter((file) => {
+      const fileRecordId = String(getFileRecordId(file) || '').trim();
+      const sameLabelFile = Boolean(labelFileId && fileRecordId === labelFileId);
+      const sameBox = sameBoxFile(file);
+      const singleBoxFbaLabel = allBoxes.length === 1 && boxIndex === 0 && isFbaBoxLabelFile(file);
+
+      return sameLabelFile || (sameBox && isFbaBoxLabelFile(file)) || singleBoxFbaLabel;
+    })
+    .sort((firstFile, secondFile) => {
+      const firstRecordId = String(getFileRecordId(firstFile) || '').trim();
+      const secondRecordId = String(getFileRecordId(secondFile) || '').trim();
+      const firstSameLabel = Boolean(labelFileId && firstRecordId === labelFileId);
+      const secondSameLabel = Boolean(labelFileId && secondRecordId === labelFileId);
+      if (firstSameLabel !== secondSameLabel) return firstSameLabel ? -1 : 1;
+
+      const firstSameBox = sameBoxFile(firstFile);
+      const secondSameBox = sameBoxFile(secondFile);
+      if (firstSameBox !== secondSameBox) return firstSameBox ? -1 : 1;
+
+      return getFileCreatedTime(secondFile) - getFileCreatedTime(firstFile);
+    });
+  const fetchedLabelFile = candidateFiles[0] || null;
 
   if (fetchedLabelFile) return fetchedLabelFile;
 
@@ -6915,7 +6933,14 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   };
 
   const renderShipmentBoxCard = (box, index, lineItem = null) => {
-    const rawFbaLabelFile = getBoxFbaLabelFile(box, trackFiles, trackBoxes, index);
+    const boxId = getBoxItemsLookupId(box);
+    const mappedFbaLabelFile = boxId ? fbaLabelFilesMap[boxId] : null;
+    const rawFbaLabelFile = getBoxFbaLabelFile(
+      box,
+      mergeFileLists(mappedFbaLabelFile ? [mappedFbaLabelFile] : [], trackFiles),
+      trackBoxes,
+      index
+    );
     const fbaLabelFile = rawFbaLabelFile && !isPickPackProBrandFile(rawFbaLabelFile) ? rawFbaLabelFile : null;
     const fbaLabelUrl = resolveFileUrl(getFileUrl(fbaLabelFile));
     const fbaLabelImage = fbaLabelFile && fbaLabelUrl && isImageFile(fbaLabelFile);
