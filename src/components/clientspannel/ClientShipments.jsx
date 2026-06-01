@@ -2156,14 +2156,10 @@ const getBoxFbaLabelFileId = (box = {}) =>
     box?.fba_label_file_id,
     box?.shippingLabelFileId,
     box?.shipping_label_file_id,
-    box?.labelFileId,
-    box?.label_file_id,
     box?.fbaLabel?.id,
     box?.fba_label?.id,
     box?.shippingLabel?.id,
-    box?.shipping_label?.id,
-    box?.label?.id,
-    box?.file?.id
+    box?.shipping_label?.id
   );
 
 const getBoxExplicitFbaLabelFileId = (box = {}) =>
@@ -2174,13 +2170,10 @@ const getBoxExplicitFbaLabelFileId = (box = {}) =>
     box?.fba_label_file_id,
     box?.shippingLabelFileId,
     box?.shipping_label_file_id,
-    box?.labelFileId,
-    box?.label_file_id,
     box?.fbaLabel?.id,
     box?.fba_label?.id,
     box?.shippingLabel?.id,
-    box?.shipping_label?.id,
-    box?.label?.id
+    box?.shipping_label?.id
   );
 
 const getBoxStatus = (box = {}) =>
@@ -3518,10 +3511,9 @@ const isFbaBoxLabelFile = (file = {}) => {
     type.includes('fba-shipping-label') ||
     type.includes('fba_label') ||
     type.includes('shipping_label') ||
-    name.includes('fba') ||
     name.includes('shipping-label') ||
     name.includes('shipping_label') ||
-    (isBoxFileEntityType(entityType) && type.includes('label'))
+    (isBoxFileEntityType(entityType) && (type.includes('fba') || type.includes('shipping_label')))
   );
 };
 
@@ -3566,15 +3558,6 @@ const getBoxDirectFbaLabelFile = (box = {}) => {
     box?.shipping_label?.url,
     box?.shippingLabel?.fileUrl,
     box?.shipping_label?.file_url,
-    box?.labelUrl,
-    box?.label_url,
-    box?.label?.url,
-    box?.label?.fileUrl,
-    box?.label?.file_url,
-    box?.labelFileUrl,
-    box?.label_file_url,
-    box?.labelPath,
-    box?.label_path,
     box?.fbaLabelPath,
     box?.fba_label_path,
     box?.fbaShippingLabelPath,
@@ -3598,11 +3581,6 @@ const getBoxDirectFbaLabelFile = (box = {}) => {
     box?.shipping_label?.name,
     box?.shippingLabel?.fileName,
     box?.shipping_label?.file_name,
-    box?.labelFileName,
-    box?.label_file_name,
-    box?.label?.name,
-    box?.label?.fileName,
-    box?.label?.file_name,
     labelUrl
   );
   const boxId = getBoxLookupIds(box).find(Boolean);
@@ -3650,8 +3628,7 @@ const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) =
 
   return (
     allFiles.find((file) => labelFileId && String(getFileRecordId(file) || '').trim() === labelFileId) ||
-    allFiles.find((file) => sameBoxFile(file) && (isFbaBoxLabelFile(file) || isImageFile(file) || isPdfFile(file))) ||
-    (allBoxes.length === 1 ? allFiles.find((file) => isFbaBoxLabelFile(file)) : null) ||
+    allFiles.find((file) => sameBoxFile(file) && isFbaBoxLabelFile(file)) ||
     null
   );
 };
@@ -3670,7 +3647,7 @@ const isFileUsedAsBoxLabel = (file = {}, boxes = [], boxLabelFiles = []) => {
 
   const entityType = getFileEntityType(file);
   const entityId = String(getFileEntityId(file) || '').trim();
-  const fileLooksLikeBoxLabel = isFbaBoxLabelFile(file) || isBoxFileEntityType(entityType);
+  const fileLooksLikeBoxLabel = isFbaBoxLabelFile(file);
 
   if (!fileLooksLikeBoxLabel) return false;
   if (isFbaBoxLabelFile(file) && boxes.length === 1) return true;
@@ -6412,11 +6389,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     if (getBoxFbaLabelFile(box, trackFiles, trackBoxes, index)) return true;
 
     return trackFiles.some((file) => {
-      const type = getFileTypeValue(file);
-      const name = getFileName(file).toLowerCase();
       const entityId = getFileEntityId(file);
 
-      return entityId === boxId && (type.includes('fba') || type.includes('label') || name.includes('fba') || name.includes('label'));
+      return entityId === boxId && isFbaBoxLabelFile(file) && fileMatchesBox(file, box);
     });
   };
   const isBoxLabelReadyInSection = (box, filesMap = fbaLabelFilesMap) => {
