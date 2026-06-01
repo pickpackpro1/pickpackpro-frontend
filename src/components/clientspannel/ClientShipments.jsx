@@ -3641,9 +3641,6 @@ const hasDirectFbaLabelRecord = (box = {}) =>
   Boolean(getBoxExplicitFbaLabelFileId(box) || getBoxDirectFbaLabelFile(box));
 
 const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) => {
-  const directLabelFile = getBoxDirectFbaLabelFile(box);
-  if (directLabelFile) return directLabelFile;
-
   const boxLookupIds = getBoxLookupIds(box);
   const labelFileId = String(getBoxFbaLabelFileId(box) || '').trim();
   const directFiles = getBoxInlineFiles(box);
@@ -3661,13 +3658,15 @@ const getBoxFbaLabelFile = (box = {}, files = [], allBoxes = [], boxIndex = 0) =
         (isBoxFileEntityType(entityType) && allBoxes.length === 1 && boxIndex === 0)
     );
   };
-
-  return (
+  const fetchedLabelFile =
     allFiles.find((file) => labelFileId && String(getFileRecordId(file) || '').trim() === labelFileId) ||
     allFiles.find((file) => sameBoxFile(file) && isFbaBoxLabelFile(file)) ||
     (allBoxes.length === 1 && boxIndex === 0 ? allFiles.find((file) => isFbaBoxLabelFile(file)) : null) ||
-    null
-  );
+    null;
+
+  if (fetchedLabelFile) return fetchedLabelFile;
+
+  return getBoxDirectFbaLabelFile(box);
 };
 
 const isFileUsedAsBoxLabel = (file = {}, boxes = [], boxLabelFiles = []) => {
