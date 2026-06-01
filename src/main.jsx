@@ -13,6 +13,7 @@ if (typeof window !== "undefined" && !window.__PICKPACKPRO_API_GET_CACHE__) {
   const recentGetResponses = new Map();
   const API_CACHE_STORAGE_KEY = "pickpackpro-api-get-cache-v1";
   const AUTH_STORAGE_KEY = "pickpackpro-auth";
+  const BACKEND_API_ORIGIN = "https://ali-backend.vercel.app";
   const maxMemoryEntries = 200;
   const maxStoredEntries = 80;
   const maxStoredBodyChars = 800_000;
@@ -25,6 +26,25 @@ if (typeof window !== "undefined" && !window.__PICKPACKPRO_API_GET_CACHE__) {
     } catch {
       return null;
     }
+  };
+
+  const getSameOriginApiUrl = (requestUrl = "") => {
+    const parsedUrl = parseRequestUrl(requestUrl);
+    if (!parsedUrl || import.meta.env.DEV) return requestUrl;
+    if (parsedUrl.origin !== BACKEND_API_ORIGIN || !parsedUrl.pathname.startsWith("/api/")) {
+      return requestUrl;
+    }
+
+    return `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+  };
+
+  const buildFetchInput = (input, requestUrl = "") => {
+    if (!requestUrl || requestUrl === (typeof input === "string" ? input : input?.url || "")) return input;
+    if (typeof input === "string" || input instanceof URL) return requestUrl;
+    if (typeof Request !== "undefined" && input instanceof Request) {
+      return new Request(requestUrl, input);
+    }
+    return input;
   };
 
   const getSessionCacheKey = () => {
@@ -207,7 +227,9 @@ if (typeof window !== "undefined" && !window.__PICKPACKPRO_API_GET_CACHE__) {
   window.addEventListener(API_MUTATION_EVENT_NAME, clearApiGetCache);
 
   window.fetch = async (input, init = {}) => {
-    const requestUrl = typeof input === "string" ? input : input?.url || "";
+    const originalRequestUrl = typeof input === "string" || input instanceof URL ? String(input) : input?.url || "";
+    const requestUrl = getSameOriginApiUrl(originalRequestUrl);
+    const fetchInput = buildFetchInput(input, requestUrl);
     const requestMethod = String(
       init?.method || (typeof input !== "string" ? input?.method : "") || "GET"
     ).toUpperCase();
@@ -259,10 +281,10 @@ if (typeof window !== "undefined" && !window.__PICKPACKPRO_API_GET_CACHE__) {
     // FIX: For file requests, skip the promise tracking to avoid caching issues
     if (isFileRequest) {
       if (shouldLogGetRequests()) console.log("[FILE Request - No Cache]", requestUrl);
-      return originalFetch(input, init);
+      return originalFetch(fetchInput, init);
     }
 
-    const responsePromise = originalFetch(input, init);
+    const responsePromise = originalFetch(fetchInput, init);
 
     if (shouldTrackGetRequest) {
       inFlightGetRequests.set(cacheKey, responsePromise);
