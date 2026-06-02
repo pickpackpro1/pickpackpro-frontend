@@ -7,6 +7,11 @@ import { FileText, CheckCircle, AlertCircle, Download, Eye, RefreshCw, Info, Arr
 
 const API_BASE_URL = '';
 const BILLING_PAGE_SIZE = 20;
+const DEFAULT_PRICING_TIERS = {
+  silver: { minUnits: 1, invoiceMin: 1999 },
+  gold: { minUnits: 2000, invoiceMin: 4999 },
+  platinum: { minUnits: 5000, invoiceMin: null },
+};
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();
@@ -38,38 +43,60 @@ const parseResponse = async (response) => {
   return payload;
 };
 
-const extractInvoices = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.invoices)) return payload.invoices;
-  if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
-  if (Array.isArray(payload?.data)) return payload.data;
+const extractRows = (payload, preferredKeys = []) => {
+  const candidates = [
+    payload,
+    payload?.data,
+    payload?.result,
+    payload?.payload,
+    payload?.data?.data,
+    payload?.data?.result,
+    payload?.result?.data,
+  ];
+  const rowKeys = [...preferredKeys, 'rows', 'items', 'records', 'results'];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+
+    for (const key of rowKeys) {
+      if (Array.isArray(candidate?.[key])) return candidate[key];
+    }
+  }
+
   return [];
 };
 
-const extractClients = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.clients)) return payload.clients;
-  if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
-  if (Array.isArray(payload?.data)) return payload.data;
-  return [];
-};
+const extractInvoices = (payload) => extractRows(payload, ['invoices']);
 
-const extractShipments = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.shipments)) return payload.shipments;
-  if (Array.isArray(payload?.data?.shipments)) return payload.data.shipments;
-  if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
-  if (Array.isArray(payload?.data)) return payload.data;
-  if (Array.isArray(payload?.rows)) return payload.rows;
-  if (Array.isArray(payload?.results)) return payload.results;
-  return [];
-};
+const extractClients = (payload) => extractRows(payload, ['clients']);
+
+const extractShipments = (payload) => extractRows(payload, ['shipments']);
 
 const extractPricing = (payload) => {
   const data = payload?.data || payload || {};
   return {
     catalog: data?.catalog || data?.serviceCatalog || data?.service_catalog || [],
     clientPrices: data?.clientPrices || data?.client_price_lists || data?.prices || [],
+  };
+};
+
+const parseTierNumber = (value, fallback = 0) => {
+  if (value === null) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+};
+
+const normalizePricingTier = (tier = {}, fallback = DEFAULT_PRICING_TIERS.silver) => ({
+  minUnits: parseTierNumber(tier?.minUnits ?? tier?.min_units, fallback.minUnits),
+  invoiceMin: parseTierNumber(tier?.invoiceMin ?? tier?.invoice_min ?? tier?.maxUnits ?? tier?.max_units, fallback.invoiceMin),
+});
+
+const extractPricingTiers = (payload) => {
+  const data = payload?.tiers || payload?.data || payload || {};
+  return {
+    silver: normalizePricingTier(data?.silver, DEFAULT_PRICING_TIERS.silver),
+    gold: normalizePricingTier(data?.gold, DEFAULT_PRICING_TIERS.gold),
+    platinum: normalizePricingTier(data?.platinum, DEFAULT_PRICING_TIERS.platinum),
   };
 };
 
@@ -279,6 +306,17 @@ const toNumber = (value) => {
   return Number.isFinite(number) ? number : 0;
 };
 
+const getInvoiceLineItemCount = (invoice = {}, lineItems = extractInvoiceLineItems(invoice)) =>
+  toNumber(
+    firstPresent(
+      invoice?._count?.invoice_line_items,
+      invoice?._count?.invoiceLineItems,
+      invoice?.lineItemCount,
+      invoice?.line_item_count,
+      lineItems.length
+    )
+  );
+
 const sumInvoiceLineItems = (items = [], keys = []) =>
   items.reduce((sum, item) => {
     const value = firstPresent(...keys.map((key) => item?.[key]), 0);
@@ -404,6 +442,7 @@ const normalizeInvoice = (invoice) => {
     total: getInvoiceTotalValue(invoice, lineItems),
     status: invoice?.status || 'draft',
     lineItems,
+    lineItemCount: getInvoiceLineItemCount(invoice, lineItems),
     raw: invoice,
   };
 };
@@ -587,6 +626,19 @@ const getBoxBillingServiceCode = (box = {}) => {
   return '';
 };
 
+const getAutomaticPricingTier = (units = 0, pricingTiers = DEFAULT_PRICING_TIERS) => {
+  const normalizedUnits = toNumber(units);
+  const orderedTiers = Object.entries(pricingTiers || DEFAULT_PRICING_TIERS)
+    .map(([tier, config]) => ({
+      tier,
+      minUnits: toNumber(config?.minUnits ?? config?.min_units),
+    }))
+    .filter((entry) => entry.tier && entry.minUnits > 0)
+    .sort((left, right) => right.minUnits - left.minUnits);
+
+  return orderedTiers.find((entry) => normalizedUnits >= entry.minUnits)?.tier || 'silver';
+};
+
 const calculateMonthlyInvoiceEstimate = ({ client, clientId, shipments, tier, pricingData }) => {
   const catalog = pricingData?.catalog || [];
   const clientPrices = pricingData?.clientPrices || [];
@@ -647,6 +699,7 @@ const Billing = () => {
   const [invoices, setInvoices] = useState([]);
   const [clients, setClients] = useState([]);
   const [pricingData, setPricingData] = useState({ catalog: [], clientPrices: [] });
+  const [pricingTiers, setPricingTiers] = useState(DEFAULT_PRICING_TIERS);
   const [monthlyForm, setMonthlyForm] = useState({
     billingMonth: getMonthValue(),
   });
@@ -698,7 +751,9 @@ const Billing = () => {
       });
       const payload = await parseResponse(response);
       console.log('[PickPackPro][Billing][GET /api/invoices]', payload);
-      setInvoices(extractInvoices(payload).map(normalizeInvoice));
+      const normalizedInvoices = extractInvoices(payload).map(normalizeInvoice);
+      console.log('[PickPackPro][Billing][normalized invoices]', normalizedInvoices);
+      setInvoices(normalizedInvoices);
     } catch (requestError) {
       setError(requestError.message);
       setInvoices([]);
@@ -721,16 +776,29 @@ const Billing = () => {
   };
 
   const loadPricing = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/pricing`, {
+    const [pricingResult, tiersResult] = await Promise.allSettled([
+      fetch(`${API_BASE_URL}/api/pricing`, {
         method: 'GET',
         headers: buildHeaders(),
         cache: 'no-store',
-      });
-      const payload = await parseResponse(response);
-      setPricingData(extractPricing(payload));
-    } catch {
+      }).then(parseResponse),
+      fetch(`${API_BASE_URL}/api/pricing/tiers`, {
+        method: 'GET',
+        headers: buildHeaders(),
+        cache: 'no-store',
+      }).then(parseResponse),
+    ]);
+
+    if (pricingResult.status === 'fulfilled') {
+      setPricingData(extractPricing(pricingResult.value));
+    } else {
       setPricingData({ catalog: [], clientPrices: [] });
+    }
+
+    if (tiersResult.status === 'fulfilled') {
+      setPricingTiers(extractPricingTiers(tiersResult.value));
+    } else {
+      setPricingTiers(DEFAULT_PRICING_TIERS);
     }
   };
 
@@ -800,7 +868,7 @@ const Billing = () => {
             const tier =
               client?.pricing_tier_override ??
               client?.pricingTierOverride ??
-              (units >= 5000 ? 'platinum' : units >= 2000 ? 'gold' : 'silver');
+              getAutomaticPricingTier(units, pricingTiers);
             const estimate = calculateMonthlyInvoiceEstimate({
               client,
               clientId,
@@ -850,7 +918,7 @@ const Billing = () => {
     } else if (activeTab === 'monthly') {
       setPreviewData([]);
     }
-  }, [activeTab, clients, monthlyForm.billingMonth, pricingData]);
+  }, [activeTab, clients, monthlyForm.billingMonth, pricingData, pricingTiers]);
 
   const displayInvoices = useMemo(
     () =>
@@ -937,13 +1005,22 @@ const Billing = () => {
         });
         const payload = await parseResponse(response);
         const detailPayload = getInvoiceDetailPayload(payload);
+        const detailLineItems = extractInvoiceLineItems(detailPayload);
+        const fallbackLineItems = detailLineItems.length
+          ? detailLineItems
+          : extractInvoiceLineItems(fallbackInvoice.raw || fallbackInvoice);
+        console.log('[PickPackPro][Billing][GET invoice detail]', {
+          lookupId,
+          payload,
+          detailPayload,
+          lineItems: detailLineItems,
+          lineItemCount: getInvoiceLineItemCount(detailPayload, detailLineItems),
+        });
         const detailInvoice = normalizeInvoice({
           ...(fallbackInvoice.raw || {}),
           ...fallbackInvoice,
           ...detailPayload,
-          lineItems: extractInvoiceLineItems(detailPayload).length
-            ? extractInvoiceLineItems(detailPayload)
-            : extractInvoiceLineItems(fallbackInvoice.raw || fallbackInvoice),
+          lineItems: fallbackLineItems,
         });
 
         if (detailInvoice.lineItems.length) return detailInvoice;
@@ -1078,13 +1155,19 @@ const Billing = () => {
       setError('');
       setMessage('');
       const { periodStart, periodEnd } = getMonthRange(monthlyForm.billingMonth);
-      const rowsToGenerate = previewData.filter((row) => row.clientId);
+      const rowsToGenerate = previewData.filter((row) => row.clientId && toNumber(row.total) > 0);
 
       if (!rowsToGenerate.length) {
-        throw new Error('Clients are required to generate monthly invoices.');
+        throw new Error('No billable invoice totals found for this month. Check completed services, received units, and pricing rates before generating invoices.');
       }
 
-      await Promise.all(
+      console.log('[PickPackPro][Billing][Generate invoices request]', {
+        periodStart,
+        periodEnd,
+        rows: rowsToGenerate,
+      });
+
+      const generatedInvoices = await Promise.all(
         rowsToGenerate.map((row) =>
           fetch(`${API_BASE_URL}/api/invoices/generate`, {
             method: 'POST',
@@ -1097,6 +1180,7 @@ const Billing = () => {
           }).then(parseResponse)
         )
       );
+      console.log('[PickPackPro][Billing][Generate invoices response]', generatedInvoices);
 
       setMessage('Monthly draft invoices generated.');
       await loadInvoices();
@@ -1461,7 +1545,9 @@ const Billing = () => {
                       ) : (
                         <tr>
                           <td colSpan="4" className="px-4 py-8 text-center text-sm text-gray-500">
-                            No line items returned for this invoice.
+                            {toNumber(selectedInvoiceView.total) === 0
+                              ? 'No billable line items were created for this invoice. Check completed services, received units, and matching pricing service rates for the billed period.'
+                              : 'No line items returned for this invoice detail.'}
                           </td>
                         </tr>
                       )}

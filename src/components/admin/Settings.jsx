@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
@@ -17,6 +17,7 @@ import {
   Search,
   Info,
   Check,
+  ChevronDown,
 } from 'lucide-react';
 
 const SETTINGS_ACTIVE_TAB_KEY = 'pickpackpro-settings-active-tab';
@@ -246,6 +247,26 @@ const getClientEmail = (client) =>
 const getClientId = (client) =>
   client?.id || client?.uuid || client?.clientId || client?.client_id || '';
 
+const getClientName = (client = {}) =>
+  client?.companyName ||
+  client?.company_name ||
+  client?.company ||
+  client?.businessName ||
+  client?.business_name ||
+  client?.name ||
+  client?.contactName ||
+  client?.contact_name ||
+  '';
+
+const getClientDisplayLabel = (client = {}) => {
+  const name = String(getClientName(client) || '').trim();
+  const email = String(getClientEmail(client) || '').trim();
+  const id = String(getClientId(client) || '').trim();
+
+  if (name && email) return `${name} - ${email}`;
+  return name || email || id || 'Unnamed Client';
+};
+
 const getServiceTypeValue = (service) =>
   typeof service === 'string'
     ? service.trim()
@@ -266,6 +287,37 @@ const formatServiceTypeLabel = (value) =>
     .replace(/_/g, ' ')
     .toLowerCase()
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const formatPricePerUnit = (value) => {
+  const amount = Number(value);
+
+  if (!Number.isFinite(amount)) {
+    return '-';
+  }
+
+  return new Intl.NumberFormat('en-GB', {
+    style: 'currency',
+    currency: 'GBP',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount);
+};
+
+const parseJsonValue = (value, fallback) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (Array.isArray(value) || typeof value === 'object') return value;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+
+const toObjectValue = (value) => {
+  const parsed = parseJsonValue(value, {});
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+};
 
 const extractPricingCatalog = (payload) => {
   const source =
@@ -316,6 +368,53 @@ const extractPricingCatalog = (payload) => {
     };
   });
 };
+
+const extractPricingClientPrices = (payload) => {
+  const source =
+    payload?.clientPrices ||
+    payload?.client_prices ||
+    payload?.client_price_lists ||
+    payload?.prices ||
+    payload?.data?.clientPrices ||
+    payload?.data?.client_prices ||
+    payload?.data?.client_price_lists ||
+    payload?.data?.prices ||
+    [];
+
+  return Array.isArray(source) ? source : [];
+};
+
+const getPricingServiceValue = (price = {}) =>
+  String(
+    price?.serviceType ||
+      price?.service_type ||
+      price?.serviceCode ||
+      price?.service_code ||
+      price?.service?.code ||
+      price?.service?.serviceType ||
+      price?.service?.service_type ||
+      price?.code ||
+      price?.type ||
+      ''
+  ).trim();
+
+const getPricingTierValue = (price = {}) =>
+  String(price?.tier || price?.pricingTier || price?.pricing_tier || '').trim();
+
+const getPricingAmountValue = (price = {}) =>
+  price?.pricePerUnit ??
+  price?.price_per_unit ??
+  price?.rate ??
+  price?.unitRate ??
+  price?.unit_rate ??
+  price?.price ??
+  '';
+
+const getPricingNotes = (price = {}) =>
+  price?.notes || price?.description || price?.reason || '';
+
+const getPricingClientId = (price = {}) =>
+  price?.clientId || price?.client_id || price?.client?.id || price?.client?.uuid || '';
 
 const toDisplayRole = (role = '') => {
   const normalizedRole = String(role).toLowerCase();
@@ -441,6 +540,10 @@ const Settings = () => {
   // Pricing Tiers
   const [pricingTiers, setPricingTiers] = useState(initialPricingTiers);
   const [pricingCatalog, setPricingCatalog] = useState([]);
+  const [pricingClientPrices, setPricingClientPrices] = useState([]);
+  const [pricingClients, setPricingClients] = useState([]);
+  const [pricingClientSearch, setPricingClientSearch] = useState('');
+  const [isPricingClientDropdownOpen, setIsPricingClientDropdownOpen] = useState(false);
   const [pricingLoading, setPricingLoading] = useState(false);
   const [pricingError, setPricingError] = useState('');
   const [pricingMessage, setPricingMessage] = useState('');
@@ -452,6 +555,7 @@ const Settings = () => {
     effectiveFrom: '',
     notes: '',
   });
+  const pricingClientDropdownRef = useRef(null);
 
   const [inviteForm, setInviteForm] = useState(initialInviteForm);
   const [autoInviteAfterClientCreate, setAutoInviteAfterClientCreate] = useState(false);
@@ -502,6 +606,151 @@ const Settings = () => {
       return true;
     });
   }, [pricingCatalog, pricingForm.serviceType]);
+
+  const pricingClientOptions = useMemo(
+    () =>
+      pricingClients
+        .map((client) => ({
+          value: getClientId(client),
+          label: getClientDisplayLabel(client),
+          email: getClientEmail(client),
+          name: getClientName(client),
+        }))
+        .filter((client) => client.value)
+        .sort((left, right) => left.label.localeCompare(right.label)),
+    [pricingClients]
+  );
+
+  const filteredPricingClientOptions = useMemo(() => {
+    const query = pricingClientSearch.trim().toLowerCase();
+    if (!query) return pricingClientOptions;
+
+    return pricingClientOptions.filter((client) =>
+      [client.label, client.email, client.name, client.value]
+        .join(' ')
+        .toLowerCase()
+        .includes(query)
+    );
+  }, [pricingClientOptions, pricingClientSearch]);
+
+  const selectedPricingClient = useMemo(
+    () => pricingClientOptions.find((client) => client.value === pricingForm.clientId) || null,
+    [pricingClientOptions, pricingForm.clientId]
+  );
+
+  const handleSelectPricingClient = (clientId = '') => {
+    setPricingForm((currentForm) => ({ ...currentForm, clientId }));
+    setPricingClientSearch('');
+    setIsPricingClientDropdownOpen(false);
+  };
+
+  const pricingDisplayRows = useMemo(() => {
+    const clientLabelLookup = new Map(
+      pricingClientOptions.map((client) => [String(client.value), client.label])
+    );
+
+    const globalRows = pricingCatalog.flatMap((service) => {
+      const serviceType = getServiceTypeValue(service);
+      const serviceLabel =
+        service?.label ||
+        service?.name ||
+        service?.serviceName ||
+        service?.service_name ||
+        formatServiceTypeLabel(serviceType);
+      const tierPricing = toObjectValue(
+        service?.default_tier_pricing ||
+          service?.defaultTierPricing ||
+          service?.tierPricing ||
+          service?.tier_pricing ||
+          service?.tierPrices ||
+          service?.tier_prices ||
+          service?.tiers
+      );
+      const tierRows = Object.entries(tierPricing)
+        .filter(([, price]) => price !== undefined && price !== null && price !== '')
+        .map(([tier, price]) => ({
+          key: `global-${serviceType || serviceLabel}-${tier}`,
+          scope: 'Global default',
+          client: 'All clients',
+          service: serviceLabel || formatServiceTypeLabel(serviceType),
+          tier: formatServiceTypeLabel(tier),
+          price,
+          notes: getPricingNotes(service),
+        }));
+
+      if (tierRows.length) return tierRows;
+
+      const directPrice = getPricingAmountValue(service);
+      if (directPrice === '') return [];
+
+      return [
+        {
+          key: `global-${serviceType || serviceLabel}`,
+          scope: 'Global default',
+          client: 'All clients',
+          service: serviceLabel || formatServiceTypeLabel(serviceType),
+          tier: formatServiceTypeLabel(getPricingTierValue(service) || 'default'),
+          price: directPrice,
+          notes: getPricingNotes(service),
+        },
+      ];
+    });
+
+    const clientRows = pricingClientPrices.map((price, index) => {
+      const clientId = String(getPricingClientId(price) || '').trim();
+      const clientLabel =
+        price?.clientName ||
+        price?.client_name ||
+        price?.companyName ||
+        price?.company_name ||
+        price?.clientEmail ||
+        price?.client_email ||
+        price?.client?.companyName ||
+        price?.client?.company_name ||
+        price?.client?.name ||
+        price?.client?.email ||
+        clientLabelLookup.get(clientId) ||
+        clientId ||
+        'Selected client';
+      const serviceType = getPricingServiceValue(price);
+
+      return {
+        key: price?.id || price?.uuid || `client-${clientId}-${serviceType}-${getPricingTierValue(price)}-${index}`,
+        scope: 'Client special',
+        client: clientLabel,
+        service: formatServiceTypeLabel(serviceType),
+        tier: formatServiceTypeLabel(getPricingTierValue(price) || 'default'),
+        price: getPricingAmountValue(price),
+        notes: getPricingNotes(price),
+      };
+    });
+
+    return [...clientRows, ...globalRows];
+  }, [pricingCatalog, pricingClientOptions, pricingClientPrices]);
+
+  useEffect(() => {
+    if (!isPricingClientDropdownOpen) return undefined;
+
+    const closePricingClientDropdown = (event) => {
+      if (pricingClientDropdownRef.current?.contains(event.target)) return;
+      setPricingClientSearch('');
+      setIsPricingClientDropdownOpen(false);
+    };
+
+    const handleDropdownKeyDown = (event) => {
+      if (event.key !== 'Escape') return;
+      setPricingClientSearch('');
+      setIsPricingClientDropdownOpen(false);
+    };
+
+    document.addEventListener('mousedown', closePricingClientDropdown);
+    document.addEventListener('keydown', handleDropdownKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', closePricingClientDropdown);
+      document.removeEventListener('keydown', handleDropdownKeyDown);
+    };
+  }, [isPricingClientDropdownOpen]);
 
   const normalizeTierThreshold = (value, fallback = '0') =>
     value === null || value === undefined || value === '' ? fallback : String(value);
@@ -925,6 +1174,7 @@ const Settings = () => {
 
       const tiersPayload = await parseResponse(tiersResponse);
       const pricingPayload = await parseResponse(pricingResponse);
+      console.log('[PickPackPro][Settings][GET /api/pricing]', pricingPayload);
 
       const tierData = tiersPayload?.tiers || tiersPayload?.data || tiersPayload;
       setPricingTiers({
@@ -934,9 +1184,23 @@ const Settings = () => {
       });
 
       setPricingCatalog(extractPricingCatalog(pricingPayload));
+      setPricingClientPrices(extractPricingClientPrices(pricingPayload));
+
+      try {
+        const clientsResponse = await fetch(`${API_BASE_URL}/api/clients`, {
+          method: 'GET',
+          headers: buildHeaders(),
+        });
+        const clientsPayload = await parseResponse(clientsResponse);
+        setPricingClients(extractClients(clientsPayload));
+      } catch {
+        setPricingClients([]);
+      }
     } catch (error) {
       setPricingError(error.message);
       setPricingCatalog([]);
+      setPricingClientPrices([]);
+      setPricingClients([]);
     } finally {
       setPricingLoading(false);
     }
@@ -961,18 +1225,22 @@ const Settings = () => {
         throw new Error('Price per unit is required.');
       }
 
+      const pricingPayload = {
+        clientId: pricingForm.clientId.trim() || undefined,
+        serviceType: pricingForm.serviceType.trim(),
+        tier: pricingForm.tier,
+        pricePerUnit: Number(pricingForm.pricePerUnit || 0),
+        notes: pricingForm.notes.trim() || undefined,
+      };
+      console.log('[PickPackPro][Settings][POST /api/pricing request]', pricingPayload);
+
       const response = await fetch(`${API_BASE_URL}/api/pricing`, {
         method: 'POST',
         headers: buildHeaders(true),
-        body: JSON.stringify({
-          clientId: pricingForm.clientId.trim() || undefined,
-          serviceType: pricingForm.serviceType.trim(),
-          tier: pricingForm.tier,
-          pricePerUnit: Number(pricingForm.pricePerUnit || 0),
-          notes: pricingForm.notes.trim() || undefined,
-        }),
+        body: JSON.stringify(pricingPayload),
       });
-      await parseResponse(response);
+      const savedPricingPayload = await parseResponse(response);
+      console.log('[PickPackPro][Settings][POST /api/pricing response]', savedPricingPayload);
       setPricingMessage('Pricing updated successfully.');
       showToast('success', 'Pricing saved successfully.');
       await loadPricingData();
@@ -1979,7 +2247,7 @@ const Settings = () => {
                     <div className="mb-4">
                       <h4 className="text-sm font-semibold text-gray-900">Set Service Price</h4>
                       <p className="mt-1 text-sm text-gray-500">
-                        Leave Client UUID empty to update the global default for this service tier.
+                        Use global default or choose a client by company/email for a special rate.
                       </p>
                     </div>
                     {pricingError ? (
@@ -1992,14 +2260,78 @@ const Settings = () => {
                         {pricingMessage}
                       </div>
                     ) : null}
-                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_170px_160px_160px]">
-                      <input
-                        type="text"
-                        value={pricingForm.clientId}
-                        onChange={(e) => setPricingForm({ ...pricingForm, clientId: e.target.value })}
-                        className="rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-[#ff9900] focus:outline-none focus:ring-2 focus:ring-orange-100"
-                        placeholder="Client UUID optional"
-                      />
+                    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(280px,1.4fr)_170px_160px_160px]">
+                      <div ref={pricingClientDropdownRef} className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setIsPricingClientDropdownOpen((isOpen) => !isOpen)}
+                          className="flex w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-left text-sm focus:border-[#ff9900] focus:outline-none focus:ring-2 focus:ring-orange-100"
+                          aria-expanded={isPricingClientDropdownOpen}
+                          aria-haspopup="listbox"
+                        >
+                          <span className="truncate">
+                            {selectedPricingClient?.label || 'Global default (all clients)'}
+                          </span>
+                          <ChevronDown
+                            size={16}
+                            className={`shrink-0 text-gray-400 transition-transform ${isPricingClientDropdownOpen ? 'rotate-180' : ''}`}
+                          />
+                        </button>
+
+                        {isPricingClientDropdownOpen ? (
+                          <div className="absolute left-0 right-0 z-30 mt-2 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
+                            <div className="border-b border-gray-100 p-2">
+                              <div className="relative">
+                                <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                                <input
+                                  type="search"
+                                  value={pricingClientSearch}
+                                  onChange={(e) => setPricingClientSearch(e.target.value)}
+                                  className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-3 text-sm focus:border-[#ff9900] focus:outline-none focus:ring-2 focus:ring-orange-100"
+                                  placeholder="Search client name or email"
+                                  aria-label="Search clients for pricing"
+                                />
+                              </div>
+                            </div>
+                            <div className="max-h-64 overflow-y-auto p-1" role="listbox">
+                              <button
+                                type="button"
+                                onClick={() => handleSelectPricingClient('')}
+                                className={`flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm hover:bg-orange-50 ${
+                                  pricingForm.clientId ? 'text-gray-700' : 'bg-orange-50 text-[#ff6900]'
+                                }`}
+                                role="option"
+                                aria-selected={!pricingForm.clientId}
+                              >
+                                <span className="truncate">Global default (all clients)</span>
+                                {!pricingForm.clientId ? <Check size={15} className="shrink-0" /> : null}
+                              </button>
+                              {filteredPricingClientOptions.map((client) => {
+                                const isSelected = pricingForm.clientId === client.value;
+
+                                return (
+                                  <button
+                                    key={client.value}
+                                    type="button"
+                                    onClick={() => handleSelectPricingClient(client.value)}
+                                    className={`flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm hover:bg-orange-50 ${
+                                      isSelected ? 'bg-orange-50 text-[#ff6900]' : 'text-gray-700'
+                                    }`}
+                                    role="option"
+                                    aria-selected={isSelected}
+                                  >
+                                    <span className="truncate">{client.label}</span>
+                                    {isSelected ? <Check size={15} className="shrink-0" /> : null}
+                                  </button>
+                                );
+                              })}
+                              {!filteredPricingClientOptions.length ? (
+                                <div className="px-3 py-3 text-sm text-gray-500">No clients found.</div>
+                              ) : null}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
                       <select
                         value={pricingForm.serviceType}
                         onChange={(e) => setPricingForm({ ...pricingForm, serviceType: e.target.value })}
@@ -2047,6 +2379,66 @@ const Settings = () => {
                         <Save size={15} />
                         Save Price
                       </button>
+                    </div>
+
+                    <div className="mt-6 overflow-hidden rounded-lg border border-gray-200">
+                      <div className="border-b border-gray-200 bg-gray-50 px-4 py-3">
+                        <h4 className="text-sm font-semibold text-gray-900">Saved Pricing</h4>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full">
+                          <thead>
+                            <tr className="border-b border-gray-100 bg-white">
+                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Type</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Client</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Service</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Tier</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Price / Unit</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Notes</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-50">
+                            {pricingLoading ? (
+                              <tr>
+                                <td colSpan={6} className="px-4 py-8 text-center">
+                                  <LoadingState label="Loading pricing..." />
+                                </td>
+                              </tr>
+                            ) : pricingDisplayRows.length ? (
+                              pricingDisplayRows.map((row) => (
+                                <tr key={row.key}>
+                                  <td className="px-4 py-3 text-sm">
+                                    <span
+                                      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                        row.scope === 'Client special'
+                                          ? 'bg-orange-50 text-[#ff6900]'
+                                          : 'bg-gray-100 text-gray-600'
+                                      }`}
+                                    >
+                                      {row.scope}
+                                    </span>
+                                  </td>
+                                  <td className="max-w-[260px] px-4 py-3 text-sm text-gray-700">
+                                    <span className="block truncate">{row.client}</span>
+                                  </td>
+                                  <td className="px-4 py-3 text-sm font-medium text-gray-900">{row.service || '-'}</td>
+                                  <td className="px-4 py-3 text-sm text-gray-600">{row.tier || '-'}</td>
+                                  <td className="px-4 py-3 text-sm font-semibold text-gray-900">{formatPricePerUnit(row.price)}</td>
+                                  <td className="max-w-[320px] px-4 py-3 text-sm text-gray-600">
+                                    <span className="block truncate">{row.notes || '-'}</span>
+                                  </td>
+                                </tr>
+                              ))
+                            ) : (
+                              <tr>
+                                <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-500">
+                                  No saved pricing returned by backend.
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   </div>
                 </div>

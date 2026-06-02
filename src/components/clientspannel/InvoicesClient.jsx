@@ -2,8 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import LayoutClient from './clientlayout/LayoutClient';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
-import { AlertCircle, Crown, Download, FileText, Plus, RefreshCw, TrendingUp, X } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { AlertCircle, Crown, Download, FileText, RefreshCw, TrendingUp, X } from 'lucide-react';
 import { getSession } from '../../utils/auth';
 import { getClientIdFromSources, getClientTierFromSources } from '../../utils/clientTier';
 
@@ -407,7 +406,6 @@ const downloadPdfFile = (fileName, lines) => {
 };
 
 const InvoicesClient = () => {
-  const navigate = useNavigate();
   const [invoices, setInvoices] = useState([]);
   const [selectedInvoice, setSelectedInvoice] = useState(null);
   const [error, setError] = useState('');
@@ -665,14 +663,6 @@ const InvoicesClient = () => {
               <div className="rounded-full border border-[#e3e8f2] bg-white px-3 py-1.5 text-xs font-semibold text-[#132347]">
                 {tierBadgeLabel}
               </div>
-              <button
-                type="button"
-                onClick={() => navigate('/shipments?mode=create')}
-                className="inline-flex items-center gap-2 rounded-lg bg-[#ff8c2f] px-4 py-2.5 text-sm font-semibold text-white"
-              >
-                <Plus size={15} />
-                Submit Shipment
-              </button>
             </div>
           </div>
 
