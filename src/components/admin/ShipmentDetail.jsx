@@ -10,6 +10,15 @@ import { ArrowDown, ArrowLeft, ChevronDown, RefreshCw, X, CheckCircle2, Plus } f
 const API_BASE_URL = '';
 const BUNDLE_SIZE_NOTE_PREFIX = 'Bundle Sizes:';
 const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
+const SUB_SHIPMENT_STATUSES = {
+  draft: 'Draft',
+  awaiting_fba_labels: 'Awaiting FBA labels',
+  ready_to_dispatch: 'Ready to dispatch',
+  dispatched: 'Dispatched',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+};
+const SUB_SHIPMENT_CREATION_STATUSES = new Set(['received', 'in_progress', 'prepped']);
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();
@@ -1376,6 +1385,10 @@ const getLineItemBoxableQuantity = (lineItem = {}) => {
 
 const getLineItemAllocatableQuantity = (lineItem = {}, boxList = [], lineItemList = []) => {
   if (!lineItem || typeof lineItem !== 'object') return 0;
+  if (lineItem.__subShipmentAvailableQty !== undefined) {
+    const subShipmentAvailableQty = Number(lineItem.__subShipmentAvailableQty || 0);
+    return Number.isFinite(subShipmentAvailableQty) ? Math.max(0, subShipmentAvailableQty) : 0;
+  }
   const availableSourceQuantity = getLineItemBoxableQuantity(lineItem);
   if (!Number.isFinite(availableSourceQuantity) || availableSourceQuantity <= 0) return 0;
   return Math.max(0, availableSourceQuantity - getAllocatedQuantityForLineItem(lineItem, boxList, lineItemList));
@@ -1693,6 +1706,191 @@ const formatServiceLabel = (value = '') =>
   .split('_')
   .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
   .join(' ');
+
+const extractSubShipments = (payload) =>
+  extractList(payload, ['subShipments', 'sub_shipments', 'subshipments']);
+
+const extractSubShipmentAvailability = (payload) =>
+  extractList(payload, ['availability', 'availableItems', 'available_items']);
+
+const getSubShipmentId = (subShipment = {}) =>
+  firstPresent(subShipment?.id, subShipment?.uuid, subShipment?.subShipmentId, subShipment?.sub_shipment_id);
+
+const getSubShipmentReference = (subShipment = {}) =>
+  firstPresent(
+    subShipment?.reference,
+    subShipment?.subShipmentReference,
+    subShipment?.sub_shipment_reference,
+    subShipment?.sequence_no ? `Sub-shipment ${subShipment.sequence_no}` : '',
+    getSubShipmentId(subShipment)
+  );
+
+const getSubShipmentStatus = (subShipment = {}) =>
+  String(firstPresent(subShipment?.status, 'draft')).trim().toLowerCase();
+
+const getSubShipmentStatusLabel = (status = '') => {
+  const normalizedStatus = String(status || '').trim().toLowerCase();
+  return SUB_SHIPMENT_STATUSES[normalizedStatus] || formatServiceLabel(normalizedStatus || 'draft');
+};
+
+const getSubShipmentItems = (subShipment = {}) =>
+  extractList(subShipment, ['sub_shipment_items', 'subShipmentItems', 'items']);
+
+const getSubShipmentBoxes = (subShipment = {}) =>
+  extractBoxes(subShipment);
+
+const getSubShipmentDedupeKey = (subShipment = {}, index = 0) =>
+  String(getSubShipmentId(subShipment) || getSubShipmentReference(subShipment) || index);
+
+const mergeSubShipmentLists = (...subShipmentLists) => {
+  const merged = new Map();
+
+  subShipmentLists.flat().filter(Boolean).forEach((subShipment, index) => {
+    const key = getSubShipmentDedupeKey(subShipment, index);
+    if (!merged.has(key)) merged.set(key, subShipment);
+  });
+
+  return [...merged.values()];
+};
+
+const getSubShipmentItemLineItem = (item = {}) => {
+  const lineItem =
+    item?.shipment_line_items ||
+    item?.shipmentLineItems ||
+    item?.shipmentLineItem ||
+    item?.shipment_line_item ||
+    item?.lineItem ||
+    item?.line_item ||
+    item?.item;
+
+  return lineItem && typeof lineItem === 'object' ? lineItem : item;
+};
+
+const getSubShipmentItemQuantity = (item = {}) =>
+  firstPresent(item?.quantity, item?.qty, item?.units, item?.plannedQty, item?.planned_qty, 0);
+
+const getAvailabilityItemId = (item = {}) =>
+  firstPresent(item?.shipmentItemId, item?.shipment_item_id, item?.lineItemId, item?.line_item_id, item?.id);
+
+const getAvailabilitySku = (item = {}) =>
+  firstPresent(item?.sku, item?.sellerSku, item?.seller_sku, item?.productSku, item?.product_sku);
+
+const getAvailabilityProductName = (item = {}) =>
+  firstPresent(item?.productName, item?.product_name, item?.name, item?.title);
+
+const getAvailabilityExpectedQty = (item = {}) =>
+  firstPresent(item?.expectedQty, item?.expected_qty, item?.qtyExpected, item?.qty_expected, 0);
+
+const getAvailabilityReceivedQty = (item = {}) =>
+  firstPresent(item?.receivedQty, item?.received_qty, item?.qtyReceived, item?.qty_received, 0);
+
+const getAvailabilityAssignedQty = (item = {}) =>
+  firstPresent(item?.assignedQty, item?.assigned_qty, item?.assigned, 0);
+
+const getAvailabilityRemainingQty = (item = {}) =>
+  firstPresent(item?.remainingQty, item?.remaining_qty, item?.availableQty, item?.available_qty, 0);
+
+const getAvailabilityAvailableQty = (item = {}) =>
+  Number(firstPresent(item?.availableQty, item?.available_qty, item?.remainingQty, item?.remaining_qty, 0) || 0);
+
+const isAvailabilityPrepared = (item = {}) =>
+  item?.prepared === true ||
+  String(firstPresent(item?.prepared, item?.service_status, item?.serviceStatus, '')).toLowerCase() === 'true' ||
+  ['done', 'completed', 'complete', 'prepped'].includes(String(firstPresent(item?.service_status, item?.serviceStatus, '')).toLowerCase());
+
+const getSubShipmentAllocationItemId = (item = {}) =>
+  firstPresent(item?.shipmentItemId, item?.shipment_item_id, item?.lineItemId, item?.line_item_id, item?.id);
+
+const getSubShipmentBoxRows = (subShipment = {}, boxData = {}) =>
+  mergeBoxLists(getSubShipmentBoxes(subShipment), extractBoxes(boxData));
+
+const getSubShipmentAllocationSummary = (subShipment = {}, boxData = {}) =>
+  extractList(boxData, ['allocationSummary', 'allocation_summary']).length
+    ? extractList(boxData, ['allocationSummary', 'allocation_summary'])
+    : getSubShipmentItems(subShipment).map((item) => {
+        const lineItem = getSubShipmentItemLineItem(item);
+        return {
+          shipmentItemId: getLineItemId(lineItem) || getSubShipmentAllocationItemId(item),
+          sku: getItemSku(lineItem),
+          plannedQty: getSubShipmentItemQuantity(item),
+          allocated: 0,
+          remainingQty: getSubShipmentItemQuantity(item),
+        };
+      });
+
+const getSubShipmentLineItemsForBoxing = (subShipment = {}, boxData = {}, parentLineItems = []) => {
+  const items = getSubShipmentItems(subShipment);
+  const summaryRows = getSubShipmentAllocationSummary(subShipment, boxData);
+
+  return summaryRows
+    .map((summary) => {
+      const summaryItemId = String(getSubShipmentAllocationItemId(summary) || '').trim();
+      const summarySku = String(getAvailabilitySku(summary) || '').trim().toLowerCase();
+      const matchedSubItem = items.find((item) => {
+        const lineItem = getSubShipmentItemLineItem(item);
+        const lineItemId = String(getLineItemId(lineItem) || getSubShipmentAllocationItemId(item) || '').trim();
+        const lineItemSku = String(getItemSku(lineItem) || '').trim().toLowerCase();
+        return Boolean(
+          (summaryItemId && lineItemId && summaryItemId === lineItemId) ||
+            (summarySku && lineItemSku && skuValuesMatch(summarySku, lineItemSku))
+        );
+      });
+      const matchedParentLine = toArray(parentLineItems).find((lineItem) => {
+        const lineItemId = String(getLineItemId(lineItem) || '').trim();
+        const lineItemSku = String(getItemSku(lineItem) || '').trim().toLowerCase();
+        return Boolean(
+          (summaryItemId && lineItemId && summaryItemId === lineItemId) ||
+            (summarySku && lineItemSku && skuValuesMatch(summarySku, lineItemSku))
+        );
+      });
+      const sourceLineItem = matchedSubItem ? getSubShipmentItemLineItem(matchedSubItem) : matchedParentLine || {};
+      const plannedQty = Number(firstPresent(summary?.plannedQty, summary?.planned_qty, getSubShipmentItemQuantity(matchedSubItem || {}), 0) || 0);
+      const allocatedQty = Number(firstPresent(summary?.allocated, summary?.allocatedQty, summary?.allocated_qty, 0) || 0);
+      const remainingQty = Number(firstPresent(summary?.remainingQty, summary?.remaining_qty, Math.max(0, plannedQty - allocatedQty)) || 0);
+      const shipmentItemId = summaryItemId || getLineItemId(sourceLineItem);
+      const sku = getAvailabilitySku(summary) || getItemSku(sourceLineItem);
+
+      if (!shipmentItemId && !sku) return null;
+
+      return {
+        ...sourceLineItem,
+        id: shipmentItemId || sourceLineItem?.id,
+        shipmentItemId,
+        shipment_item_id: shipmentItemId,
+        sku,
+        productName: getAvailabilityProductName(summary) || getItemProductName(sourceLineItem),
+        product_name: getAvailabilityProductName(summary) || getItemProductName(sourceLineItem),
+        quantity: plannedQty,
+        qty: plannedQty,
+        expectedQty: plannedQty,
+        expected_qty: plannedQty,
+        receivedQty: plannedQty,
+        received_qty: plannedQty,
+        __subShipmentPlannedQty: plannedQty,
+        __subShipmentAllocatedQty: allocatedQty,
+        __subShipmentAvailableQty: Math.max(0, remainingQty),
+      };
+    })
+    .filter(Boolean);
+};
+
+const getSubShipmentLabelSummary = (boxes = [], files = []) => {
+  if (!boxes.length) return 'No boxes';
+  const labeledCount = boxes.filter((box) => isBoxFbaLabelUploaded(box, files)).length;
+  return `${labeledCount}/${boxes.length} labels uploaded`;
+};
+
+const getSubShipmentDispatchSummary = (subShipment = {}, boxes = []) => {
+  const status = getSubShipmentStatus(subShipment);
+  if (['dispatched', 'completed'].includes(status)) return getSubShipmentStatusLabel(status);
+  if (!boxes.length) return 'No boxes';
+  const dispatchedCount = boxes.filter((box) =>
+    ['dispatched', 'sealed', 'completed', 'complete'].includes(
+      String(firstPresent(box?.status, box?.boxStatus, box?.box_status, box?.dispatchStatus, box?.dispatch_status, '')).toLowerCase()
+    ) || Boolean(box?.dispatched_at || box?.dispatchedAt)
+  ).length;
+  return `${dispatchedCount}/${boxes.length} dispatched`;
+};
 
 const getServiceDisplayStatus = (serviceName, item, services) => {
   const matchedTask = getServiceTaskForLine(serviceName, item, services);
@@ -3038,6 +3236,14 @@ const ShipmentDetail = () => {
   const [services, setServices] = useState([]);
   const [discrepancies, setDiscrepancies] = useState([]);
   const [boxes, setBoxes] = useState([]);
+  const [subShipments, setSubShipments] = useState([]);
+  const [subShipmentAvailability, setSubShipmentAvailability] = useState([]);
+  const [subShipmentBoxData, setSubShipmentBoxData] = useState({});
+  const [showSubShipmentModal, setShowSubShipmentModal] = useState(false);
+  const [subShipmentSelections, setSubShipmentSelections] = useState({});
+  const [subShipmentNotes, setSubShipmentNotes] = useState('');
+  const [isCreatingSubShipment, setIsCreatingSubShipment] = useState(false);
+  const [activeSubShipmentIdForBox, setActiveSubShipmentIdForBox] = useState('');
   const [files, setFiles] = useState([]);
   const [statusValue, setStatusValue] = useState('pending_arrival');
   const [staffId, setStaffId] = useState('');
@@ -3126,11 +3332,21 @@ const ShipmentDetail = () => {
       .sort((firstStaff, secondStaff) => firstStaff.label.localeCompare(secondStaff.label));
   }, [staffMembers]);
   const lineItems = getLineItems(shipment);
+  const activeSubShipmentForBox = activeSubShipmentIdForBox
+    ? subShipments.find((subShipment) => getSubShipmentId(subShipment) === activeSubShipmentIdForBox) || null
+    : null;
+  const activeSubShipmentBoxData = activeSubShipmentIdForBox ? subShipmentBoxData[activeSubShipmentIdForBox] || {} : {};
+  const boxSelectionLineItems = activeSubShipmentForBox
+    ? getSubShipmentLineItemsForBoxing(activeSubShipmentForBox, activeSubShipmentBoxData, lineItems)
+    : lineItems;
+  const boxSelectionBoxes = activeSubShipmentForBox
+    ? getSubShipmentBoxRows(activeSubShipmentForBox, activeSubShipmentBoxData)
+    : boxes;
   const findLineItemBySelection = (selectedValue = '') => {
     const normalizedSelection = String(selectedValue || '').trim();
     if (!normalizedSelection) return null;
 
-    return lineItems.find((item) => {
+    return boxSelectionLineItems.find((item) => {
       const optionValue = getLineItemOptionValue(item);
       const itemId = String(getLineItemId(item) || '').trim();
       const itemSku = String(getItemSku(item) || '').trim();
@@ -3140,9 +3356,13 @@ const ShipmentDetail = () => {
   const selectedBoxLineItem = findLineItemBySelection(boxSkuPreview);
   const selectedAddToBoxLineItem = findLineItemBySelection(addToBoxLineItemId);
   const selectedBoxBoxableQty = selectedBoxLineItem ? getLineItemBoxableQuantity(selectedBoxLineItem) : 0;
-  const selectedBoxAllocatedQty = selectedBoxLineItem ? getAllocatedQuantityForLineItem(selectedBoxLineItem, boxes, lineItems) : 0;
-  const selectedBoxMaxQuantity = selectedBoxLineItem ? getLineItemAllocatableQuantity(selectedBoxLineItem, boxes, lineItems) : 0;
-  const selectedAddToBoxMaxQuantity = selectedAddToBoxLineItem ? getLineItemAllocatableQuantity(selectedAddToBoxLineItem, boxes, lineItems) : 0;
+  const selectedBoxAllocatedQty = selectedBoxLineItem
+    ? activeSubShipmentForBox
+      ? Number(selectedBoxLineItem.__subShipmentAllocatedQty || 0)
+      : getAllocatedQuantityForLineItem(selectedBoxLineItem, boxSelectionBoxes, boxSelectionLineItems)
+    : 0;
+  const selectedBoxMaxQuantity = selectedBoxLineItem ? getLineItemAllocatableQuantity(selectedBoxLineItem, boxSelectionBoxes, boxSelectionLineItems) : 0;
+  const selectedAddToBoxMaxQuantity = selectedAddToBoxLineItem ? getLineItemAllocatableQuantity(selectedAddToBoxLineItem, boxSelectionBoxes, boxSelectionLineItems) : 0;
   const boxSkuSelectionRows = [
     { lineItemValue: boxSkuPreview, quantity: boxSkuQuantityPreview },
     ...boxSkuExtraRows,
@@ -3155,7 +3375,7 @@ const ShipmentDetail = () => {
   const handleBoxSkuPreviewChange = (value) => {
     const selectedValue = String(value || '').trim();
     const nextLineItem = findLineItemBySelection(selectedValue);
-    const nextMaxQuantity = nextLineItem ? getLineItemAllocatableQuantity(nextLineItem, boxes, lineItems) : 0;
+    const nextMaxQuantity = nextLineItem ? getLineItemAllocatableQuantity(nextLineItem, boxSelectionBoxes, boxSelectionLineItems) : 0;
 
     setBoxSkuPreview(selectedValue);
     setBoxSkuQuantityPreview(nextMaxQuantity > 0 ? String(nextMaxQuantity) : '');
@@ -3185,7 +3405,7 @@ const ShipmentDetail = () => {
         if (field === 'lineItemValue') {
           const selectedValue = String(value || '').trim();
           const nextLineItem = findLineItemBySelection(selectedValue);
-          const nextMaxQuantity = nextLineItem ? getLineItemAllocatableQuantity(nextLineItem, boxes, lineItems) : 0;
+          const nextMaxQuantity = nextLineItem ? getLineItemAllocatableQuantity(nextLineItem, boxSelectionBoxes, boxSelectionLineItems) : 0;
           return {
             lineItemValue: selectedValue,
             quantity: nextMaxQuantity > 0 ? String(nextMaxQuantity) : '',
@@ -3193,7 +3413,7 @@ const ShipmentDetail = () => {
         }
 
         const rowLineItem = findLineItemBySelection(row.lineItemValue);
-        const rowMaxQuantity = rowLineItem ? getLineItemAllocatableQuantity(rowLineItem, boxes, lineItems) : 0;
+        const rowMaxQuantity = rowLineItem ? getLineItemAllocatableQuantity(rowLineItem, boxSelectionBoxes, boxSelectionLineItems) : 0;
         return {
           ...row,
           quantity: clampAllocationQuantity(value, rowMaxQuantity),
@@ -3228,9 +3448,10 @@ const ShipmentDetail = () => {
       const shipmentData = shipmentPayload?.shipment || shipmentPayload?.data || shipmentPayload;
       const shipmentLineItems = getLineItems(shipmentData);
       const shipmentRecordId = getShipmentRecordId(shipmentData);
+      const shipmentLookupCandidates = getShipmentLookupCandidates(shipmentData, routeId);
       const shipmentRecordLookupIds = [
         ...new Set(
-          getShipmentLookupCandidates(shipmentData, routeId)
+          shipmentLookupCandidates
             .map((lookupId) => String(lookupId || '').trim())
             .filter(isUuidValue)
         ),
@@ -3253,10 +3474,34 @@ const ShipmentDetail = () => {
 
         return [];
       };
-      const [servicesResult, discrepanciesResult, boxesResult, shipmentFileResults] = await Promise.allSettled([
+      const fetchSubShipmentData = async () => {
+        for (const lookupId of shipmentLookupCandidates) {
+          try {
+            const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(lookupId)}/sub-shipments`, {
+              method: 'GET',
+              headers: buildHeaders(),
+              cache: 'no-store',
+            });
+            const payload = await parseResponse(response);
+            return {
+              subShipments: extractSubShipments(payload),
+              availability: extractSubShipmentAvailability(payload),
+            };
+          } catch {
+            // Try the next shipment identifier.
+          }
+        }
+
+        return {
+          subShipments: extractSubShipments(shipmentData),
+          availability: extractSubShipmentAvailability(shipmentData),
+        };
+      };
+      const [servicesResult, discrepanciesResult, boxesResult, subShipmentResult, shipmentFileResults] = await Promise.allSettled([
         fetchShipmentRelated('/services', extractServiceTasks),
         fetchShipmentRelated('/discrepancies', (payload) => toArray(payload?.discrepancies || payload?.data || payload)),
         fetchShipmentRelated('/boxes', extractBoxes),
+        fetchSubShipmentData(),
         Promise.allSettled(
           shipmentRecordLookupIds.map((lookupId) =>
             fetch(`${API_BASE_URL}/api/files?entityType=shipment&entityId=${encodeURIComponent(lookupId)}`, {
@@ -3367,7 +3612,64 @@ const ShipmentDetail = () => {
         }
       }
       loadedBoxes = await enrichBoxesWithItems(loadedBoxes, shipmentLineItems);
+      const subShipmentData =
+        subShipmentResult.status === 'fulfilled'
+          ? subShipmentResult.value
+          : { subShipments: extractSubShipments(shipmentData), availability: extractSubShipmentAvailability(shipmentData) };
+      const loadedSubShipments = mergeSubShipmentLists(
+        subShipmentData.subShipments,
+        extractSubShipments(shipmentData)
+      );
+      const subShipmentBoxResults = await Promise.allSettled(
+        loadedSubShipments.map(async (subShipment) => {
+          const subShipmentId = getSubShipmentId(subShipment);
+          if (!subShipmentId) {
+            return {
+              subShipmentId,
+              boxes: getSubShipmentBoxes(subShipment),
+              allocationSummary: getSubShipmentAllocationSummary(subShipment, {}),
+            };
+          }
+
+          try {
+            const response = await fetch(`${API_BASE_URL}/api/sub-shipments/${encodeURIComponent(subShipmentId)}/boxes`, {
+              method: 'GET',
+              headers: buildHeaders(),
+              cache: 'no-store',
+            });
+            const payload = await parseResponse(response);
+            return {
+              subShipmentId,
+              boxes: mergeBoxLists(getSubShipmentBoxes(subShipment), extractBoxes(payload)),
+              allocationSummary: extractList(payload, ['allocationSummary', 'allocation_summary']),
+            };
+          } catch {
+            return {
+              subShipmentId,
+              boxes: getSubShipmentBoxes(subShipment),
+              allocationSummary: getSubShipmentAllocationSummary(subShipment, {}),
+            };
+          }
+        })
+      );
+      const nextSubShipmentBoxData = subShipmentBoxResults.reduce((acc, result) => {
+        if (result.status !== 'fulfilled') return acc;
+        const subShipmentId = result.value.subShipmentId;
+        if (!subShipmentId) return acc;
+        acc[subShipmentId] = {
+          boxes: result.value.boxes || [],
+          allocationSummary: result.value.allocationSummary || [],
+        };
+        return acc;
+      }, {});
+      const allKnownBoxes = mergeBoxLists(
+        loadedBoxes,
+        loadedSubShipments.flatMap((subShipment) =>
+          getSubShipmentBoxRows(subShipment, nextSubShipmentBoxData[getSubShipmentId(subShipment)] || {})
+        )
+      );
       const boxFileRequests = loadedBoxes
+        .concat(allKnownBoxes)
         .flatMap((box) => getBoxLookupIds(box))
         .filter(isUuidValue)
         .filter(Boolean)
@@ -3420,6 +3722,9 @@ const ShipmentDetail = () => {
       setServices(servicesRows);
       setDiscrepancies(discrepanciesRows);
       setBoxes(loadedBoxes);
+      setSubShipments(loadedSubShipments);
+      setSubShipmentAvailability(subShipmentData.availability || []);
+      setSubShipmentBoxData(nextSubShipmentBoxData);
       setFiles(mergeFileLists(shipmentFiles, lineItemFiles, itemLabelFiles, inlineItemLabelFiles, boxFiles, fbaLabelFiles));
       setFileEntityId(shipmentRecordId || id);
     } catch (requestError) {
@@ -3456,6 +3761,120 @@ const ShipmentDetail = () => {
   useEffect(() => {
     loadStaffMembers();
   }, []);
+
+  const resetSubShipmentCreateForm = () => {
+    setSubShipmentSelections({});
+    setSubShipmentNotes('');
+  };
+
+  const handleSubShipmentSelectionChange = (availabilityItem, field, value) => {
+    const availabilityId = getAvailabilityItemId(availabilityItem);
+    if (!availabilityId) return;
+    const maxQuantity = getAvailabilityAvailableQty(availabilityItem);
+
+    setSubShipmentSelections((currentSelections) => {
+      const currentSelection = currentSelections[availabilityId] || { selected: false, quantity: '' };
+      if (field === 'selected') {
+        const selected = Boolean(value);
+        return {
+          ...currentSelections,
+          [availabilityId]: {
+            ...currentSelection,
+            selected,
+            quantity: selected ? currentSelection.quantity || String(maxQuantity) : '',
+          },
+        };
+      }
+
+      const quantity = clampAllocationQuantity(value, maxQuantity);
+      return {
+        ...currentSelections,
+        [availabilityId]: {
+          ...currentSelection,
+          selected: Boolean(quantity),
+          quantity,
+        },
+      };
+    });
+  };
+
+  const handleCreateSubShipment = async () => {
+    if (isCreatingSubShipment) return;
+
+    try {
+      setIsCreatingSubShipment(true);
+      setError('');
+      setMessage('');
+      const shipmentLookupId = getShipmentRecordId(shipment) || id;
+      const selectedItems = subShipmentAvailability
+        .map((availabilityItem) => {
+          const availabilityId = getAvailabilityItemId(availabilityItem);
+          const selection = subShipmentSelections[availabilityId] || {};
+          const quantity = Number(selection.quantity || 0);
+
+          if (!selection.selected || !availabilityId || !Number.isFinite(quantity) || quantity <= 0) return null;
+
+          return {
+            shipmentItemId: availabilityId,
+            quantity,
+          };
+        })
+        .filter(Boolean);
+
+      if (!selectedItems.length) {
+        throw new Error('Select at least one prepared item and quantity.');
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentLookupId)}/sub-shipments`, {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify({
+          notes: String(subShipmentNotes || '').trim() || undefined,
+          items: selectedItems,
+        }),
+      });
+      await parseResponse(response);
+      setMessage('Sub-shipment created successfully.');
+      setShowSubShipmentModal(false);
+      resetSubShipmentCreateForm();
+      await loadShipmentData();
+    } catch (requestError) {
+      setError(requestError.message || 'Failed to create sub-shipment.');
+    } finally {
+      setIsCreatingSubShipment(false);
+    }
+  };
+
+  const handleOpenSubShipmentBoxModal = (subShipmentId = '') => {
+    setActiveSubShipmentIdForBox(subShipmentId);
+    setBoxType('box');
+    resetAddBoxSkuSelection();
+    setShowAddBoxModal(true);
+  };
+
+  const handleRefreshSubShipmentBoxes = async (subShipmentId = '') => {
+    const subShipment = subShipments.find((currentSubShipment) => getSubShipmentId(currentSubShipment) === subShipmentId);
+    if (!subShipmentId || !subShipment) return;
+
+    try {
+      setError('');
+      const response = await fetch(`${API_BASE_URL}/api/sub-shipments/${encodeURIComponent(subShipmentId)}/boxes`, {
+        method: 'GET',
+        headers: buildHeaders(),
+        cache: 'no-store',
+      });
+      const payload = await parseResponse(response);
+      setSubShipmentBoxData((currentData) => ({
+        ...currentData,
+        [subShipmentId]: {
+          boxes: mergeBoxLists(getSubShipmentBoxes(subShipment), extractBoxes(payload)),
+          allocationSummary: extractList(payload, ['allocationSummary', 'allocation_summary']),
+        },
+      }));
+    } catch (requestError) {
+      setError(requestError.message || 'Failed to load sub-shipment boxes.');
+    }
+  };
 
   const handleStatusUpdate = async (nextStatus = statusValue) => {
     try {
@@ -3651,10 +4070,11 @@ const ShipmentDetail = () => {
       setMessage('');
       const endpoint = isPallet ? 'pallets' : 'boxes';
       const shipmentLookupId = getShipmentRecordId(shipment) || id;
-      const payload = isPallet
+      const subShipmentIdForBox = activeSubShipmentIdForBox;
+      const payload = isPallet && !subShipmentIdForBox
         ? {}
         : {
-            boxType,
+            boxType: isPallet ? 'pallet' : boxType,
             boxSize,
             weight: Number(boxWeight || 0),
             dimensions: { l: Number(boxLength || 0), w: Number(boxWidth || 0), h: Number(boxHeight || 0) },
@@ -3666,7 +4086,7 @@ const ShipmentDetail = () => {
       const allocations = [];
       const seenAllocationKeys = new Set();
 
-      if (!isPallet && lineItems.length) {
+      if (!isPallet && boxSelectionLineItems.length) {
         if (!allocationDrafts.length) {
           return showBoxError('Please select a SKU before creating the box so units are allocated.');
         }
@@ -3690,7 +4110,7 @@ const ShipmentDetail = () => {
             return showBoxError('This SKU is already selected. Please remove duplicate SKU rows.');
           }
 
-          const maxQuantity = getLineItemAllocatableQuantity(lineItem, boxes, lineItems);
+          const maxQuantity = getLineItemAllocatableQuantity(lineItem, boxSelectionBoxes, boxSelectionLineItems);
           if (maxQuantity <= 0) {
             return showBoxError(`${getItemSku(lineItem) || 'Selected SKU'} has no received units available to box.`);
           }
@@ -3741,7 +4161,10 @@ const ShipmentDetail = () => {
           : payload;
 
       const createBoxRequest = async (requestPayload) => {
-        const createResponse = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentLookupId)}/${endpoint}`, {
+        const createUrl = subShipmentIdForBox
+          ? `${API_BASE_URL}/api/sub-shipments/${encodeURIComponent(subShipmentIdForBox)}/boxes`
+          : `${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentLookupId)}/${endpoint}`;
+        const createResponse = await fetch(createUrl, {
           method: 'POST',
           headers: buildHeaders(true),
           body: JSON.stringify(requestPayload),
@@ -3792,15 +4215,16 @@ const ShipmentDetail = () => {
       console.log('[PickPackPro][Box Create POST]', {
         shipmentId: shipmentLookupId,
         endpoint,
-        status: response.status,
-        request: createResult.request,
-        allocationPayloadItems,
-        response: boxPayload,
-        newBox,
-        newBoxId,
-        allocations: allocations.map((allocation) => ({
-          sku: getItemSku(allocation.lineItem) || allocation.lineItemValue,
-          shipmentItemId: getBoxAllocationLineItemId(allocation.lineItem) || getShipmentLineItemId(allocation.lineItem),
+          status: response.status,
+          request: createResult.request,
+          allocationPayloadItems,
+          response: boxPayload,
+          newBox,
+          newBoxId,
+          subShipmentId: subShipmentIdForBox,
+          allocations: allocations.map((allocation) => ({
+            sku: getItemSku(allocation.lineItem) || allocation.lineItemValue,
+            shipmentItemId: getBoxAllocationLineItemId(allocation.lineItem) || getShipmentLineItemId(allocation.lineItem),
           requestedQuantity: allocation.requestedQuantity,
           quantity: allocation.quantity,
           maxQuantity: allocation.maxQuantity,
@@ -3814,13 +4238,13 @@ const ShipmentDetail = () => {
           allocationPayloadItems,
         });
       } else if (!isPallet && newBoxId && allocations.length) {
-        let boxForAllocation = await enrichBoxWithItems(newBox, lineItems);
+        let boxForAllocation = await enrichBoxWithItems(newBox, boxSelectionLineItems);
 
         for (const allocation of allocations) {
           const skuLabel = getItemSku(allocation.lineItem) || allocation.lineItemValue;
           const alreadySavedQuantity =
             boxForAllocation?.__boxItemsSource === 'api'
-              ? getAllocatedQuantityForLineItem(allocation.lineItem, [boxForAllocation], lineItems)
+              ? getAllocatedQuantityForLineItem(allocation.lineItem, [boxForAllocation], boxSelectionLineItems)
               : 0;
 
           if (alreadySavedQuantity >= allocation.quantity) {
@@ -3854,10 +4278,10 @@ const ShipmentDetail = () => {
               allocationWarning += ` ${skuLabel} allocation adjusted to ${formatQuantityValue(allocation.quantity)} units (max available ${formatQuantityValue(allocation.maxQuantity)}).`;
             }
 
-            boxForAllocation = await enrichBoxWithItems({ ...boxForAllocation, id: newBoxId }, lineItems);
+            boxForAllocation = await enrichBoxWithItems({ ...boxForAllocation, id: newBoxId }, boxSelectionLineItems);
           } catch (allocationError) {
-            boxForAllocation = await enrichBoxWithItems(boxForAllocation, lineItems);
-            const refreshedAllocatedQuantity = getAllocatedQuantityForLineItem(allocation.lineItem, [boxForAllocation], lineItems);
+            boxForAllocation = await enrichBoxWithItems(boxForAllocation, boxSelectionLineItems);
+            const refreshedAllocatedQuantity = getAllocatedQuantityForLineItem(allocation.lineItem, [boxForAllocation], boxSelectionLineItems);
 
             if (refreshedAllocatedQuantity >= allocation.quantity) {
               continue;
@@ -3882,7 +4306,11 @@ const ShipmentDetail = () => {
         showToast('success', `${isPallet ? 'Pallet' : 'Box'} created successfully.`);
       }
       await loadShipmentData();
+      if (subShipmentIdForBox) {
+        await handleRefreshSubShipmentBoxes(subShipmentIdForBox);
+      }
       resetAddBoxSkuSelection();
+      setActiveSubShipmentIdForBox('');
       return true;
     } catch (requestError) {
       setError('');
@@ -4224,6 +4652,9 @@ const ShipmentDetail = () => {
 
   const currentStepIndex = statusSteps.indexOf(String(shipment?.status || '').toLowerCase());
   const currentStatus = String(shipment?.status || '').toLowerCase();
+  const sessionRole = String(getSession()?.role || getSession()?.rawUser?.role || '').toLowerCase();
+  const canCreateSubShipment =
+    ['admin', 'staff'].includes(sessionRole) && SUB_SHIPMENT_CREATION_STATUSES.has(currentStatus);
   const nextStatusIndex = currentStepIndex >= 0 ? currentStepIndex + 1 : 1;
   const nextStatus = statusSteps[nextStatusIndex] || '';
   const primaryStatusAction = (() => {
@@ -4366,6 +4797,250 @@ const ShipmentDetail = () => {
               </div>
 
             </div>
+
+            {(subShipments.length || subShipmentAvailability.length || canCreateSubShipment) ? (
+              <div className="mb-8 rounded-md border border-[#d9e3f2] bg-white p-5">
+                <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h3 className="text-[13px] font-semibold uppercase tracking-[0.18em] text-[#6d7b95]">Sub-shipments</h3>
+                    <p className="mt-1 text-sm text-[#60708b]">
+                      Parent shipment {shipment?.reference || id}
+                    </p>
+                  </div>
+                  {canCreateSubShipment ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowSubShipmentModal(true)}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00]"
+                    >
+                      <Plus size={15} />
+                      Create Sub-shipment
+                    </button>
+                  ) : null}
+                </div>
+
+                {subShipmentAvailability.length ? (
+                  <div className="mb-5 overflow-hidden rounded-lg border border-[#e2e8f0]">
+                    <div className="bg-[#f8fafc] px-4 py-3 text-xs font-semibold uppercase tracking-wide text-[#64748b]">
+                      Availability
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[720px] text-sm">
+                        <thead className="bg-white">
+                          <tr className="border-b border-[#edf2f7] text-left text-[11px] font-semibold uppercase tracking-wide text-[#7f8ea6]">
+                            <th className="px-4 py-3">Product / SKU</th>
+                            <th className="px-4 py-3">Expected</th>
+                            <th className="px-4 py-3">Received</th>
+                            <th className="px-4 py-3">Assigned</th>
+                            <th className="px-4 py-3">Remaining</th>
+                            <th className="px-4 py-3">Prepared</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#f1f5f9]">
+                          {subShipmentAvailability.map((availabilityItem, index) => (
+                            <tr key={getAvailabilityItemId(availabilityItem) || getAvailabilitySku(availabilityItem) || index}>
+                              <td className="px-4 py-3">
+                                <p className="font-semibold text-[#132347]">{getAvailabilityProductName(availabilityItem) || '-'}</p>
+                                <p className="text-xs text-[#64748b]">{getAvailabilitySku(availabilityItem) || '-'}</p>
+                              </td>
+                              <td className="px-4 py-3 text-[#132347]">{formatQuantityValue(getAvailabilityExpectedQty(availabilityItem))}</td>
+                              <td className="px-4 py-3 text-[#132347]">{formatQuantityValue(getAvailabilityReceivedQty(availabilityItem))}</td>
+                              <td className="px-4 py-3 text-[#132347]">{formatQuantityValue(getAvailabilityAssignedQty(availabilityItem))}</td>
+                              <td className="px-4 py-3 text-[#132347]">{formatQuantityValue(getAvailabilityRemainingQty(availabilityItem))}</td>
+                              <td className="px-4 py-3">
+                                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                  isAvailabilityPrepared(availabilityItem)
+                                    ? 'bg-emerald-50 text-emerald-700'
+                                    : 'bg-gray-100 text-gray-600'
+                                }`}>
+                                  {isAvailabilityPrepared(availabilityItem) ? 'Yes' : 'No'}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+
+                {subShipments.length ? (
+                  <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                    {subShipments.map((subShipment, subShipmentIndex) => {
+                      const subShipmentId = getSubShipmentId(subShipment);
+                      const status = getSubShipmentStatus(subShipment);
+                      const boxData = subShipmentBoxData[subShipmentId] || {};
+                      const subBoxes = getSubShipmentBoxRows(subShipment, boxData);
+                      const allocationSummary = getSubShipmentAllocationSummary(subShipment, boxData);
+                      const items = getSubShipmentItems(subShipment);
+                      const canDispatchBoxes = status !== 'cancelled';
+
+                      return (
+                        <div key={subShipmentId || subShipmentIndex} className="overflow-hidden rounded-lg border border-[#dbe5f3] bg-[#f8fbff]">
+                          <div className="border-b border-[#e4ecf8] bg-white px-4 py-4">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                              <div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className="text-[15px] font-semibold text-[#132347]">
+                                    {getSubShipmentReference(subShipment)}
+                                  </p>
+                                  <span className="rounded-full bg-[#fff7ed] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#d76000]">
+                                    {getSubShipmentStatusLabel(status)}
+                                  </span>
+                                </div>
+                                <p className="mt-1 text-xs text-[#60708b]">
+                                  {subBoxes.length} box{subBoxes.length !== 1 ? 'es' : ''} - {getSubShipmentLabelSummary(subBoxes, files)} - {getSubShipmentDispatchSummary(subShipment, subBoxes)}
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenSubShipmentBoxModal(subShipmentId)}
+                                  disabled={!subShipmentId || status === 'cancelled'}
+                                  className="rounded-lg bg-[#132347] px-3 py-2 text-xs font-semibold text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  Add Box
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRefreshSubShipmentBoxes(subShipmentId)}
+                                  disabled={!subShipmentId}
+                                  className="rounded-lg border border-[#d6dfef] bg-white px-3 py-2 text-xs font-semibold text-[#5f6d85] hover:bg-[#f8fafc] disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  View / Manage Boxes
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="space-y-4 p-4">
+                            <div>
+                              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#7f8ea6]">Items</p>
+                              {items.length ? (
+                                <div className="space-y-2">
+                                  {items.map((item, itemIndex) => {
+                                    const lineItem = getSubShipmentItemLineItem(item);
+                                    return (
+                                      <div key={item?.id || getLineItemId(lineItem) || itemIndex} className="rounded-md border border-[#e2e8f0] bg-white px-3 py-2 text-sm">
+                                        <div className="flex items-center justify-between gap-3">
+                                          <div className="min-w-0">
+                                            <p className="truncate font-semibold text-[#132347]">{getItemProductName(lineItem) || 'Product'}</p>
+                                            <p className="text-xs text-[#64748b]">SKU {getItemSku(lineItem) || '-'}</p>
+                                          </div>
+                                          <span className="shrink-0 rounded-full bg-[#f3f6fb] px-2.5 py-1 text-xs font-semibold text-[#60708b]">
+                                            {formatQuantityValue(getSubShipmentItemQuantity(item))}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <p className="rounded-md border border-[#e2e8f0] bg-white px-3 py-2 text-xs text-[#64748b]">No items returned.</p>
+                              )}
+                            </div>
+
+                            <div>
+                              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#7f8ea6]">Allocation</p>
+                              {allocationSummary.length ? (
+                                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                  {allocationSummary.map((summary, index) => (
+                                    <div key={getSubShipmentAllocationItemId(summary) || index} className="rounded-md border border-[#e2e8f0] bg-white px-3 py-2 text-xs text-[#64748b]">
+                                      <p className="font-semibold text-[#132347]">{getAvailabilitySku(summary) || 'SKU'}</p>
+                                      <p>Planned {formatQuantityValue(firstPresent(summary?.plannedQty, summary?.planned_qty, 0))} - Allocated {formatQuantityValue(firstPresent(summary?.allocated, summary?.allocatedQty, summary?.allocated_qty, 0))} - Remaining {formatQuantityValue(firstPresent(summary?.remainingQty, summary?.remaining_qty, 0))}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="rounded-md border border-[#e2e8f0] bg-white px-3 py-2 text-xs text-[#64748b]">No allocation summary returned.</p>
+                              )}
+                            </div>
+
+                            <div>
+                              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#7f8ea6]">Boxes</p>
+                              {subBoxes.length ? (
+                                <div className="space-y-2">
+                                  {subBoxes.map((box, boxIndex) => {
+                                    const boxRecordId = getBoxRecordId(box);
+                                    const labelState = getBoxLabelState(box, files);
+                                    const labelUploaded = isBoxFbaLabelUploaded(box, files);
+                                    const dispatchComplete = ['dispatched', 'sealed', 'completed', 'complete'].includes(
+                                      String(firstPresent(box?.status, box?.boxStatus, box?.box_status, box?.dispatchStatus, box?.dispatch_status, '')).toLowerCase()
+                                    ) || Boolean(box?.dispatched_at || box?.dispatchedAt);
+                                    const fbaUploadKey = `fba-${boxRecordId || boxIndex}`;
+                                    const isUploadingFbaLabel = uploadingBoxLabelId === fbaUploadKey;
+
+                                    return (
+                                      <div key={boxRecordId || getBoxId(box) || boxIndex} className="rounded-md border border-[#e2e8f0] bg-white px-3 py-3">
+                                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                          <div>
+                                            <p className="font-semibold text-[#132347]">{getBoxTitle(box, boxIndex)}</p>
+                                            <p className="text-xs text-[#64748b]">
+                                              {[getBoxDimensions(box), getBoxWeight(box) ? `${getBoxWeight(box)} kg` : '', getBoxSkuSummary(box, files, lineItems)].filter(Boolean).join(' - ') || 'No box details'}
+                                            </p>
+                                          </div>
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${labelState.className}`}>
+                                              {labelState.label}
+                                            </span>
+                                            {labelUploaded ? (
+                                              <button
+                                                type="button"
+                                                onClick={() => handleBoxFbaLabel(box, boxIndex)}
+                                                className="rounded-lg border border-[#d6dfef] px-3 py-2 text-xs font-semibold text-[#5f6d85] hover:bg-[#f8fafc]"
+                                              >
+                                                FBA Label
+                                              </button>
+                                            ) : (
+                                              <label className={`rounded-lg bg-[#ff9d3a] px-3 py-2 text-xs font-semibold text-white hover:bg-[#f28a18] ${isUploadingFbaLabel || !boxRecordId ? 'pointer-events-none opacity-60' : 'cursor-pointer'}`}>
+                                                {isUploadingFbaLabel ? 'Uploading...' : 'Upload Label'}
+                                                <input
+                                                  type="file"
+                                                  accept=".pdf,image/*"
+                                                  className="hidden"
+                                                  disabled={!boxRecordId || isUploadingFbaLabel}
+                                                  onChange={(event) => {
+                                                    const file = event.target.files?.[0] || null;
+                                                    event.target.value = '';
+                                                    handleUploadBoxFbaLabel(box, boxIndex, file);
+                                                  }}
+                                                />
+                                              </label>
+                                            )}
+                                            <button
+                                              type="button"
+                                              onClick={dispatchComplete || !labelUploaded ? undefined : () => handleMarkBoxDispatched(box)}
+                                              disabled={!canDispatchBoxes || dispatchComplete || !labelUploaded || !boxRecordId}
+                                              className={`rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed ${
+                                                dispatchComplete
+                                                  ? 'bg-emerald-600 disabled:opacity-100'
+                                                  : 'bg-[#132347] hover:bg-[#0f1b38] disabled:opacity-50'
+                                              }`}
+                                            >
+                                              {dispatchComplete ? 'Dispatched' : 'Dispatch'}
+                                            </button>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <p className="rounded-md border border-[#e2e8f0] bg-white px-3 py-2 text-xs text-[#64748b]">No boxes created for this sub-shipment.</p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="rounded-lg border border-dashed border-[#d9e3f2] bg-[#f8fbff] px-4 py-6 text-center text-sm text-[#64748b]">
+                    No sub-shipments created yet.
+                  </p>
+                )}
+              </div>
+            ) : null}
 
             <div className="grid grid-cols-1 items-start gap-10 lg:grid-cols-2">
               <div className="space-y-6">
@@ -4598,7 +5273,10 @@ const ShipmentDetail = () => {
                   </div>
 
                   <button
-                    onClick={() => setShowAddBoxModal(true)}
+                    onClick={() => {
+                      setActiveSubShipmentIdForBox('');
+                      setShowAddBoxModal(true);
+                    }}
                     className="mt-4 w-full rounded-full border border-[#dfe6f2] bg-white px-4 py-3 text-[11px] font-semibold uppercase tracking-wide text-[#7f8ea6] hover:bg-gray-50"
                   >
                     + Add Box/Pallet
@@ -4838,6 +5516,127 @@ const ShipmentDetail = () => {
           </div>
         ) : null}
 
+        {showSubShipmentModal ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <div className="max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-xl">
+              <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+                <h3 className="text-lg font-semibold text-[#132347]">Create Sub-shipment</h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isCreatingSubShipment) return;
+                    setShowSubShipmentModal(false);
+                    resetSubShipmentCreateForm();
+                  }}
+                  disabled={isCreatingSubShipment}
+                  className="rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="max-h-[calc(90vh-145px)] space-y-4 overflow-y-auto p-6">
+                <div>
+                  <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-gray-400">Notes</label>
+                  <textarea
+                    value={subShipmentNotes}
+                    onChange={(event) => setSubShipmentNotes(event.target.value)}
+                    className="min-h-20 w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-[#ff9900] focus:outline-none focus:ring-2 focus:ring-orange-100"
+                    placeholder="Optional"
+                  />
+                </div>
+
+                <div className="overflow-hidden rounded-lg border border-[#e2e8f0]">
+                  <div className="grid grid-cols-[44px_minmax(0,1fr)_110px_110px] bg-[#f8fafc] px-4 py-3 text-[11px] font-semibold uppercase tracking-wide text-[#64748b]">
+                    <span />
+                    <span>Product / SKU</span>
+                    <span>Available</span>
+                    <span>Quantity</span>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto divide-y divide-[#f1f5f9]">
+                    {subShipmentAvailability.map((availabilityItem, index) => {
+                      const availabilityId = getAvailabilityItemId(availabilityItem);
+                      const availableQty = getAvailabilityAvailableQty(availabilityItem);
+                      const prepared = isAvailabilityPrepared(availabilityItem);
+                      const selectable = Boolean(prepared && availableQty > 0 && availabilityId);
+                      const selection = subShipmentSelections[availabilityId] || {};
+
+                      return (
+                        <div
+                          key={availabilityId || getAvailabilitySku(availabilityItem) || index}
+                          className={`grid grid-cols-[44px_minmax(0,1fr)_110px_110px] items-center gap-3 px-4 py-3 text-sm ${
+                            selectable ? 'bg-white' : 'bg-gray-50 text-gray-400'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={Boolean(selection.selected)}
+                            disabled={!selectable}
+                            onChange={(event) => handleSubShipmentSelectionChange(availabilityItem, 'selected', event.target.checked)}
+                            className="h-4 w-4 accent-[#ff6900] disabled:cursor-not-allowed"
+                          />
+                          <div className="min-w-0">
+                            <p className="truncate font-semibold text-[#132347]">{getAvailabilityProductName(availabilityItem) || '-'}</p>
+                            <p className="text-xs text-[#64748b]">
+                              SKU {getAvailabilitySku(availabilityItem) || '-'} - Prepared {prepared ? 'Yes' : 'No'}
+                            </p>
+                          </div>
+                          <span className="font-medium text-[#132347]">{formatQuantityValue(availableQty)}</span>
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            max={availableQty || undefined}
+                            value={selection.quantity || ''}
+                            disabled={!selectable}
+                            onChange={(event) => handleSubShipmentSelectionChange(availabilityItem, 'quantity', event.target.value)}
+                            className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+                          />
+                        </div>
+                      );
+                    })}
+                    {!subShipmentAvailability.length ? (
+                      <div className="px-4 py-8 text-center text-sm text-gray-500">
+                        No availability rows returned.
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 border-t border-gray-200 px-6 py-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isCreatingSubShipment) return;
+                    setShowSubShipmentModal(false);
+                    resetSubShipmentCreateForm();
+                  }}
+                  disabled={isCreatingSubShipment}
+                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreateSubShipment}
+                  disabled={isCreatingSubShipment}
+                  className="inline-flex min-w-[128px] items-center justify-center gap-2 rounded-lg bg-[#ff6900] px-5 py-2 text-sm font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isCreatingSubShipment ? (
+                    <>
+                      <RefreshCw size={14} className="animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    'Create'
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {showPrepTimeModal ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
             <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
@@ -4871,11 +5670,14 @@ const ShipmentDetail = () => {
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
             <div className="max-h-[90vh] w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-xl">
               <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
-                <h3 className="text-lg font-semibold text-[#132347]">Add Box / Pallet</h3>
+                <h3 className="text-lg font-semibold text-[#132347]">
+                  {activeSubShipmentForBox ? `Add Box - ${getSubShipmentReference(activeSubShipmentForBox)}` : 'Add Box / Pallet'}
+                </h3>
                 <button
                   onClick={() => {
                     if (isCreatingBox) return;
                     setShowAddBoxModal(false);
+                    setActiveSubShipmentIdForBox('');
                     resetAddBoxSkuSelection();
                   }}
                   disabled={isCreatingBox}
@@ -4919,7 +5721,7 @@ const ShipmentDetail = () => {
                   <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_96px]">
                     <select value={boxSkuPreview} onChange={(e) => handleBoxSkuPreviewChange(e.target.value)} className="min-w-0 w-full truncate rounded-lg border border-gray-200 px-3 py-2.5 text-sm">
                       <option value="">Select SKU</option>
-                      {lineItems.map((item, index) => {
+                      {boxSelectionLineItems.map((item, index) => {
                         const optionValue = getLineItemOptionValue(item);
                         // const availableQty = getLineItemAllocatableQuantity(item, boxes);
 
@@ -4945,16 +5747,20 @@ const ShipmentDetail = () => {
                   </div>
                   {selectedBoxLineItem ? (
                     <p className="mt-2 text-[11px] font-medium text-[#6b7a93]">
-                      Boxable {formatQuantityValue(selectedBoxBoxableQty)} units, already boxed {formatQuantityValue(selectedBoxAllocatedQty)}, available {formatQuantityValue(selectedBoxMaxQuantity)}.
+                      {activeSubShipmentForBox ? 'Planned' : 'Boxable'} {formatQuantityValue(selectedBoxBoxableQty)} units, already boxed {formatQuantityValue(selectedBoxAllocatedQty)}, available {formatQuantityValue(selectedBoxMaxQuantity)}.
                     </p>
                   ) : null}
                   {boxSkuExtraRows.length ? (
                     <div className="mt-3 space-y-3">
                       {boxSkuExtraRows.map((row, rowIndex) => {
                         const rowLineItem = findLineItemBySelection(row.lineItemValue);
-                        const rowMaxQuantity = rowLineItem ? getLineItemAllocatableQuantity(rowLineItem, boxes, lineItems) : 0;
+                        const rowMaxQuantity = rowLineItem ? getLineItemAllocatableQuantity(rowLineItem, boxSelectionBoxes, boxSelectionLineItems) : 0;
                         const rowBoxableQty = rowLineItem ? getLineItemBoxableQuantity(rowLineItem) : 0;
-                        const rowAllocatedQty = rowLineItem ? getAllocatedQuantityForLineItem(rowLineItem, boxes, lineItems) : 0;
+                        const rowAllocatedQty = rowLineItem
+                          ? activeSubShipmentForBox
+                            ? Number(rowLineItem.__subShipmentAllocatedQty || 0)
+                            : getAllocatedQuantityForLineItem(rowLineItem, boxSelectionBoxes, boxSelectionLineItems)
+                          : 0;
                         const visualRowIndex = rowIndex + 1;
 
                         return (
@@ -4966,7 +5772,7 @@ const ShipmentDetail = () => {
                                 className="min-w-0 w-full truncate rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm"
                               >
                                 <option value="">Select SKU</option>
-                                {lineItems.map((item, index) => {
+                                {boxSelectionLineItems.map((item, index) => {
                                   const optionValue = getLineItemOptionValue(item);
 
                                   return (
@@ -4998,7 +5804,7 @@ const ShipmentDetail = () => {
                             </div>
                             {rowLineItem ? (
                               <p className="text-[11px] font-medium text-[#6b7a93]">
-                                Boxable {formatQuantityValue(rowBoxableQty)} units, already boxed {formatQuantityValue(rowAllocatedQty)}, available {formatQuantityValue(rowMaxQuantity)}.
+                                {activeSubShipmentForBox ? 'Planned' : 'Boxable'} {formatQuantityValue(rowBoxableQty)} units, already boxed {formatQuantityValue(rowAllocatedQty)}, available {formatQuantityValue(rowMaxQuantity)}.
                               </p>
                             ) : null}
                           </div>
@@ -5039,6 +5845,7 @@ const ShipmentDetail = () => {
                   onClick={() => {
                     if (isCreatingBox) return;
                     setShowAddBoxModal(false);
+                    setActiveSubShipmentIdForBox('');
                     resetAddBoxSkuSelection();
                   }}
                   disabled={isCreatingBox}
@@ -5054,6 +5861,7 @@ const ShipmentDetail = () => {
                     const created = await handleCreateBox(boxType === 'pallet');
                     if (created) {
                       setShowAddBoxModal(false);
+                      setActiveSubShipmentIdForBox('');
                       resetAddBoxSkuSelection();
                     }
                   }}

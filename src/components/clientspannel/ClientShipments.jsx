@@ -648,6 +648,12 @@ const firstNonZeroQuantity = (...values) => {
   return value === undefined || value === null ? '' : value;
 };
 
+const formatQuantityValue = (value) => {
+  const quantity = Number(value || 0);
+  if (!Number.isFinite(quantity)) return '0';
+  return Number.isInteger(quantity) ? String(quantity) : quantity.toFixed(2).replace(/\.?0+$/, '');
+};
+
 const normalizeDisplayValue = (value = '') => {
   const normalized = String(value || '').trim();
   const lowerValue = normalized.toLowerCase();
@@ -1358,7 +1364,7 @@ const buildShipmentPreview = (shipment = {}, shipmentId = '') => {
   const cachedItems = cachedDraft?.productItems || [];
   const fallbackItems = sortLineItemsForDisplay(getLineItems(fallback), cachedItems);
   const selectedItems = applyBundleSizesFromNotes(
-    fallbackItems.length ? fallbackItems : cachedItems,
+    cachedItems.length ? mergeLineItemGroups(cachedItems, fallbackItems) : fallbackItems,
     fallback
   );
   const cachedNotes = cachedDraft?.createForm ? buildShipmentNotes(cachedDraft.createForm, cachedItems) : '';
@@ -1366,18 +1372,18 @@ const buildShipmentPreview = (shipment = {}, shipmentId = '') => {
 
   return {
     ...fallback,
-    notes: fallback.notes || fallback.client_notes || cachedNotes || '',
-    client_notes: fallback.client_notes || fallback.notes || cachedNotes || '',
+    notes: cachedNotes || fallback.notes || fallback.client_notes || '',
+    client_notes: cachedNotes || fallback.client_notes || fallback.notes || '',
     expectedArrivalDate: formatDateForInput(
-      fallback.expectedArrivalDate ||
+      cachedExpectedArrivalDate ||
+        fallback.expectedArrivalDate ||
         fallback.expected_arrival_date ||
-        cachedExpectedArrivalDate ||
         fallback.expected
     ),
     expected_arrival_date: formatDateForInput(
-      fallback.expected_arrival_date ||
+      cachedExpectedArrivalDate ||
+        fallback.expected_arrival_date ||
         fallback.expectedArrivalDate ||
-        cachedExpectedArrivalDate ||
         fallback.expected
     ),
     items: selectedItems,
@@ -4250,6 +4256,14 @@ const getCachedDraft = (...shipments) => {
   return exactMatches[0] || null;
 };
 
+const getEditableDraftSnapshot = (...shipments) => {
+  const cachedDraft = getCachedDraft(...shipments);
+  return cachedDraft?.isDraft === true || cachedDraft?.status === 'draft' ? cachedDraft : null;
+};
+
+const canEditDraftShipment = (shipment = {}) =>
+  String(shipment?.status || '').toLowerCase() === 'draft' || Boolean(getEditableDraftSnapshot(shipment));
+
 const writeCachedDraft = (shipments, draftData) => {
   const keys = getDraftCacheKeys(...shipments);
   if (!keys.length) return;
@@ -4337,10 +4351,13 @@ const getShipmentOrderData = (shipment = {}) => {
 
 const formatDateForInput = (value = '') => {
   if (!value) return '';
-  const textValue = String(value);
+  const textValue = String(value).trim();
+  if (/^[+-]\d{6}-/.test(textValue)) return '';
   if (/^\d{4}-\d{2}-\d{2}/.test(textValue)) return textValue.slice(0, 10);
   const parsedDate = new Date(textValue);
-  return Number.isNaN(parsedDate.getTime()) ? '' : parsedDate.toISOString().slice(0, 10);
+  if (Number.isNaN(parsedDate.getTime())) return '';
+  const normalizedDate = parsedDate.toISOString().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate) ? normalizedDate : '';
 };
 
 const buildShipmentNotes = (form = {}, items = []) =>
@@ -4414,6 +4431,69 @@ const getShipmentStatusBadgeClass = (status = '') => {
   }
 };
 
+const SUB_SHIPMENT_STATUS_LABELS = {
+  draft: 'Draft',
+  awaiting_fba_labels: 'Awaiting FBA labels',
+  ready_to_dispatch: 'Ready to dispatch',
+  dispatched: 'Dispatched',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+};
+
+const extractSubShipments = (payload) =>
+  extractList(payload, ['subShipments', 'sub_shipments', 'subshipments']);
+
+const getSubShipmentId = (subShipment = {}) =>
+  firstPresent(subShipment?.id, subShipment?.uuid, subShipment?.subShipmentId, subShipment?.sub_shipment_id);
+
+const getSubShipmentReference = (subShipment = {}) =>
+  firstPresent(
+    subShipment?.reference,
+    subShipment?.subShipmentReference,
+    subShipment?.sub_shipment_reference,
+    subShipment?.sequence_no ? `Sub-shipment ${subShipment.sequence_no}` : '',
+    getSubShipmentId(subShipment)
+  );
+
+const getSubShipmentStatus = (subShipment = {}) =>
+  String(firstPresent(subShipment?.status, 'draft')).trim().toLowerCase();
+
+const getSubShipmentStatusLabel = (status = '') => {
+  const normalizedStatus = String(status || '').trim().toLowerCase();
+  return SUB_SHIPMENT_STATUS_LABELS[normalizedStatus] || formatServiceLabel(normalizedStatus || 'draft');
+};
+
+const getSubShipmentItems = (subShipment = {}) =>
+  extractList(subShipment, ['sub_shipment_items', 'subShipmentItems', 'items']);
+
+const getSubShipmentBoxes = (subShipment = {}) =>
+  extractList(subShipment, ['outbound_boxes', 'outboundBoxes', 'boxes', 'shipmentBoxes', 'shipment_boxes']);
+
+const getSubShipmentItemLineItem = (item = {}) => {
+  const lineItem =
+    item?.shipment_line_items ||
+    item?.shipmentLineItems ||
+    item?.shipmentLineItem ||
+    item?.shipment_line_item ||
+    item?.lineItem ||
+    item?.line_item ||
+    item?.item;
+
+  return lineItem && typeof lineItem === 'object' ? lineItem : item;
+};
+
+const getSubShipmentItemQuantity = (item = {}) =>
+  firstPresent(item?.quantity, item?.qty, item?.units, item?.plannedQty, item?.planned_qty, 0);
+
+const decorateSubShipmentBoxForClient = (box = {}, subShipment = {}) => ({
+  ...box,
+  subShipmentId: getSubShipmentId(subShipment),
+  sub_shipment_id: getSubShipmentId(subShipment),
+  subShipmentReference: getSubShipmentReference(subShipment),
+  sub_shipment_reference: getSubShipmentReference(subShipment),
+  __subShipmentReference: getSubShipmentReference(subShipment),
+});
+
 const ClientShipments = ({ awaitingFbaOnly = false }) => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -4441,6 +4521,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   const [selectedFbaBoxDetail, setSelectedFbaBoxDetail] = useState(null);
   const [batchFbaUpload, setBatchFbaUpload] = useState(null);
   const [selectedShipmentBoxes, setSelectedShipmentBoxes] = useState([]);
+  const [selectedShipmentSubShipments, setSelectedShipmentSubShipments] = useState([]);
   const [selectedShipmentServices, setSelectedShipmentServices] = useState([]);
   const [selectedShipmentDiscrepancies, setSelectedShipmentDiscrepancies] = useState([]);
   const [selectedShipmentFiles, setSelectedShipmentFiles] = useState([]);
@@ -4468,10 +4549,22 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     setShowViewModal(false);
     setSelectedShipment(null);
     setSelectedShipmentBoxes([]);
+    setSelectedShipmentSubShipments([]);
     setSelectedShipmentServices([]);
     setSelectedShipmentDiscrepancies([]);
     setSelectedShipmentFiles([]);
     setLoadingShipmentFiles(false);
+  };
+
+  const closeCreateShipmentForm = () => {
+    setCreateForm({
+      ...initialCreateForm,
+      clientId: getClientIdFromSession(),
+    });
+    setProductItems([createEmptyProductItem()]);
+    setEditingShipmentId('');
+    setSavingAction('');
+    navigate('/shipments', { replace: true });
   };
 
   const getCachedUploadedFiles = (...shipmentsToMatch) => {
@@ -4730,6 +4823,65 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     return allBoxes;
   };
 
+  const fetchSubShipmentsForShipmentCandidates = async (lookupCandidates = []) => {
+    const uniqueLookupCandidates = [...new Set(lookupCandidates.map((value) => String(value || '').trim()).filter(Boolean))];
+
+    for (const lookupId of uniqueLookupCandidates) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(lookupId)}/sub-shipments`, {
+          method: 'GET',
+          headers: buildHeaders(),
+          cache: 'no-store',
+        });
+        if (response.status === 401 || response.status === 403) {
+          const authError = new Error('Unauthorized shipment access.');
+          authError.status = response.status;
+          throw authError;
+        }
+        const payload = await parseResponse(response);
+        const subShipments = extractSubShipments(payload);
+        if (!subShipments.length) continue;
+
+        const boxResults = await Promise.allSettled(
+          subShipments.map(async (subShipment) => {
+            const subShipmentId = getSubShipmentId(subShipment);
+            if (!subShipmentId) return getSubShipmentBoxes(subShipment);
+
+            try {
+              const boxesResponse = await fetch(`${API_BASE_URL}/api/sub-shipments/${encodeURIComponent(subShipmentId)}/boxes`, {
+                method: 'GET',
+                headers: buildHeaders(),
+                cache: 'no-store',
+              });
+              if (boxesResponse.status === 401 || boxesResponse.status === 403) return getSubShipmentBoxes(subShipment);
+              const boxesPayload = await parseResponse(boxesResponse);
+              const boxes = extractList(boxesPayload, ['boxes', 'outbound_boxes', 'outboundBoxes']);
+              return boxes.length ? boxes : getSubShipmentBoxes(subShipment);
+            } catch {
+              return getSubShipmentBoxes(subShipment);
+            }
+          })
+        );
+
+        return subShipments.map((subShipment, index) => {
+          const boxes = boxResults[index]?.status === 'fulfilled' ? boxResults[index].value : getSubShipmentBoxes(subShipment);
+          const decoratedBoxes = boxes.map((box) => decorateSubShipmentBoxForClient(box, subShipment));
+          return {
+            ...subShipment,
+            boxes: decoratedBoxes,
+            outbound_boxes: decoratedBoxes,
+            shipmentBoxes: decoratedBoxes,
+            shipment_boxes: decoratedBoxes,
+          };
+        });
+      } catch (requestError) {
+        if (requestError?.status === 401 || requestError?.status === 403) break;
+      }
+    }
+
+    return [];
+  };
+
   const fetchShipmentDetailFromCandidates = async (lookupCandidates = []) => {
     const detailLookupCandidates = getUuidLookupCandidates(lookupCandidates);
     for (const lookupId of detailLookupCandidates) {
@@ -4797,9 +4949,10 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           const lookupCandidates = getShipmentLookupCandidates(shipment);
           if (!lookupCandidates.length) return { shipment, boxes: [] };
 
-          const [detailResult, boxesResult] = await Promise.allSettled([
+          const [detailResult, boxesResult, subShipmentsResult] = await Promise.allSettled([
             fetchShipmentDetailFromCandidates(lookupCandidates),
             fetchBoxesForShipmentCandidates(lookupCandidates),
+            fetchSubShipmentsForShipmentCandidates(lookupCandidates),
           ]);
 
           const detailPayload = detailResult.status === 'fulfilled' ? detailResult.value?.payload : null;
@@ -4818,7 +4971,13 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
             lineItems: detailItems,
           });
           const boxes = boxesResult.status === 'fulfilled' ? boxesResult.value : [];
-          return { shipment: enrichedShipment, boxes };
+          const subShipments = subShipmentsResult.status === 'fulfilled'
+            ? subShipmentsResult.value
+            : extractSubShipments(detail);
+          const subShipmentBoxes = subShipments.flatMap((subShipment) =>
+            getSubShipmentBoxes(subShipment).map((box) => decorateSubShipmentBoxForClient(box, subShipment))
+          );
+          return { shipment: enrichedShipment, boxes: mergeBoxPages(boxes, subShipmentBoxes) };
         })
       );
       if (!isCurrentRequest()) return;
@@ -4995,10 +5154,12 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
       const loadedRows = loadedPayloads
         .map(normalizeShipment)
+        .map((shipment) => (getEditableDraftSnapshot(shipment) ? { ...shipment, backendStatus: shipment.status, status: 'draft' } : shipment))
         .filter(isValidShipmentForList)
         .filter(doesShipmentBelongToCurrentClient);
+      const shouldPreferPinnedRows = pinnedRows.some(canEditDraftShipment);
       const mergedRows = sortShipmentsForList(
-        mergeShipmentLists(pinnedRows, loadedRows).filter(isValidShipmentForList)
+        mergeShipmentLists(...(shouldPreferPinnedRows ? [loadedRows, pinnedRows] : [pinnedRows, loadedRows])).filter(isValidShipmentForList)
       );
       if (awaitingFbaOnly) {
         setShipments(mergedRows);
@@ -5166,57 +5327,117 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         .filter(({ file }) => file && typeof file === 'object' && file.name);
 
       const notes = buildShipmentNotes(createForm, items);
-      const expectedArrivalDate = String(createForm.expectedArrivalDate || '').trim();
+      const rawExpectedArrivalDate = String(createForm.expectedArrivalDate || '').trim();
+      const expectedArrivalDate = formatDateForInput(rawExpectedArrivalDate);
+      if (rawExpectedArrivalDate && !expectedArrivalDate) {
+        throw new Error('Expected date is invalid. Please select a valid date.');
+      }
       const requestUrl = editingShipmentId
         ? `${API_BASE_URL}/api/shipments/${encodeURIComponent(editingShipmentId)}`
         : `${API_BASE_URL}/api/shipments`;
+      const shipmentFields = {
+        notes,
+        ...(expectedArrivalDate ? { expectedArrivalDate } : {}),
+        isDraft,
+        items,
+      };
       const requestBody = editingShipmentId
-        ? {
-            notes,
-            items,
-            ...(expectedArrivalDate ? { expectedArrivalDate } : {}),
-          }
+        ? shipmentFields
         : {
             clientId: clientId.trim(),
-            notes,
-            items,
-            ...(expectedArrivalDate ? { expectedArrivalDate } : {}),
+            ...shipmentFields,
           };
-      const response = await fetch(requestUrl, {
-        method: editingShipmentId ? 'PATCH' : 'POST',
-        headers: buildHeaders(true),
-        body: JSON.stringify(requestBody),
+      const existingShipmentForEdit = editingShipmentId
+        ? shipments.find((shipment) => getDraftCacheKeys(shipment).includes(String(editingShipmentId)))
+        : null;
+      const buildLocalDraftSavePayload = () => ({
+        shipment: {
+          ...existingShipmentForEdit,
+          id: getShipmentRecordId(existingShipmentForEdit) || editingShipmentId,
+          uuid: existingShipmentForEdit?.uuid || editingShipmentId,
+          reference: existingShipmentForEdit?.reference || existingShipmentForEdit?.shipmentNumber || editingShipmentId,
+          status: 'draft',
+          notes,
+          client_notes: notes,
+          expectedArrivalDate,
+          expected_arrival_date: expectedArrivalDate,
+          items,
+          lineItems: items,
+          shipment_line_items: items,
+        },
       });
-      const responseForDebug = response.clone();
+      const backendStatusForEdit = String(existingShipmentForEdit?.backendStatus || '').toLowerCase();
+      const shouldSaveDraftLocallyOnly = Boolean(
+        editingShipmentId &&
+          isDraft &&
+          getEditableDraftSnapshot(existingShipmentForEdit, editingShipmentId) &&
+          backendStatusForEdit &&
+          backendStatusForEdit !== 'draft'
+      );
       let savePayload = null;
-      try {
-        savePayload = await parseResponse(response);
+
+      if (shouldSaveDraftLocallyOnly) {
+        savePayload = buildLocalDraftSavePayload();
         console.log('[PickPackPro] Shipment save response', {
-          status: response.status,
-          ok: response.ok,
-          method: editingShipmentId ? 'PATCH' : 'POST',
+          status: 200,
+          ok: true,
+          method: 'LOCAL_DRAFT',
           url: requestUrl,
           requestBody,
           response: savePayload,
         });
-      } catch (saveError) {
-        let errorPayload = null;
-        try {
-          const errorText = await responseForDebug.text();
-          errorPayload = errorText ? JSON.parse(errorText) : null;
-        } catch {
-          errorPayload = null;
-        }
-        console.error('[PickPackPro] Shipment save failed', {
-          status: response.status,
-          ok: response.ok,
+      } else {
+        const response = await fetch(requestUrl, {
           method: editingShipmentId ? 'PATCH' : 'POST',
-          url: requestUrl,
-          requestBody,
-          response: errorPayload,
-          error: saveError.message,
+          headers: buildHeaders(true),
+          body: JSON.stringify(requestBody),
         });
-        throw saveError;
+        const responseForDebug = response.clone();
+        try {
+          savePayload = await parseResponse(response);
+          console.log('[PickPackPro] Shipment save response', {
+            status: response.status,
+            ok: response.ok,
+            method: editingShipmentId ? 'PATCH' : 'POST',
+            url: requestUrl,
+            requestBody,
+            response: savePayload,
+          });
+        } catch (saveError) {
+          let errorPayload = null;
+          try {
+            const errorText = await responseForDebug.text();
+            errorPayload = errorText ? JSON.parse(errorText) : null;
+          } catch {
+            errorPayload = null;
+          }
+          console.error('[PickPackPro] Shipment save failed', {
+            status: response.status,
+            ok: response.ok,
+            method: editingShipmentId ? 'PATCH' : 'POST',
+            url: requestUrl,
+            requestBody,
+            response: errorPayload,
+            error: saveError.message,
+          });
+          const errorText = [
+            saveError.message,
+            errorPayload?.message,
+            errorPayload?.error,
+            errorPayload ? JSON.stringify(errorPayload) : '',
+          ].join(' ');
+
+          if (editingShipmentId && isDraft && response.status === 422 && /only draft shipments can be edited/i.test(errorText)) {
+            savePayload = buildLocalDraftSavePayload();
+            console.warn('[PickPackPro] Backend shipment is not draft; saved edited draft locally.', {
+              url: requestUrl,
+              requestBody,
+              response: errorPayload,
+            });
+          } else {
+            throw saveError;
+          }
+        }
       }
       const savedShipment = extractShipmentDetail(savePayload);
       const optimisticCreatedAt =
@@ -5237,7 +5458,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         expectedArrivalDate: expectedArrivalDate || savedShipment?.expectedArrivalDate || savedShipment?.expected_arrival_date,
         expected_arrival_date: expectedArrivalDate || savedShipment?.expected_arrival_date || savedShipment?.expectedArrivalDate,
         notes,
-        status: savedShipment?.status || (isDraft ? 'draft' : 'submitted'),
+        status: isDraft ? 'draft' : savedShipment?.status || 'submitted',
         items: savedItemsForDisplay.length ? savedItemsForDisplay : items,
         lineItems: savedItemsForDisplay.length ? savedItemsForDisplay : items,
       });
@@ -5249,7 +5470,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       const labelUploadWarnings = [];
       let uploadedLabelFiles = [];
 
-      if (!isDraft && savedShipmentRecordId) {
+      if (isDraft) {
+        savedShipmentForList.status = 'draft';
+      } else if (!isDraft && savedShipmentRecordId) {
         try {
           const currentStatus = String(savedShipmentForList.status || savedShipment?.status || '').toLowerCase();
           if (!currentStatus || currentStatus === 'draft') {
@@ -5392,6 +5615,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           }
         : savedShipmentForList;
       const draftSnapshot = {
+        isDraft: Boolean(isDraft),
+        status: isDraft ? 'draft' : 'submitted',
         createForm: {
           ...createForm,
           clientId: getClientIdFromSession(),
@@ -5465,13 +5690,14 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         })
       : Promise.resolve(null);
     const shipmentDetailEndpoint = `${API_BASE_URL}/api/shipments/${encodedShipmentId}`;
-    const [shipmentResponse, boxesResponse, servicesResponse, discrepanciesResponse, filesResponse] = await Promise.allSettled([
+    const [shipmentResponse, boxesResponse, subShipmentsResponse, servicesResponse, discrepanciesResponse, filesResponse] = await Promise.allSettled([
       fetch(shipmentDetailEndpoint, {
         method: 'GET',
         headers: buildHeaders(),
         cache: 'no-store',
       }),
       fetchShipmentBoxesAllPages(resolvedShipmentId),
+      fetchSubShipmentsForShipmentCandidates([resolvedShipmentId, getShipmentRecordId(fallbackShipment)].filter(Boolean)),
       fetch(`${API_BASE_URL}/api/shipments/${encodedShipmentId}/services`, {
         method: 'GET',
         headers: buildHeaders(),
@@ -5519,7 +5745,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       client_notes: detail?.client_notes || detail?.notes || selectedFallback.client_notes || selectedFallback.notes || '',
     };
     const selectedItems = applyBundleSizesFromNotes(
-      mergeLineItemGroups(detailItems, payloadItems, cachedItems, fallbackItems),
+      cachedItems.length
+        ? mergeLineItemGroups(cachedItems, detailItems, payloadItems, fallbackItems)
+        : mergeLineItemGroups(detailItems, payloadItems, fallbackItems),
       notesForBundleSizes
     );
     console.log('[PickPackPro][Client View GET]', {
@@ -5540,29 +5768,55 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     });
     const cachedNotes = cachedDraft?.createForm ? buildShipmentNotes(cachedDraft.createForm, cachedItems) : '';
     const cachedExpectedArrivalDate = cachedDraft?.createForm?.expectedArrivalDate || '';
+    let loadedSubShipments = subShipmentsResponse.status === 'fulfilled' ? subShipmentsResponse.value : [];
+    if (!loadedSubShipments.length) {
+      loadedSubShipments = extractSubShipments(detail).map((subShipment) => {
+        const boxes = getSubShipmentBoxes(subShipment).map((box) => decorateSubShipmentBoxForClient(box, subShipment));
+        return {
+          ...subShipment,
+          boxes,
+          outbound_boxes: boxes,
+          shipmentBoxes: boxes,
+          shipment_boxes: boxes,
+        };
+      });
+    }
+    if (!loadedSubShipments.length && detailRecordId && detailRecordId !== resolvedShipmentId) {
+      loadedSubShipments = await fetchSubShipmentsForShipmentCandidates([detailRecordId]);
+      if (!isCurrentRequest()) return;
+    }
 
     setSelectedShipment({
       ...selectedFallback,
       ...detail,
       id: detailRecordId || getShipmentId(detail) || selectedFallback.id || resolvedShipmentId,
       reference: detailReference || selectedFallback.reference || resolvedShipmentId,
-      notes: detail?.notes || detail?.client_notes || cachedNotes || selectedFallback.notes || selectedFallback.client_notes || '',
-      client_notes: detail?.client_notes || detail?.notes || cachedNotes || selectedFallback.client_notes || selectedFallback.notes || '',
-      expectedArrivalDate: formatDateForInput(detail?.expectedArrivalDate || detail?.expected_arrival_date || cachedExpectedArrivalDate || selectedFallback.expectedArrivalDate),
-      expected_arrival_date: formatDateForInput(detail?.expected_arrival_date || detail?.expectedArrivalDate || cachedExpectedArrivalDate || selectedFallback.expected_arrival_date),
+      notes: cachedNotes || detail?.notes || detail?.client_notes || selectedFallback.notes || selectedFallback.client_notes || '',
+      client_notes: cachedNotes || detail?.client_notes || detail?.notes || selectedFallback.client_notes || selectedFallback.notes || '',
+      expectedArrivalDate: formatDateForInput(cachedExpectedArrivalDate || detail?.expectedArrivalDate || detail?.expected_arrival_date || selectedFallback.expectedArrivalDate),
+      expected_arrival_date: formatDateForInput(cachedExpectedArrivalDate || detail?.expected_arrival_date || detail?.expectedArrivalDate || selectedFallback.expected_arrival_date),
       items: selectedItems,
       lineItems: selectedItems,
+      subShipments: loadedSubShipments,
+      sub_shipments: loadedSubShipments,
     });
 
     let loadedBoxes = [];
     let loadedServiceTasks = [];
 
     if (boxesResponse.status === 'fulfilled') {
-      loadedBoxes = await enrichBoxesWithItems(extractList(boxesResponse.value, ['boxes']), selectedItems);
+      const parentBoxes = extractList(boxesResponse.value, ['boxes']);
+      const subShipmentBoxes = loadedSubShipments.flatMap((subShipment) => getSubShipmentBoxes(subShipment));
+      loadedBoxes = await enrichBoxesWithItems(mergeBoxPages(parentBoxes, subShipmentBoxes), selectedItems);
       if (!isCurrentRequest()) return;
       setSelectedShipmentBoxes(loadedBoxes);
+      setSelectedShipmentSubShipments(loadedSubShipments);
     } else {
-      setSelectedShipmentBoxes([]);
+      const subShipmentBoxes = loadedSubShipments.flatMap((subShipment) => getSubShipmentBoxes(subShipment));
+      loadedBoxes = await enrichBoxesWithItems(subShipmentBoxes, selectedItems);
+      if (!isCurrentRequest()) return;
+      setSelectedShipmentBoxes(loadedBoxes);
+      setSelectedShipmentSubShipments(loadedSubShipments);
     }
 
     if (servicesResponse.status === 'fulfilled') {
@@ -5831,6 +6085,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       setError('');
       setSelectedShipment(previewShipment);
       setSelectedShipmentBoxes([]);
+      setSelectedShipmentSubShipments([]);
       setSelectedShipmentServices([]);
       setSelectedShipmentDiscrepancies([]);
       setSelectedShipmentFiles([]);
@@ -5880,7 +6135,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   };
 
   const handleEditDraft = async (shipment) => {
-    if (String(shipment?.status || '').toLowerCase() !== 'draft') return;
+    if (!canEditDraftShipment(shipment)) return;
 
     try {
       setIsLoading(true);
@@ -6026,6 +6281,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       setError('');
       setSelectedShipment(fallbackShipment);
       setSelectedShipmentBoxes([]);
+      setSelectedShipmentSubShipments([]);
       setSelectedShipmentServices([]);
       setSelectedShipmentDiscrepancies([]);
       setSelectedShipmentFiles([]);
@@ -6498,6 +6754,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
   const lineItems = getLineItems(selectedShipment || {});
   const trackBoxes = extractList(selectedShipmentBoxes, ['boxes']);
+  const displaySubShipments = selectedShipmentSubShipments.length
+    ? selectedShipmentSubShipments
+    : extractSubShipments(selectedShipment || {});
   const trackFiles = extractList(selectedShipmentFiles, ['files']);
   const boxLabelFiles = trackBoxes
     .map((box, index) => getBoxFbaLabelFile(box, trackFiles, trackBoxes, index, selectedShipment))
@@ -7048,6 +7307,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <p className="font-medium text-gray-900">{getBoxDisplayTitle(box, index)}{boxSize ? ` - ${boxSize}` : ''}</p>
+              {box.__subShipmentReference ? (
+                <p className="mt-1 text-xs font-semibold text-[#ff6900]">Sub-shipment: {box.__subShipmentReference}</p>
+              ) : null}
             </div>
             <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${labelReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
               {labelReady ? 'FBA Label Ready' : 'FBA Label Missing'}
@@ -7411,6 +7673,11 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                               {boxType === 'pallet' ? 'Pallet' : 'Box'} #{boxNumber}
                               {boxSize ? ` - ${boxSize}` : ''}
                             </p>
+                            {box.__subShipmentReference ? (
+                              <p className="mt-0.5 text-xs font-semibold text-[#ff6900]">
+                                Sub-shipment: {box.__subShipmentReference}
+                              </p>
+                            ) : null}
                             {contentsStr && contentsStr !== '-' ? (
                               <p className="mt-0.5 text-sm font-semibold text-[#132347]">
                                 Contents: {contentsStr}
@@ -7557,8 +7824,24 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           {awaitingFbaOnly ? (
             renderAwaitingFbaLabelsSection(true)
           ) : isCreateMode ? (
-            <div className="space-y-6">
-              <div className="space-y-5">
+            <div className={editingShipmentId ? 'fixed inset-0 z-50 overflow-y-auto bg-slate-900/55 px-4 py-6' : 'space-y-6'}>
+              {editingShipmentId ? (
+                <div className="mx-auto flex max-w-7xl items-center justify-between rounded-t-2xl border border-b-0 border-[#dfe7f3] bg-white px-5 py-4 shadow-2xl">
+                  <div>
+                    <h2 className="text-lg font-semibold text-[#132347]">Edit Draft Shipment</h2>
+                    <p className="mt-1 text-xs text-[#6b7280]">Update the draft and save it before submitting.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={closeCreateShipmentForm}
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-[#d5dee9] text-[#64748b] hover:bg-[#f8fafc] hover:text-[#132347]"
+                    aria-label="Close edit draft"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+              ) : null}
+              <div className={editingShipmentId ? 'mx-auto max-w-7xl space-y-5 border-x border-[#dfe7f3] bg-white p-5 shadow-2xl' : 'space-y-5'}>
                 <div className="rounded-2xl border border-[#dfe7f3] bg-white p-5 shadow-sm">
                   <div className="mb-4 flex items-center gap-2 text-[15px] font-semibold text-[#132347]">
                     <span className="text-[#ff6900]">📄</span>
@@ -7827,7 +8110,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-[#dfe7f3] bg-white p-5 shadow-sm">
+              <div className={editingShipmentId ? 'mx-auto max-w-7xl rounded-b-2xl border border-t-0 border-[#dfe7f3] bg-white p-5 shadow-2xl' : 'rounded-2xl border border-[#dfe7f3] bg-white p-5 shadow-sm'}>
                 <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
                   <button
                     type="button"
@@ -8080,8 +8363,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                           <button
                             type="button"
                             onClick={() => handleEditDraft(shipment)}
-                            disabled={String(shipment.status || '').toLowerCase() !== 'draft'}
-                            title={String(shipment.status || '').toLowerCase() === 'draft' ? 'Edit draft' : 'Only draft shipments can be edited'}
+                            disabled={!canEditDraftShipment(shipment)}
+                            title={canEditDraftShipment(shipment) ? 'Edit draft' : 'Only draft shipments can be edited'}
                             aria-label="Edit shipment"
                             className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-[#d5dee9] text-[#475569] hover:bg-[#f8fafc] disabled:cursor-not-allowed disabled:opacity-40"
                           >
@@ -8462,6 +8745,61 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                       <p>Expected Arrival: <span className="font-medium text-gray-900">{formatDateForInput(selectedShipment.expectedArrivalDate || selectedShipment.expected_arrival_date) || '-'}</span></p>
                       <p>Units: <span className="font-medium text-gray-900">{viewStats.totalUnits}</span></p>
                     </div>
+                    {displaySubShipments.length ? (
+                      <div>
+                        <p className="mb-2 font-medium text-gray-900">Sub-shipments</p>
+                        <div className="space-y-3">
+                          {displaySubShipments.map((subShipment, subShipmentIndex) => {
+                            const status = getSubShipmentStatus(subShipment);
+                            const dispatchedDate = firstPresent(subShipment?.dispatched_at, subShipment?.dispatchedAt);
+                            const items = getSubShipmentItems(subShipment);
+
+                            return (
+                              <div key={getSubShipmentId(subShipment) || subShipmentIndex} className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                  <div>
+                                    <p className="font-semibold text-gray-900">
+                                      {getSubShipmentReference(subShipment) || `Sub-shipment ${subShipmentIndex + 1}`}
+                                    </p>
+                                    <p className="mt-1 text-xs text-gray-500">
+                                      Parent shipment {selectedShipment.reference || selectedShipment.id || '-'}
+                                    </p>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${getShipmentStatusBadgeClass(status)}`}>
+                                      {getSubShipmentStatusLabel(status)}
+                                    </span>
+                                    <span className="text-xs text-gray-500">
+                                      {dispatchedDate ? `Dispatched ${formatTrackerDate(dispatchedDate)}` : 'Dispatch pending'}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="mt-3 space-y-2">
+                                  {items.length ? (
+                                    items.map((item, itemIndex) => {
+                                      const lineItem = getSubShipmentItemLineItem(item);
+                                      return (
+                                        <div key={item?.id || getItemRecordId(lineItem) || itemIndex} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
+                                          <div className="min-w-0">
+                                            <p className="truncate font-medium text-gray-900">{getItemProductName(lineItem) || 'Product'}</p>
+                                            <p className="text-xs text-gray-500">SKU {getItemSku(lineItem) || '-'}</p>
+                                          </div>
+                                          <span className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-700">
+                                            {formatQuantityValue(getSubShipmentItemQuantity(item))}
+                                          </span>
+                                        </div>
+                                      );
+                                    })
+                                  ) : (
+                                    <p className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">No products returned for this sub-shipment.</p>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ) : null}
                     <div>
                       <p className="mb-2 font-medium text-gray-900">Order Data</p>
                       <div className="grid grid-cols-1 gap-3 rounded-lg border border-gray-200 bg-gray-50 p-4 md:grid-cols-3">

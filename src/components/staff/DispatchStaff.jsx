@@ -88,11 +88,38 @@ const extractShipmentDetail = (payload) =>
 const extractBoxes = (payload) => {
   if (Array.isArray(payload)) return payload;
   if (Array.isArray(payload?.boxes)) return payload.boxes;
+  if (Array.isArray(payload?.outbound_boxes)) return payload.outbound_boxes;
+  if (Array.isArray(payload?.outboundBoxes)) return payload.outboundBoxes;
   if (Array.isArray(payload?.data?.boxes)) return payload.data.boxes;
+  if (Array.isArray(payload?.data?.outbound_boxes)) return payload.data.outbound_boxes;
+  if (Array.isArray(payload?.data?.outboundBoxes)) return payload.data.outboundBoxes;
   if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
   if (Array.isArray(payload?.data)) return payload.data;
   return [];
 };
+
+const extractSubShipments = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.subShipments)) return payload.subShipments;
+  if (Array.isArray(payload?.sub_shipments)) return payload.sub_shipments;
+  if (Array.isArray(payload?.data?.subShipments)) return payload.data.subShipments;
+  if (Array.isArray(payload?.data?.sub_shipments)) return payload.data.sub_shipments;
+  return [];
+};
+
+const getSubShipmentId = (subShipment = {}) =>
+  subShipment?.id || subShipment?.uuid || subShipment?.subShipmentId || subShipment?.sub_shipment_id || "";
+
+const getSubShipmentReference = (subShipment = {}) =>
+  subShipment?.reference ||
+  subShipment?.subShipmentReference ||
+  subShipment?.sub_shipment_reference ||
+  (subShipment?.sequence_no ? `Sub-shipment ${subShipment.sequence_no}` : "") ||
+  getSubShipmentId(subShipment) ||
+  "";
+
+const getSubShipmentBoxes = (subShipment = {}) =>
+  getBoxes(subShipment);
 
 const extractFiles = (payload) => {
   if (Array.isArray(payload)) return payload;
@@ -275,6 +302,93 @@ const getDispatchAction = ({ dispatchState, fbaLabelUploaded }) => {
   return fbaLabelUploaded ? "Dispatch" : "Chase Client";
 };
 
+const hydrateBoxesWithLabelFiles = async (boxes = []) => {
+  if (!boxes.length) return [];
+
+  const boxFileResults = await Promise.allSettled(
+    boxes.map(async (box) => {
+      const primaryBoxId = getBoxId(box);
+      const lookupIds = getBoxLookupIds(box).filter((boxId, index, values) => values.indexOf(boxId) === index);
+      if (!lookupIds.length) return [];
+
+      const fileResults = await Promise.allSettled(
+        lookupIds.map(async (boxId) => {
+          const filesResponse = await fetch(`${API_BASE_URL}/api/files?entityType=box&entityId=${encodeURIComponent(boxId)}`, {
+            method: "GET",
+            headers: buildHeaders(),
+            cache: "no-store",
+          });
+          return extractFiles(await parseResponse(filesResponse)).map((file) => normalizeBoxLabelFile(file, primaryBoxId || boxId));
+        })
+      );
+
+      return fileResults.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+    })
+  );
+
+  return boxes.map((box, index) => {
+    const files = boxFileResults[index]?.status === "fulfilled" ? boxFileResults[index].value : [];
+    const mergedFiles = [...getBoxFiles(box), ...files];
+    const labelUploaded = getBoxLabelUploaded({ ...box, files: mergedFiles });
+
+    return {
+      ...box,
+      files: mergedFiles,
+      labelReady: box?.labelReady || labelUploaded,
+      label_ready: box?.label_ready || labelUploaded,
+      fbaLabelUploaded: box?.fbaLabelUploaded || labelUploaded,
+      fba_label_uploaded: box?.fba_label_uploaded || labelUploaded,
+    };
+  });
+};
+
+const fetchSubShipmentsForDispatch = async (shipmentId = "", shipment = {}) => {
+  if (!shipmentId) return extractSubShipments(shipment);
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentId)}/sub-shipments`, {
+      method: "GET",
+      headers: buildHeaders(),
+      cache: "no-store",
+    });
+    const payload = await parseResponse(response);
+    const subShipments = extractSubShipments(payload);
+
+    const boxResults = await Promise.allSettled(
+      subShipments.map(async (subShipment) => {
+        const subShipmentId = getSubShipmentId(subShipment);
+        if (!subShipmentId) return getSubShipmentBoxes(subShipment);
+
+        try {
+          const boxesResponse = await fetch(`${API_BASE_URL}/api/sub-shipments/${encodeURIComponent(subShipmentId)}/boxes`, {
+            method: "GET",
+            headers: buildHeaders(),
+            cache: "no-store",
+          });
+          const boxesPayload = await parseResponse(boxesResponse);
+          const boxes = extractBoxes(boxesPayload);
+          return boxes.length ? boxes : getSubShipmentBoxes(subShipment);
+        } catch {
+          return getSubShipmentBoxes(subShipment);
+        }
+      })
+    );
+
+    return subShipments.map((subShipment, index) => {
+      const boxes = boxResults[index]?.status === "fulfilled" ? boxResults[index].value : getSubShipmentBoxes(subShipment);
+      return {
+        ...subShipment,
+        boxes,
+        outbound_boxes: boxes,
+        shipmentBoxes: boxes,
+        shipment_boxes: boxes,
+      };
+    });
+  } catch {
+    return extractSubShipments(shipment);
+  }
+};
+
 const getLineItems = (shipment) =>
   shipment?.shipment_line_items ||
   shipment?.shipmentLineItems ||
@@ -287,7 +401,7 @@ const getLineItems = (shipment) =>
   [];
 
 const getBoxes = (shipment) =>
-  shipment?.boxes || shipment?.shipmentBoxes || shipment?.shipment_boxes || [];
+  shipment?.boxes || shipment?.shipmentBoxes || shipment?.shipment_boxes || shipment?.outboundBoxes || shipment?.outbound_boxes || [];
 
 const getBoxItemsLookupId = (box = {}) => getBoxId(box) || getBoxLookupIds(box).find(Boolean);
 
@@ -595,51 +709,27 @@ const enrichShipmentForDispatch = async (shipment) => {
     }
   }
 
-  boxes = await enrichBoxesWithItems(boxes);
-
-  if (boxes.length) {
-    const boxFileResults = await Promise.allSettled(
-      boxes.map(async (box) => {
-        const primaryBoxId = getBoxId(box);
-        const lookupIds = getBoxLookupIds(box).filter((boxId, index, values) => values.indexOf(boxId) === index);
-        if (!lookupIds.length) return [];
-
-        const fileResults = await Promise.allSettled(
-          lookupIds.map(async (boxId) => {
-            const filesResponse = await fetch(`${API_BASE_URL}/api/files?entityType=box&entityId=${encodeURIComponent(boxId)}`, {
-              method: "GET",
-              headers: buildHeaders(),
-              cache: "no-store",
-            });
-            return extractFiles(await parseResponse(filesResponse)).map((file) => normalizeBoxLabelFile(file, primaryBoxId || boxId));
-          })
-        );
-
-        return fileResults.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
-      })
-    );
-
-    boxes = boxes.map((box, index) => {
-      const files = boxFileResults[index]?.status === "fulfilled" ? boxFileResults[index].value : [];
-      const mergedFiles = [...getBoxFiles(box), ...files];
-      const labelUploaded = getBoxLabelUploaded({ ...box, files: mergedFiles });
-
+  boxes = await hydrateBoxesWithLabelFiles(await enrichBoxesWithItems(boxes));
+  const subShipments = await Promise.all(
+    (await fetchSubShipmentsForDispatch(shipmentId, shipmentDetail)).map(async (subShipment) => {
+      const subBoxes = await hydrateBoxesWithLabelFiles(await enrichBoxesWithItems(getSubShipmentBoxes(subShipment)));
       return {
-        ...box,
-        files: mergedFiles,
-        labelReady: box?.labelReady || labelUploaded,
-        label_ready: box?.label_ready || labelUploaded,
-        fbaLabelUploaded: box?.fbaLabelUploaded || labelUploaded,
-        fba_label_uploaded: box?.fba_label_uploaded || labelUploaded,
+        ...subShipment,
+        boxes: subBoxes,
+        outbound_boxes: subBoxes,
+        shipmentBoxes: subBoxes,
+        shipment_boxes: subBoxes,
       };
-    });
-  }
+    })
+  );
 
   return {
     ...shipmentDetail,
     boxes,
     shipmentBoxes: boxes,
     shipment_boxes: boxes,
+    subShipments,
+    sub_shipments: subShipments,
   };
 };
 
@@ -649,9 +739,16 @@ const normalizeDispatchShipment = (shipment) => {
   const shipmentId = shipment?.id || shipment?.uuid || reference;
   const client = getClientName(shipment);
   const boxes = getBoxes(shipment);
-  const normalizedBoxes = boxes.length ? boxes : [{}];
+  const subShipments = extractSubShipments(shipment);
+  const parentRows = boxes.map((box) => ({ box, subShipment: null }));
+  const subShipmentRows = subShipments.flatMap((subShipment) =>
+    getSubShipmentBoxes(subShipment).map((box) => ({ box, subShipment }))
+  );
+  const normalizedBoxes = parentRows.length || subShipmentRows.length ? [...parentRows, ...subShipmentRows] : [{ box: {}, subShipment: null }];
 
-  return normalizedBoxes.map((box, index) => {
+  return normalizedBoxes.map(({ box, subShipment }, index) => {
+    const subShipmentId = getSubShipmentId(subShipment || {});
+    const subShipmentReference = getSubShipmentReference(subShipment || {});
     const boxLabel =
       box?.reference ||
       box?.label ||
@@ -659,19 +756,21 @@ const normalizeDispatchShipment = (shipment) => {
       box?.boxNumber ||
       box?.box_number ||
       box?.id ||
-      (boxes.length ? `BOX-${String(index + 1).padStart(2, "0")}` : "--");
+      (parentRows.length || subShipmentRows.length ? `BOX-${String(index + 1).padStart(2, "0")}` : "--");
     const boxType = box?.boxType || box?.box_type || box?.type || box?.size || box?.boxSize || box?.box_size || "--";
     const weight = Number(box?.weight || box?.weightKg || box?.weight_kg || box?.grossWeight || box?.gross_weight || 0);
-    const fbaLabelUploaded = boxes.length ? getBoxLabelUploaded(box) : false;
+    const fbaLabelUploaded = parentRows.length || subShipmentRows.length ? getBoxLabelUploaded(box) : false;
     const dispatchedAt = box?.dispatched_at || box?.dispatchedAt || "";
-    const dispatchState = getBoxDispatchState(shipment, box);
+    const dispatchState = getBoxDispatchState(subShipment || shipment, box);
     const action = getDispatchAction({ dispatchState, fbaLabelUploaded });
 
     return {
-      id: `${shipmentId}-${box?.id || boxLabel || index}`,
+      id: `${shipmentId}-${subShipmentId || "parent"}-${box?.id || boxLabel || index}`,
       boxId: getBoxId(box),
       shipmentId,
+      subShipmentId,
       reference,
+      subShipment: subShipmentReference || "-",
       client,
       box: boxLabel,
       type: String(boxType).replaceAll("_", " "),
@@ -763,6 +862,7 @@ const DispatchStaff = () => {
       const matchesSearch =
         !term ||
         shipment.reference.toLowerCase().includes(term) ||
+        shipment.subShipment.toLowerCase().includes(term) ||
         shipment.client.toLowerCase().includes(term) ||
         shipment.box.toLowerCase().includes(term) ||
         shipment.type.toLowerCase().includes(term) ||
@@ -855,9 +955,10 @@ const DispatchStaff = () => {
 
   const exportQueue = () => {
     const rows = [
-      ["Shipment", "Client", "Box", "Type", "Weight", "Contents", "FBA Label", "Action"],
+      ["Shipment", "Sub-shipment", "Client", "Box", "Type", "Weight", "Contents", "FBA Label", "Action"],
       ...filteredShipments.map((shipment) => [
         shipment.reference,
+        shipment.subShipment,
         shipment.client,
         shipment.box,
         shipment.type,
@@ -962,10 +1063,11 @@ const DispatchStaff = () => {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[780px]">
+              <table className="w-full min-w-[900px]">
                 <thead>
                   <tr className="bg-gray-50/80 text-left">
                     <th className="px-5 py-4 text-xs font-semibold uppercase tracking-wider text-gray-500">Shipment</th>
+                    <th className="px-5 py-4 text-xs font-semibold uppercase tracking-wider text-gray-500">Sub-shipment</th>
                     <th className="px-5 py-4 text-xs font-semibold uppercase tracking-wider text-gray-500">Client</th>
                     <th className="px-5 py-4 text-xs font-semibold uppercase tracking-wider text-gray-500">Box</th>
                     <th className="px-5 py-4 text-xs font-semibold uppercase tracking-wider text-gray-500">Type</th>
@@ -989,6 +1091,7 @@ const DispatchStaff = () => {
                     return (
                       <tr key={shipment.id} className="hover:bg-gray-50/70">
                         <td className="px-5 py-4 text-sm font-bold text-gray-900">{shipment.reference}</td>
+                        <td className="px-5 py-4 text-sm font-medium text-gray-700">{shipment.subShipment}</td>
                         <td className="px-5 py-4 text-sm font-semibold text-gray-800">{shipment.client}</td>
                         <td className="px-5 py-4 text-sm font-medium text-gray-700">{shipment.box}</td>
                         <td className="px-5 py-4"><span className="rounded bg-gray-100 px-2 py-1 text-[11px] font-semibold text-gray-600">{shipment.type}</span></td>

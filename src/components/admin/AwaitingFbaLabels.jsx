@@ -164,6 +164,30 @@ const extractShipments = (payload) =>
 const extractBoxes = (payload) =>
   extractList(payload, ['boxes', 'outboundBoxes', 'outbound_boxes', 'shipmentBoxes', 'shipment_boxes']);
 
+const extractSubShipments = (payload) =>
+  extractList(payload, ['subShipments', 'sub_shipments', 'subshipments']);
+
+const getSubShipmentId = (subShipment = {}) =>
+  firstPresent(subShipment?.id, subShipment?.uuid, subShipment?.subShipmentId, subShipment?.sub_shipment_id);
+
+const getSubShipmentReference = (subShipment = {}) =>
+  firstPresent(
+    subShipment?.reference,
+    subShipment?.subShipmentReference,
+    subShipment?.sub_shipment_reference,
+    subShipment?.sequence_no ? `Sub-shipment ${subShipment.sequence_no}` : '',
+    getSubShipmentId(subShipment)
+  );
+
+const decorateSubShipmentBox = (box = {}, subShipment = {}) => ({
+  ...box,
+  subShipmentId: getSubShipmentId(subShipment),
+  sub_shipment_id: getSubShipmentId(subShipment),
+  subShipmentReference: getSubShipmentReference(subShipment),
+  sub_shipment_reference: getSubShipmentReference(subShipment),
+  __subShipmentReference: getSubShipmentReference(subShipment),
+});
+
 const extractClients = (payload) =>
   extractList(payload, ['clients', 'clientRows', 'client_rows']);
 
@@ -1729,6 +1753,51 @@ const fetchBoxesForShipment = async (lookupCandidates = []) => {
   return [];
 };
 
+const fetchSubShipmentBoxesForShipment = async (lookupCandidates = []) => {
+  const uniqueLookupCandidates = [...new Set(lookupCandidates.map((value) => String(value || '').trim()).filter(Boolean))];
+
+  for (const lookupId of uniqueLookupCandidates) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(lookupId)}/sub-shipments`, {
+        method: 'GET',
+        headers: buildHeaders(),
+        cache: 'no-store',
+      });
+      const payload = await parseResponse(response);
+      const subShipments = extractSubShipments(payload);
+      if (!subShipments.length) continue;
+
+      const boxResults = await Promise.allSettled(
+        subShipments.map(async (subShipment) => {
+          const subShipmentId = getSubShipmentId(subShipment);
+          if (!subShipmentId) {
+            return extractBoxes(subShipment).map((box) => decorateSubShipmentBox(box, subShipment));
+          }
+
+          try {
+            const boxesResponse = await fetch(`${API_BASE_URL}/api/sub-shipments/${encodeURIComponent(subShipmentId)}/boxes`, {
+              method: 'GET',
+              headers: buildHeaders(),
+              cache: 'no-store',
+            });
+            const boxesPayload = await parseResponse(boxesResponse);
+            const boxes = extractBoxes(boxesPayload);
+            return (boxes.length ? boxes : extractBoxes(subShipment)).map((box) => decorateSubShipmentBox(box, subShipment));
+          } catch {
+            return extractBoxes(subShipment).map((box) => decorateSubShipmentBox(box, subShipment));
+          }
+        })
+      );
+      const boxes = boxResults.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
+      if (boxes.length) return boxes;
+    } catch {
+      // Try the next shipment identifier.
+    }
+  }
+
+  return [];
+};
+
 const fetchShipmentDetail = async (lookupCandidates = []) => {
   for (const lookupId of lookupCandidates) {
     try {
@@ -2074,9 +2143,10 @@ const AwaitingFbaLabels = () => {
         candidateShipments.map(async (shipment) => {
           const lookupCandidates = getShipmentLookupCandidates(shipment);
           const initialRecordId = getShipmentRecordId(shipment);
-          const [detailResult, initialBoxesResult] = await Promise.allSettled([
+          const [detailResult, initialBoxesResult, subShipmentBoxesResult] = await Promise.allSettled([
             fetchShipmentDetail(lookupCandidates),
             initialRecordId ? fetchBoxesForShipment([initialRecordId]) : Promise.resolve([]),
+            fetchSubShipmentBoxesForShipment(lookupCandidates),
           ]);
           const detail = detailResult.status === 'fulfilled' ? detailResult.value : {};
           const mergedShipment = withClientDetails(
@@ -2108,10 +2178,12 @@ const AwaitingFbaLabels = () => {
 
           const nextLookupCandidates = getShipmentLookupCandidates(mergedShipment, detail, shipment);
           const boxesResult = initialBoxesResult.status === 'fulfilled' ? initialBoxesResult.value : [];
+          const subShipmentBoxes = subShipmentBoxesResult.status === 'fulfilled' ? subShipmentBoxesResult.value : [];
           const loadedBoxes = mergeBoxLists(
             boxesResult.length
               ? boxesResult
               : await fetchBoxesForShipment(nextLookupCandidates),
+            subShipmentBoxes,
             extractBoxes(detail),
             extractBoxes(shipment)
           );
@@ -2375,6 +2447,7 @@ const AwaitingFbaLabels = () => {
 
       setMessage(`FBA label uploaded for ${selectedBoxIds.length} box${selectedBoxIds.length !== 1 ? 'es' : ''}.${uploadFile !== batchFbaUpload.file ? ' Large image was optimized before upload.' : ''}`);
       setBatchFbaUpload(null);
+      await loadAwaitingFbaLabels({ showLoader: false });
     } catch (requestError) {
       setError(isPayloadTooLargeMessage(requestError.message) ? getUploadTooLargeMessage(batchFbaUpload.file.name) : requestError.message);
     } finally {
@@ -2574,6 +2647,7 @@ const AwaitingFbaLabels = () => {
         )
       );
       setMessage(`FBA label uploaded for ${getBoxTitle(box, index)}.${uploadFile !== file ? ' Large image was optimized before upload.' : ''}`);
+      await loadAwaitingFbaLabels({ showLoader: false });
     } catch (requestError) {
       setError(isPayloadTooLargeMessage(requestError.message) ? getUploadTooLargeMessage(file.name) : requestError.message);
     } finally {
@@ -2691,6 +2765,11 @@ const AwaitingFbaLabels = () => {
                                     {boxType} #{box?.box_number || originalIndex + 1}
                                     {boxSize ? ` - ${boxSize}` : ''}
                                   </p>
+                                  {box.__subShipmentReference ? (
+                                    <p className="mt-0.5 text-xs font-semibold text-[#ff8c2f]">
+                                      Sub-shipment: {box.__subShipmentReference}
+                                    </p>
+                                  ) : null}
                                   {contentSummary ? (
                                     <p className="mt-0.5 text-sm font-semibold text-[#132347]">
                                       Contents: {contentSummary}
