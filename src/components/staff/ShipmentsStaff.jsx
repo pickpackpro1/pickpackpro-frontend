@@ -2836,6 +2836,38 @@ const openOrDownloadFile = async (file) => {
   return true;
 };
 
+const LabelPreviewImage = ({ file, alt = "", className = "" }) => {
+  const urls = getFileUrlCandidates(file);
+  const [urlIndex, setUrlIndex] = useState(0);
+
+  useEffect(() => {
+    setUrlIndex(0);
+  }, [file]);
+
+  const src = urls[urlIndex] || "";
+  if (!src) {
+    return (
+      <span className="flex h-24 w-36 items-center justify-center px-2 text-center text-xs font-medium text-gray-500">
+        Preview unavailable
+      </span>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt || getFileName(file)}
+      className={className}
+      onError={() => {
+        setUrlIndex((currentIndex) => {
+          const nextIndex = currentIndex + 1;
+          return nextIndex <= urls.length ? nextIndex : currentIndex;
+        });
+      }}
+    />
+  );
+};
+
 const isPdfFile = (file = {}) => {
   const type = getFileTypeValue(file);
   const name = getFileName(file).toLowerCase();
@@ -2847,7 +2879,7 @@ const isImageFile = (file = {}) => {
   const type = getFileTypeValue(file);
   const name = getFileName(file).toLowerCase();
   const url = getFileUrl(file).toLowerCase();
-  return type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg)(?:$|\?)/i.test(name) || /\.(png|jpe?g|webp|gif|bmp|svg)(?:$|\?)/i.test(url);
+  return type.startsWith("image/") || /\.(png|jpe?g|webp|avif|gif|bmp|svg)(?:$|\?)/i.test(name) || /\.(png|jpe?g|webp|avif|gif|bmp|svg)(?:$|\?)/i.test(url);
 };
 
 const isCsvFile = (file = {}) => {
@@ -4875,7 +4907,7 @@ const ShipmentsStaff = () => {
                         const needsLabel = labelState.label === "Label Needed";
                         const boxPhotoUrl = getBoxImageUrl(box, files);
                         const fbaLabelFile = getBoxFbaLabelFile(box, files);
-                        const fbaLabelUrl = fbaLabelFile ? resolveFileUrl(getFileUrl(fbaLabelFile)) : "";
+                        const fbaLabelUrl = fbaLabelFile ? getFileUrlCandidates(fbaLabelFile)[0] || resolveFileUrl(getFileUrl(fbaLabelFile)) : "";
                         const previewUrl = fbaLabelUrl || boxPhotoUrl;
                         const previewIsImage = fbaLabelFile ? isImageFile(fbaLabelFile) : Boolean(boxPhotoUrl);
                         const boxDimensions = getBoxDimensions(box);
@@ -4989,7 +5021,11 @@ const ShipmentsStaff = () => {
                                       className="mt-4 block w-full overflow-hidden rounded-[4px] border border-[#dbe4f1] bg-[#f7f9fc]"
                                     >
                                       {previewIsImage ? (
-                                        <img src={previewUrl} alt={getBoxTitle(box, index)} className="h-32 w-full object-contain" />
+                                        fbaLabelFile ? (
+                                          <LabelPreviewImage file={fbaLabelFile} alt={getBoxTitle(box, index)} className="h-32 w-full object-contain" />
+                                        ) : (
+                                          <img src={previewUrl} alt={getBoxTitle(box, index)} className="h-32 w-full object-contain" />
+                                        )
                                       ) : (
                                         <div className="flex h-32 flex-col items-center justify-center px-4 text-center">
                                           <p className="text-[13px] font-semibold text-[#132347]">FBA Label uploaded</p>
@@ -5499,7 +5535,7 @@ const ShipmentsStaff = () => {
                   const allRows = getBoxRowsForViewItem(box, index);
                   const displayRows = allRows.length ? allRows : rows;
                   const fbaLabelFile = getBoxFbaLabelFile(box, viewShipmentFiles);
-                  const fbaLabelUrl = resolveFileUrl(getFileUrl(fbaLabelFile));
+                  const fbaLabelUrl = getFileUrlCandidates(fbaLabelFile)[0] || resolveFileUrl(getFileUrl(fbaLabelFile));
                   const fbaLabelImage = fbaLabelFile && fbaLabelUrl && isImageFile(fbaLabelFile);
                   const labelReady = isBoxFbaLabelUploaded(box, viewShipmentFiles);
                   const dimensions = getBoxDimensions(box) || "0x0x0 CM";
@@ -5549,7 +5585,7 @@ const ShipmentsStaff = () => {
                             <>
                               {fbaLabelImage ? (
                                 <button type="button" onClick={() => openOrDownloadFile(fbaLabelFile)} className="mt-2 block w-full overflow-hidden rounded-md border border-gray-100 bg-gray-50">
-                                  <img src={fbaLabelUrl} alt={getFileName(fbaLabelFile)} className="h-40 w-full object-contain" />
+                                  <LabelPreviewImage file={fbaLabelFile} alt={getFileName(fbaLabelFile)} className="h-40 w-full object-contain" />
                                 </button>
                               ) : null}
                               <button

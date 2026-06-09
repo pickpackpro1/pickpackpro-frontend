@@ -3597,8 +3597,8 @@ const isImageFile = (file = {}) => {
   return (
     type.startsWith('image/') ||
     type.includes('image') ||
-    /\.(png|jpe?g|gif|webp|bmp|svg)(?:$|\?)/i.test(name) ||
-    /\.(png|jpe?g|gif|webp|bmp|svg)(?:$|\?)/i.test(url)
+    /\.(png|jpe?g|gif|webp|avif|bmp|svg)(?:$|\?)/i.test(name) ||
+    /\.(png|jpe?g|gif|webp|avif|bmp|svg)(?:$|\?)/i.test(url)
   );
 };
 
@@ -7288,7 +7288,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       selectedShipment
     );
     const fbaLabelFile = rawFbaLabelFile || null;
-    const fbaLabelUrl = resolveFileUrl(getFileUrl(fbaLabelFile));
+    const fbaLabelUrl = getFileUrlCandidates(fbaLabelFile)[0] || resolveFileUrl(getFileUrl(fbaLabelFile));
     const fbaLabelImage = fbaLabelFile && fbaLabelUrl && isImageFile(fbaLabelFile);
     const labelReady = Boolean(fbaLabelFile);
     const matchedBoxRows = getBoxRowsForLineItem(box, selectedShipment || {}, index, lineItem);
@@ -7348,7 +7348,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
               <>
                 {fbaLabelImage ? (
                   <button type="button" onClick={() => openOrDownloadFile(fbaLabelFile)} className="mt-2 block w-full overflow-hidden rounded-md border border-gray-100 bg-gray-50">
-                    <img src={fbaLabelUrl} alt={getFileName(fbaLabelFile)} className="h-40 w-full object-contain" />
+                    <LabelPreviewImage file={fbaLabelFile} alt={getFileName(fbaLabelFile)} className="h-40 w-full object-contain" />
                   </button>
                 ) : null}
                 <button
