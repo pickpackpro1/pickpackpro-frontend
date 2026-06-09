@@ -223,6 +223,12 @@ const getDispatchAction = ({ dispatchState, fbaLabelUploaded }) => {
   return fbaLabelUploaded ? 'Dispatch' : 'Chase Client';
 };
 
+const isDispatchComplete = (item = {}) =>
+  item.action === 'Dispatched' || item.action === 'Completed';
+
+const isDispatchableQueueItem = (item = {}) =>
+  Boolean(item.fbaShippingLabelFileId || item.labelUploadedAt || item.fbaLabelUploaded) && !isDispatchComplete(item);
+
 const hydrateBoxesWithLabelFiles = async (boxes = []) => {
   if (!boxes.length) return [];
 
@@ -469,6 +475,8 @@ const Dispatch = () => {
   const [dispatchFilter, setDispatchFilter] = useState('all');
   const [isLoading, setIsLoading] = useState(false);
   const [isUpdatingId, setIsUpdatingId] = useState('');
+  const [selectedDispatchIds, setSelectedDispatchIds] = useState([]);
+  const [isBulkDispatching, setIsBulkDispatching] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const navigate = useNavigate();
@@ -589,62 +597,147 @@ const Dispatch = () => {
     ];
   }, [shipments]);
 
-  const handleDispatchBox = async (box) => {
+  useEffect(() => {
+    setSelectedDispatchIds((currentIds) =>
+      currentIds.filter((selectedId) =>
+        shipments.some((item) => item.id === selectedId && isDispatchableQueueItem(item))
+      )
+    );
+  }, [shipments]);
+
+  const visibleDispatchableIds = useMemo(
+    () => filteredQueue.filter(isDispatchableQueueItem).map((item) => item.id),
+    [filteredQueue]
+  );
+  const selectedDispatchItems = useMemo(
+    () => shipments.filter((item) => selectedDispatchIds.includes(item.id) && isDispatchableQueueItem(item)),
+    [selectedDispatchIds, shipments]
+  );
+  const allVisibleDispatchableSelected =
+    visibleDispatchableIds.length > 0 &&
+    visibleDispatchableIds.every((id) => selectedDispatchIds.includes(id));
+  const someVisibleDispatchableSelected =
+    visibleDispatchableIds.some((id) => selectedDispatchIds.includes(id)) && !allVisibleDispatchableSelected;
+
+  const applyDispatchedBoxState = (box, boxId, updatedBox = {}) => {
+    const dispatchedAt =
+      updatedBox?.dispatched_at ||
+      updatedBox?.dispatchedAt ||
+      updatedBox?.dispatch_date ||
+      updatedBox?.dispatchDate ||
+      new Date().toISOString();
+    const updatedStatus = normalizeStatusValue(updatedBox?.status);
+    const nextState = updatedStatus === 'completed' || updatedStatus === 'complete' ? 'completed' : 'dispatched';
+    const nextAction = getDispatchAction({ dispatchState: nextState, fbaLabelUploaded: true });
+
+    setShipments((currentShipments) =>
+      currentShipments.map((item) => {
+        const itemBoxId = String(item.boxId || '');
+        const itemRowId = String(item.id || '');
+        const requestedBoxId = String(boxId || '');
+        const requestedRowId = String(box?.id || '');
+        const isTargetBox =
+          itemBoxId === requestedBoxId ||
+          itemRowId === requestedBoxId ||
+          (requestedRowId && itemRowId === requestedRowId);
+
+        if (!isTargetBox) return item;
+
+        return {
+          ...item,
+          fbaLabel: 'Uploaded',
+          fbaLabelUploaded: true,
+          dispatchedAt,
+          dispatchState: nextState,
+          rawStatus: nextState,
+          action: nextAction,
+        };
+      })
+    );
+    setSelectedDispatchIds((currentIds) => currentIds.filter((id) => id !== box?.id));
+  };
+
+  const dispatchBoxRequest = async (box) => {
     const boxId = box?.boxId || box?.id || box?.uuid;
     if (!boxId) {
-      setError('Box ID missing');
-      return;
+      throw new Error('Box ID missing');
     }
+
+    const response = await fetch(`${API_BASE_URL}/api/boxes/${encodeURIComponent(boxId)}/seal`, {
+      method: 'PATCH',
+      headers: buildHeaders(true),
+      body: JSON.stringify({}),
+    });
+    const payload = await parseResponse(response);
+    const updatedBox = payload?.box || payload?.data?.box || payload?.data || payload || {};
+    applyDispatchedBoxState(box, boxId, updatedBox);
+    return updatedBox;
+  };
+
+  const toggleDispatchSelection = (item) => {
+    if (!isDispatchableQueueItem(item) || isBulkDispatching) return;
+
+    setSelectedDispatchIds((currentIds) =>
+      currentIds.includes(item.id)
+        ? currentIds.filter((id) => id !== item.id)
+        : [...currentIds, item.id]
+    );
+  };
+
+  const toggleVisibleDispatchSelection = () => {
+    if (!visibleDispatchableIds.length || isBulkDispatching) return;
+
+    setSelectedDispatchIds((currentIds) => {
+      if (visibleDispatchableIds.every((id) => currentIds.includes(id))) {
+        return currentIds.filter((id) => !visibleDispatchableIds.includes(id));
+      }
+
+      return [...new Set([...currentIds, ...visibleDispatchableIds])];
+    });
+  };
+
+  const handleDispatchBox = async (box) => {
+    const boxId = box?.boxId || box?.id || box?.uuid;
 
     try {
       setIsUpdatingId(boxId);
       setError('');
       setMessage('');
-      const response = await fetch(`${API_BASE_URL}/api/boxes/${encodeURIComponent(boxId)}/seal`, {
-        method: 'PATCH',
-        headers: buildHeaders(true),
-        body: JSON.stringify({}),
-      });
-      const payload = await parseResponse(response);
-      const updatedBox = payload?.box || payload?.data?.box || payload?.data || payload || {};
-      const dispatchedAt =
-        updatedBox?.dispatched_at ||
-        updatedBox?.dispatchedAt ||
-        updatedBox?.dispatch_date ||
-        updatedBox?.dispatchDate ||
-        new Date().toISOString();
-      const updatedStatus = normalizeStatusValue(updatedBox?.status);
-      const nextState = updatedStatus === 'completed' || updatedStatus === 'complete' ? 'completed' : 'dispatched';
-      const nextAction = getDispatchAction({ dispatchState: nextState, fbaLabelUploaded: true });
-
-      setShipments((currentShipments) =>
-        currentShipments.map((item) => {
-          const itemBoxId = String(item.boxId || '');
-          const itemRowId = String(item.id || '');
-          const requestedBoxId = String(boxId || '');
-          const requestedRowId = String(box?.id || '');
-          const isTargetBox =
-            itemBoxId === requestedBoxId ||
-            itemRowId === requestedBoxId ||
-            (requestedRowId && itemRowId === requestedRowId);
-
-          if (!isTargetBox) return item;
-
-          return {
-            ...item,
-            fbaLabel: 'Uploaded',
-            fbaLabelUploaded: true,
-            dispatchedAt,
-            dispatchState: nextState,
-            rawStatus: nextState,
-            action: nextAction,
-          };
-        })
-      );
+      await dispatchBoxRequest(box);
       setMessage('Box dispatched successfully.');
     } catch (requestError) {
       setError(requestError.message);
     } finally {
+      setIsUpdatingId('');
+    }
+  };
+
+  const handleBulkDispatch = async () => {
+    const boxesToDispatch = selectedDispatchItems;
+    if (!boxesToDispatch.length) {
+      setError('Select at least one dispatch-ready record.');
+      return;
+    }
+
+    try {
+      setIsBulkDispatching(true);
+      setIsUpdatingId('bulk');
+      setError('');
+      setMessage('');
+
+      const results = await Promise.allSettled(boxesToDispatch.map(dispatchBoxRequest));
+      const dispatchedCount = results.filter((result) => result.status === 'fulfilled').length;
+      const failedCount = results.length - dispatchedCount;
+
+      if (failedCount) {
+        setError(`${failedCount} selected record${failedCount === 1 ? '' : 's'} could not be dispatched.`);
+      }
+
+      if (dispatchedCount) {
+        setMessage(`${dispatchedCount} selected record${dispatchedCount === 1 ? '' : 's'} dispatched successfully.`);
+      }
+    } finally {
+      setIsBulkDispatching(false);
       setIsUpdatingId('');
     }
   };
@@ -734,6 +827,15 @@ const Dispatch = () => {
               </span>
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <button
+                type="button"
+                onClick={handleBulkDispatch}
+                disabled={!selectedDispatchItems.length || isBulkDispatching}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Send size={14} />
+                {isBulkDispatching ? 'Dispatching...' : `Dispatch${selectedDispatchItems.length ? ` (${selectedDispatchItems.length})` : ''}`}
+              </button>
               <div className="relative">
                 <Search
                   size={14}
@@ -778,6 +880,17 @@ const Dispatch = () => {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-100">
+                  <th className="w-12 px-6 py-3 text-left">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleDispatchableSelected}
+                      aria-checked={someVisibleDispatchableSelected ? 'mixed' : allVisibleDispatchableSelected}
+                      aria-label="Select all dispatch-ready records"
+                      disabled={!visibleDispatchableIds.length || isBulkDispatching}
+                      onChange={toggleVisibleDispatchSelection}
+                      className="h-4 w-4 rounded border-gray-300 text-[#ff6900] focus:ring-[#ff6900] disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                  </th>
                   <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Shipment</th>
                   <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Sub-shipment</th>
                   <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Client</th>
@@ -792,10 +905,21 @@ const Dispatch = () => {
               <tbody className="divide-y divide-gray-50">
                 {filteredQueue.map((item) => {
                   const labelUploaded = Boolean(item.fbaShippingLabelFileId || item.labelUploadedAt || item.fbaLabelUploaded);
-                  const dispatchComplete = item.action === 'Dispatched' || item.action === 'Completed';
-                  const isDispatchAction = labelUploaded && !dispatchComplete;
+                  const dispatchComplete = isDispatchComplete(item);
+                  const isDispatchAction = isDispatchableQueueItem(item);
+                  const isSelected = selectedDispatchIds.includes(item.id);
                   return (
-                    <tr key={item.id} className="transition-colors hover:bg-gray-50">
+                    <tr key={item.id} className={`transition-colors hover:bg-gray-50 ${isSelected ? 'bg-emerald-50/40' : ''}`}>
+                      <td className="px-6 py-3">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          aria-label={`Select ${item.shipment} ${item.box} for dispatch`}
+                          disabled={!isDispatchAction || isBulkDispatching}
+                          onChange={() => toggleDispatchSelection(item)}
+                          className="h-4 w-4 rounded border-gray-300 text-[#ff6900] focus:ring-[#ff6900] disabled:cursor-not-allowed disabled:opacity-40"
+                        />
+                      </td>
                       <td className="px-6 py-3">
                         <span className="text-sm font-medium text-gray-900">{item.shipment}</span>
                       </td>
@@ -834,7 +958,7 @@ const Dispatch = () => {
                         <button
                           type="button"
                           onClick={() => {
-                            if (dispatchComplete) return;
+                            if (dispatchComplete || isBulkDispatching) return;
 
                             if (isDispatchAction) {
                               handleDispatchBox(item);
@@ -842,14 +966,14 @@ const Dispatch = () => {
                             }
                             handleChaseClient(item);
                           }}
-                          disabled={dispatchComplete || isUpdatingId === (item.boxId || item.shipmentId)}
+                          disabled={dispatchComplete || isBulkDispatching || isUpdatingId === (item.boxId || item.shipmentId)}
                           className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm transition-colors ${
                             dispatchComplete
                               ? 'border border-emerald-200 bg-emerald-50 font-semibold text-emerald-700'
                               : isDispatchAction
                               ? 'bg-emerald-600 font-semibold text-white hover:bg-emerald-700'
                               : 'border border-[#d1d5db] bg-white font-medium text-[#374151] hover:bg-[#f9fafb]'
-                          } ${dispatchComplete || isUpdatingId === (item.boxId || item.shipmentId) ? 'cursor-not-allowed opacity-70' : ''}`}
+                          } ${dispatchComplete || isBulkDispatching || isUpdatingId === (item.boxId || item.shipmentId) ? 'cursor-not-allowed opacity-70' : ''}`}
                         >
                           {dispatchComplete ? <CheckCircle2 size={14} /> : null}
                           {isUpdatingId === (item.boxId || item.shipmentId) ? 'Updating...' : item.action}

@@ -3,10 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import { createClient } from '@supabase/supabase-js';
 import { Eye, EyeOff } from 'lucide-react';
 
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL,
-  import.meta.env.VITE_SUPABASE_ANON_KEY
+const INVALID_INVITE_MESSAGE =
+  'Invalid or expired invite link. Please ask your administrator to resend the invitation.';
+
+const hasSupabaseConfig = Boolean(
+  import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY
 );
+
+const supabase = hasSupabaseConfig
+  ? createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY)
+  : null;
 
 const SetPassword = () => {
   const navigate = useNavigate();
@@ -22,15 +28,18 @@ const SetPassword = () => {
   useEffect(() => {
     let isMounted = true;
 
-    const verifyInviteLink = async () => {
+    const prepareInviteSession = async () => {
       const hash = window.location.hash.substring(1);
       const params = new URLSearchParams(hash);
       const accessToken = params.get('access_token');
       const refreshToken = params.get('refresh_token');
-      const type = params.get('type');
 
       try {
-        if (accessToken && (type === 'invite' || type === 'recovery' || type === 'signup')) {
+        if (!supabase) {
+          throw new Error('Missing Supabase configuration.');
+        }
+
+        if (accessToken) {
           const { error: sessionError } = await supabase.auth.setSession({
             access_token: accessToken,
             refresh_token: refreshToken || '',
@@ -50,17 +59,26 @@ const SetPassword = () => {
         const tokenHash = queryParams.get('token_hash');
         const queryType = queryParams.get('type');
 
-        if (!tokenHash) {
-          throw new Error('Missing invite token.');
+        if (tokenHash) {
+          const { error: verifyError } = await supabase.auth.verifyOtp({
+            token_hash: tokenHash,
+            type: queryType || 'invite',
+          });
+
+          if (verifyError) {
+            throw verifyError;
+          }
+
+          if (isMounted) {
+            setTokenReady(true);
+          }
+          return;
         }
 
-        const { error: verifyError } = await supabase.auth.verifyOtp({
-          token_hash: tokenHash,
-          type: queryType || 'invite',
-        });
+        const { data, error: sessionError } = await supabase.auth.getSession();
 
-        if (verifyError) {
-          throw verifyError;
+        if (sessionError || !data?.session?.access_token) {
+          throw sessionError || new Error('Missing invite session.');
         }
 
         if (isMounted) {
@@ -73,7 +91,7 @@ const SetPassword = () => {
       }
     };
 
-    verifyInviteLink();
+    prepareInviteSession();
 
     return () => {
       isMounted = false;
@@ -117,8 +135,7 @@ const SetPassword = () => {
         <div className="w-full max-w-md rounded-lg border border-orange-100 bg-white p-8 text-center shadow-[0_24px_80px_rgba(255,105,0,0.12)]">
           <h1 className="mb-4 text-3xl font-bold text-[#ff6900]">PickPackPro</h1>
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700">
-            <p className="mb-1 font-semibold">Invalid or expired invite link</p>
-            <p>Please ask your administrator to resend the invitation.</p>
+            <p>{INVALID_INVITE_MESSAGE}</p>
           </div>
         </div>
       </div>

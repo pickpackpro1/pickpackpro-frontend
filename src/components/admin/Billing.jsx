@@ -479,26 +479,322 @@ const getInvoiceRouteId = (invoice = {}) => {
 const getInvoiceDetailPayload = (payload) =>
   payload?.invoice || payload?.data?.invoice || payload?.data?.row || payload?.data?.record || payload?.data || payload;
 
-const getContentDispositionFileName = (contentDisposition = '') => {
-  const encodedMatch = String(contentDisposition || '').match(/filename\*=UTF-8''([^;]+)/i);
-  if (encodedMatch?.[1]) {
-    try {
-      return decodeURIComponent(encodedMatch[1].replaceAll('"', '').trim());
-    } catch {
-      return encodedMatch[1].replaceAll('"', '').trim();
-    }
-  }
-
-  const match = String(contentDisposition || '').match(/filename="?([^";]+)"?/i);
-  return match?.[1]?.trim() || '';
-};
-
 const sanitizeFileName = (value = 'invoice') =>
   String(value || 'invoice')
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '') || 'invoice';
+
+const downloadBlob = (blob, fileName) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
+
+const escapeHtml = (value = '') =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const getAddressLines = (address = '') => {
+  const parsedAddress = parseJsonValue(address, address);
+
+  if (Array.isArray(parsedAddress)) {
+    return parsedAddress
+      .flatMap(getAddressLines)
+      .map((line) => String(line || '').trim())
+      .filter(Boolean);
+  }
+
+  if (typeof parsedAddress === 'string') {
+    const lineParts = parsedAddress.includes('\n')
+      ? parsedAddress.split(/\r?\n/)
+      : parsedAddress.split(',');
+
+    return lineParts.map((line) => line.trim()).filter(Boolean);
+  }
+
+  if (!parsedAddress || typeof parsedAddress !== 'object') return [];
+
+  return [
+    firstDisplayValue(parsedAddress?.street, parsedAddress?.addressLine1, parsedAddress?.address_line_1, parsedAddress?.line1, parsedAddress?.line_1, parsedAddress?.address1),
+    firstDisplayValue(parsedAddress?.street2, parsedAddress?.addressLine2, parsedAddress?.address_line_2, parsedAddress?.line2, parsedAddress?.line_2, parsedAddress?.address2),
+    [parsedAddress?.city, parsedAddress?.county, parsedAddress?.state].map(cleanDisplayValue).filter(Boolean).join(', '),
+    [parsedAddress?.postcode, parsedAddress?.postalCode, parsedAddress?.postal_code, parsedAddress?.zip, parsedAddress?.country].map(cleanDisplayValue).filter(Boolean).join(', '),
+  ].filter(Boolean);
+};
+
+const firstAddressLines = (...addresses) =>
+  addresses.map(getAddressLines).find((lines) => lines.length) || [];
+
+const DEFAULT_COMPANY_BILLING_DETAILS = {
+  companyName: 'PickPackPro',
+  website: 'pickpackpro.co.uk',
+  addressLines: [],
+  vatNumber: '',
+  bankName: '',
+  sortCode: '',
+  accountNumber: '',
+};
+
+const extractSettingsPayload = (payload = {}) =>
+  payload?.settings || payload?.data?.settings || payload?.data || payload || {};
+
+const getCompanyBillingDetailsFromSettings = (payload = {}) => {
+  const settings = extractSettingsPayload(payload);
+  const bankDetails = settings?.bankDetails || settings?.bank_details || {};
+
+  return {
+    companyName: firstDisplayValue(settings?.companyName, settings?.company_name, DEFAULT_COMPANY_BILLING_DETAILS.companyName),
+    website: firstDisplayValue(settings?.website, settings?.siteUrl, settings?.site_url, settings?.domain, DEFAULT_COMPANY_BILLING_DETAILS.website),
+    addressLines: firstAddressLines(settings?.companyAddress, settings?.company_address, settings?.address),
+    vatNumber: firstDisplayValue(settings?.vatNumber, settings?.vat_number),
+    bankName: firstDisplayValue(bankDetails?.bankName, bankDetails?.bank_name),
+    sortCode: firstDisplayValue(bankDetails?.sortCode, bankDetails?.sort_code),
+    accountNumber: firstDisplayValue(bankDetails?.accountNumber, bankDetails?.account_number),
+  };
+};
+
+const getInvoiceClientRecord = (invoice = {}, clients = []) => {
+  const rawInvoice = invoice?.raw || invoice;
+  const clientIds = [
+    invoice?.clientId,
+    rawInvoice?.clientId,
+    rawInvoice?.client_id,
+    getInvoiceClientId(rawInvoice),
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  const clientEmails = [
+    invoice?.clientEmail,
+    invoice?.client_email,
+    invoice?.billingEmail,
+    invoice?.billing_email,
+    rawInvoice?.clientEmail,
+    rawInvoice?.client_email,
+    rawInvoice?.billingEmail,
+    rawInvoice?.billing_email,
+    rawInvoice?.client?.email,
+    rawInvoice?.clients?.email,
+    rawInvoice?.customer?.email,
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean);
+  const clientNames = [
+    invoice?.client,
+    rawInvoice?.clientName,
+    rawInvoice?.client_name,
+    rawInvoice?.companyName,
+    rawInvoice?.company_name,
+    getClientObjectDisplay(rawInvoice?.client),
+    getClientObjectDisplay(rawInvoice?.clients),
+    getClientObjectDisplay(rawInvoice?.customer),
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean);
+
+  return clients.find((client) => {
+    const ids = [getClientId(client), client?.id, client?.uuid, client?.clientId, client?.client_id]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+    const email = String(getClientEmail(client) || '').trim().toLowerCase();
+    const name = String(getClientDisplayName(client) || '').trim().toLowerCase();
+
+    return (
+      ids.some((id) => clientIds.includes(id)) ||
+      (email && clientEmails.includes(email)) ||
+      (name && clientNames.includes(name))
+    );
+  }) || {};
+};
+
+const getInvoiceClientAddressLines = (invoice = {}, clientRecord = {}) => {
+  const rawInvoice = invoice?.raw || invoice;
+
+  return firstAddressLines(
+    invoice?.billingAddress,
+    invoice?.billing_address,
+    invoice?.clientAddress,
+    invoice?.client_address,
+    rawInvoice?.billingAddress,
+    rawInvoice?.billing_address,
+    rawInvoice?.clientAddress,
+    rawInvoice?.client_address,
+    rawInvoice?.client?.billingAddress,
+    rawInvoice?.client?.billing_address,
+    rawInvoice?.client?.address,
+    rawInvoice?.clients?.billingAddress,
+    rawInvoice?.clients?.billing_address,
+    rawInvoice?.clients?.address,
+    rawInvoice?.customer?.billingAddress,
+    rawInvoice?.customer?.billing_address,
+    rawInvoice?.customer?.address,
+    clientRecord?.billingAddress,
+    clientRecord?.billing_address,
+    clientRecord?.address
+  );
+};
+
+const getInvoiceClientEmailDisplay = (invoice = {}, clientRecord = {}) => {
+  const rawInvoice = invoice?.raw || invoice;
+  return firstDisplayValue(
+    invoice?.clientEmail,
+    invoice?.client_email,
+    invoice?.billingEmail,
+    invoice?.billing_email,
+    rawInvoice?.clientEmail,
+    rawInvoice?.client_email,
+    rawInvoice?.billingEmail,
+    rawInvoice?.billing_email,
+    rawInvoice?.client?.email,
+    rawInvoice?.clients?.email,
+    rawInvoice?.customer?.email,
+    getClientEmail(clientRecord)
+  );
+};
+
+const buildAddressHtml = (lines = []) =>
+  (lines.length ? lines : ['-']).map((line) => `<div>${escapeHtml(line)}</div>`).join('');
+
+const getInvoiceLineAmount = (item = {}) =>
+  firstPresent(item?.amount, item?.total, item?.lineTotal, item?.line_total, item?.subtotal, item?.sub_total, 0);
+
+const getInvoiceLineVat = (item = {}) =>
+  firstPresent(item?.vat, item?.vatAmount, item?.vat_amount, item?.tax, item?.taxAmount, item?.tax_amount, 0);
+
+const buildInvoiceDocumentHtml = ({ invoice, companyDetails, clientRecord, clientDisplay }) => {
+  const rawInvoice = invoice?.raw || invoice;
+  const reference = firstDisplayValue(invoice?.ref, rawInvoice?.reference, rawInvoice?.invoiceNumber, rawInvoice?.invoice_number, invoice?.id, 'Invoice');
+  const invoiceDate = formatDate(firstPresent(invoice?.date, rawInvoice?.invoiceDate, rawInvoice?.invoice_date, rawInvoice?.date, rawInvoice?.createdAt, rawInvoice?.created_at));
+  const dueDate = formatDate(firstPresent(invoice?.due, rawInvoice?.dueDate, rawInvoice?.due_date, rawInvoice?.dueAt, rawInvoice?.due_at));
+  const lineItems = invoice?.lineItems?.length ? invoice.lineItems : extractInvoiceLineItems(rawInvoice);
+  const companyAddressLines = companyDetails?.addressLines || [];
+  const clientAddressLines = getInvoiceClientAddressLines(invoice, clientRecord);
+  const clientName = firstDisplayValue(clientDisplay, invoice?.client, getClientDisplayName(clientRecord), getInlineInvoiceClientDisplay(rawInvoice), 'Unnamed Client');
+  const clientEmail = getInvoiceClientEmailDisplay(invoice, clientRecord);
+  const paymentParts = [
+    companyDetails?.bankName ? `Bank: ${companyDetails.bankName}` : '',
+    companyDetails?.sortCode ? `Sort Code: ${companyDetails.sortCode}` : '',
+    companyDetails?.accountNumber ? `Account: ${companyDetails.accountNumber}` : '',
+  ].filter(Boolean);
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(reference)}</title>
+  <style>
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #020617; background: #fff; }
+    .top-bar { height: 8px; background: #3f3f3f; }
+    .page { padding: 52px 50px 70px; }
+    .header { display: flex; justify-content: space-between; gap: 40px; }
+    .brand { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; color: #0b1f44; }
+    .brand span { color: #ff6900; }
+    .muted { color: #4b5563; }
+    .small { font-size: 14px; line-height: 1.45; }
+    .invoice-meta { text-align: right; }
+    .invoice-meta h1 { margin: 0 0 2px; font-size: 26px; line-height: 1; }
+    .addresses { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; margin-top: 52px; max-width: 920px; }
+    .label { margin-bottom: 6px; color: #8a9099; font-size: 14px; text-transform: uppercase; letter-spacing: 0.02em; }
+    .name { margin-bottom: 3px; font-size: 20px; font-weight: 700; }
+    .address { margin-top: 14px; line-height: 1.45; }
+    table { width: 100%; border-collapse: collapse; margin-top: 40px; }
+    th { background: #f6f7f9; color: #4b5563; font-size: 14px; text-align: left; padding: 14px 16px; text-transform: uppercase; }
+    td { border-bottom: 1px solid #eef1f5; padding: 14px 16px; font-size: 14px; }
+    .right { text-align: right; }
+    .totals { width: 375px; margin: 30px 0 0 auto; font-size: 20px; }
+    .totals-row { display: flex; justify-content: space-between; padding: 8px 14px; }
+    .totals-row.total { border-top: 2px solid #132347; font-weight: 800; }
+    .payment { margin-top: 66px; border-radius: 8px; background: #f6f7f9; padding: 24px 26px; font-size: 16px; }
+    .payment strong { display: block; margin-bottom: 2px; }
+    @media print {
+      .top-bar { display: none; }
+      .page { padding: 44px 48px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="top-bar"></div>
+  <main class="page">
+    <section class="header">
+      <div>
+        <div class="brand">${escapeHtml(companyDetails?.companyName || DEFAULT_COMPANY_BILLING_DETAILS.companyName).replace(/PickPackPro/i, 'Pick<span>Pack</span>Pro')}</div>
+        <div class="small muted">${escapeHtml(companyDetails?.website || DEFAULT_COMPANY_BILLING_DETAILS.website)}</div>
+        <div class="address small">
+          <div class="label">Company Address</div>
+          ${buildAddressHtml(companyAddressLines)}
+        </div>
+      </div>
+      <div class="invoice-meta">
+        <h1>${escapeHtml(reference)}</h1>
+        <div class="small muted">Invoice Date: ${escapeHtml(invoiceDate)}</div>
+        <div class="small muted">Due: ${escapeHtml(dueDate)}</div>
+      </div>
+    </section>
+
+    <section class="addresses">
+      <div>
+        <div class="label">Billed To</div>
+        <div class="name">${escapeHtml(clientName)}</div>
+        ${clientEmail ? `<div class="small">${escapeHtml(clientEmail)}</div>` : ''}
+        <div class="address small">
+          <div class="label">Client Address</div>
+          ${buildAddressHtml(clientAddressLines)}
+        </div>
+      </div>
+    </section>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Description</th>
+          <th class="right">Qty</th>
+          <th class="right">Rate</th>
+          <th class="right">Amount</th>
+          <th class="right">VAT</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${lineItems.map((item, index) => {
+          const description = firstDisplayValue(item?.description, item?.serviceType, item?.service_type, item?.name, `Line ${index + 1}`);
+          const quantity = firstPresent(item?.quantity, item?.qty, item?.units, '');
+          const rate = firstPresent(item?.rate, item?.unitRate, item?.unit_rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, '');
+          return `<tr>
+            <td>${escapeHtml(description)}</td>
+            <td class="right">${escapeHtml(quantity)}</td>
+            <td class="right">${rate !== '' ? escapeHtml(formatCurrency(rate)) : ''}</td>
+            <td class="right">${escapeHtml(formatCurrency(getInvoiceLineAmount(item)))}</td>
+            <td class="right">${escapeHtml(formatCurrency(getInvoiceLineVat(item)))}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+
+    <section class="totals">
+      <div class="totals-row"><span>Subtotal</span><span>${escapeHtml(formatCurrency(invoice?.subtotal))}</span></div>
+      <div class="totals-row"><span>VAT</span><span>${escapeHtml(formatCurrency(invoice?.vat))}</span></div>
+      <div class="totals-row total"><span>Total</span><span>${escapeHtml(formatCurrency(invoice?.total))}</span></div>
+    </section>
+
+    <section class="payment">
+      <strong>Payment - Bank Transfer</strong>
+      ${paymentParts.length ? `<div>${escapeHtml(paymentParts.join(' | '))}</div>` : ''}
+      <div>Reference: ${escapeHtml(reference)}</div>
+      ${companyDetails?.vatNumber ? `<div>VAT Number: ${escapeHtml(companyDetails.vatNumber)}</div>` : ''}
+    </section>
+  </main>
+</body>
+</html>`;
+};
 
 const fetchInvoiceLineItems = async (lookupCandidates = []) => {
   for (const lookupId of lookupCandidates) {
@@ -700,6 +996,7 @@ const Billing = () => {
   const [clients, setClients] = useState([]);
   const [pricingData, setPricingData] = useState({ catalog: [], clientPrices: [] });
   const [pricingTiers, setPricingTiers] = useState(DEFAULT_PRICING_TIERS);
+  const [companyBillingDetails, setCompanyBillingDetails] = useState(DEFAULT_COMPANY_BILLING_DETAILS);
   const [monthlyForm, setMonthlyForm] = useState({
     billingMonth: getMonthValue(),
   });
@@ -772,6 +1069,20 @@ const Billing = () => {
       setClients(extractClients(payload));
     } catch {
       setClients([]);
+    }
+  };
+
+  const loadSettings = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/settings`, {
+        method: 'GET',
+        headers: buildHeaders(),
+        cache: 'no-store',
+      });
+      const payload = await parseResponse(response);
+      setCompanyBillingDetails(getCompanyBillingDetailsFromSettings(payload));
+    } catch {
+      setCompanyBillingDetails(DEFAULT_COMPANY_BILLING_DETAILS);
     }
   };
 
@@ -909,6 +1220,7 @@ const Billing = () => {
   useEffect(() => {
     loadInvoices();
     loadClients();
+    loadSettings();
     loadPricing();
   }, []);
 
@@ -1055,25 +1367,19 @@ const Billing = () => {
       setMessage('');
       if (!invoiceId) throw new Error('Invoice identifier is missing.');
 
-      const response = await fetch(`${API_BASE_URL}/api/invoices/${encodeURIComponent(invoiceId)}/pdf`, {
-        method: 'GET',
-        headers: buildHeaders(),
+      const detailedInvoice = await fetchInvoiceDetail(invoice);
+      const clientRecord = getInvoiceClientRecord(detailedInvoice, clients);
+      const invoiceDocumentHtml = buildInvoiceDocumentHtml({
+        invoice: detailedInvoice,
+        companyDetails: companyBillingDetails,
+        clientRecord,
+        clientDisplay: resolveInvoiceClientDisplay(detailedInvoice),
       });
 
-      if (!response.ok) throw new Error('Failed to download invoice document');
-
-      const blob = await response.blob();
-      const contentType = response.headers.get('content-type') || '';
-      const dispositionName = getContentDispositionFileName(response.headers.get('content-disposition') || '');
-      const extension = contentType.toLowerCase().includes('pdf') || dispositionName.toLowerCase().endsWith('.pdf') ? 'pdf' : 'html';
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = dispositionName || `${sanitizeFileName(invoiceRef || invoiceId)}.${extension}`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
+      downloadBlob(
+        new Blob([invoiceDocumentHtml], { type: 'text/html;charset=utf-8' }),
+        `${sanitizeFileName(invoiceRef || invoiceId)}.html`
+      );
       setMessage('Invoice document downloaded.');
     } catch (downloadError) {
       setError(downloadError.message);

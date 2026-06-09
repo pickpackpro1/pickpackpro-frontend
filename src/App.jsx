@@ -62,6 +62,7 @@ const DispatchStaff = lazyWithChunkReload(() => import("./components/staff/Dispa
 const ReceivingStaff = lazyWithChunkReload(() => import("./components/staff/ReceivingStaff"));
 const Login = lazyWithChunkReload(() => import("./pages/Login"));
 const SetPassword = lazyWithChunkReload(() => import("./pages/SetPassword"));
+const AuthConfirm = lazyWithChunkReload(() => import("./pages/AuthConfirm"));
 const ClientDashboard = lazyWithChunkReload(() => import("./components/clientspannel/ClientDashboard"));
 const ClientShipments = lazyWithChunkReload(() => import("./components/clientspannel/ClientShipments"));
 const InvoicesClient = lazyWithChunkReload(() => import("./components/clientspannel/InvoicesClient"));
@@ -548,7 +549,7 @@ function App() {
             }
           />
           <Route path="/set-password" element={<SetPassword />} />
-          <Route path="/auth/confirm" element={<SetPassword />} />
+          <Route path="/auth/confirm" element={<AuthConfirm />} />
           <Route
             path="*"
             element={

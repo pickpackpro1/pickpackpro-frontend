@@ -176,7 +176,10 @@ const parseResponse = async (response) => {
         (typeof payload === 'string' ? payload : '') ||
         `Request failed with status ${response.status}`;
 
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
   }
 
   return payload;
@@ -232,6 +235,36 @@ const getErrorText = (value) => {
   if (Array.isArray(value)) return value.map(getErrorText).filter(Boolean).join(', ');
   if (typeof value === 'object') return Object.values(value).map(getErrorText).filter(Boolean).join(', ');
   return String(value);
+};
+
+const getUserIdentityId = (user = {}) =>
+  String(
+    user?.id ||
+      user?.uuid ||
+      user?.userId ||
+      user?.user_id ||
+      user?.rawUser?.id ||
+      user?.rawUser?.uuid ||
+      user?.rawUser?.userId ||
+      user?.rawUser?.user_id ||
+      ''
+  ).trim();
+
+const getUserIdentityEmail = (user = {}) =>
+  normalizeEmail(user?.email || user?.rawUser?.email || '');
+
+const isSameUserIdentity = (leftUser = {}, rightUser = {}) => {
+  const leftId = getUserIdentityId(leftUser);
+  const rightId = getUserIdentityId(rightUser);
+
+  if (leftId && rightId) {
+    return leftId === rightId;
+  }
+
+  const leftEmail = getUserIdentityEmail(leftUser);
+  const rightEmail = getUserIdentityEmail(rightUser);
+
+  return Boolean(leftEmail && rightEmail && leftEmail === rightEmail);
 };
 
 const isExistingInviteMessage = (message = '') =>
@@ -523,6 +556,9 @@ const Settings = () => {
   const [isHealthLoading, setIsHealthLoading] = useState(false);
   const [toast, setToast] = useState(null);
   const [editingUserId, setEditingUserId] = useState('');
+  const [permanentDeleteUser, setPermanentDeleteUser] = useState(null);
+  const [permanentDeleteConfirmation, setPermanentDeleteConfirmation] = useState('');
+  const [isPermanentDeleting, setIsPermanentDeleting] = useState(false);
   const [showResendApiKey, setShowResendApiKey] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isSettingsLoading, setIsSettingsLoading] = useState(false);
@@ -559,6 +595,18 @@ const Settings = () => {
 
   const [inviteForm, setInviteForm] = useState(initialInviteForm);
   const [autoInviteAfterClientCreate, setAutoInviteAfterClientCreate] = useState(false);
+
+  const currentSession = getSession();
+  const isCurrentUserAdmin =
+    String(authProfile?.role || currentSession?.role || currentSession?.rawUser?.role || '').toLowerCase() === 'admin';
+
+  const isCurrentUser = (user) =>
+    isSameUserIdentity(user, authProfile || {}) ||
+    isSameUserIdentity(user, currentSession || {}) ||
+    isSameUserIdentity(user, currentSession?.rawUser || {});
+
+  const canShowPermanentDelete = (user) =>
+    Boolean(isCurrentUserAdmin && getUserIdentityId(user) && !isCurrentUser(user));
 
   const serviceTypeOptions = useMemo(() => {
     const normalizedPricingCatalog = Array.isArray(pricingCatalog)
@@ -1427,6 +1475,73 @@ const Settings = () => {
     }
   };
 
+  const openPermanentDeleteModal = (user) => {
+    setUsersError('');
+    setUsersMessage('');
+    setPermanentDeleteConfirmation('');
+    setPermanentDeleteUser(user);
+  };
+
+  const closePermanentDeleteModal = () => {
+    if (isPermanentDeleting) {
+      return;
+    }
+
+    setPermanentDeleteUser(null);
+    setPermanentDeleteConfirmation('');
+  };
+
+  const getPermanentDeleteErrorMessage = (error) => {
+    const status = Number(error?.status);
+
+    if (status === 401 || status === 403) {
+      return 'You do not have permission to delete this user.';
+    }
+
+    if (status === 422) {
+      return error?.message || 'Could not delete user.';
+    }
+
+    return error?.message || 'Could not delete user.';
+  };
+
+  const handlePermanentDelete = async () => {
+    const userId = getUserIdentityId(permanentDeleteUser || {});
+
+    if (!userId) {
+      const message = 'Could not delete user.';
+      setUsersError(message);
+      showToast('error', message);
+      return;
+    }
+
+    try {
+      setIsPermanentDeleting(true);
+      setUsersError('');
+      setUsersMessage('');
+
+      const response = await fetch(`${API_BASE_URL}/api/users/${encodeURIComponent(userId)}?permanent=true`, {
+        method: 'DELETE',
+        headers: buildHeaders(),
+      });
+      await parseResponse(response);
+
+      setUsers((currentUsers) =>
+        currentUsers.filter((user) => getUserIdentityId(user) !== userId)
+      );
+      setUsersMessage('User permanently deleted.');
+      showToast('success', 'User permanently deleted.');
+      setPermanentDeleteUser(null);
+      setPermanentDeleteConfirmation('');
+    } catch (error) {
+      const message = getPermanentDeleteErrorMessage(error);
+      setUsersError(message);
+      showToast('error', message);
+    } finally {
+      setIsPermanentDeleting(false);
+    }
+  };
+
   const tabs = [
     { id: 'general', label: 'General', icon: Building2 },
     { id: 'users', label: 'Users', icon: Users },
@@ -1857,7 +1972,7 @@ const Settings = () => {
                               </span>
                             </td>
                             <td className="px-6 py-4">
-                              <div className="flex items-center gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
                                 <button
                                   type="button"
                                   onClick={() => openEditModal(user)}
@@ -1885,6 +2000,15 @@ const Settings = () => {
                                     Activate
                                   </button>
                                 )}
+                                {canShowPermanentDelete(user) ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => openPermanentDeleteModal(user)}
+                                    className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50"
+                                  >
+                                    Delete permanently
+                                  </button>
+                                ) : null}
                               </div>
                             </td>
                           </tr>
@@ -2066,6 +2190,59 @@ const Settings = () => {
                     </div>
                   </div>
                 )}
+
+                {permanentDeleteUser ? (
+                  <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+                    <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
+                      <div className="border-b border-gray-200 px-6 py-5">
+                        <h3 className="text-lg font-semibold text-gray-900">
+                          Delete user permanently?
+                        </h3>
+                      </div>
+                      <div className="space-y-4 px-6 py-5">
+                        <p className="text-sm leading-6 text-gray-600">
+                          This will permanently delete this user from the app and Supabase Auth. The same email can be invited again after deletion. This action cannot be undone.
+                        </p>
+                        <div className="rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+                          <p className="font-semibold text-red-800">
+                            {permanentDeleteUser.name || 'Unnamed User'}
+                          </p>
+                          <p className="mt-1 break-all">{permanentDeleteUser.email || '-'}</p>
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-gray-500">
+                            Type DELETE to confirm
+                          </label>
+                          <input
+                            type="text"
+                            value={permanentDeleteConfirmation}
+                            onChange={(event) => setPermanentDeleteConfirmation(event.target.value)}
+                            className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-100"
+                            autoComplete="off"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-end gap-3 rounded-b-2xl border-t border-gray-200 bg-gray-50 px-6 py-4">
+                        <button
+                          type="button"
+                          onClick={closePermanentDeleteModal}
+                          disabled={isPermanentDeleting}
+                          className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 disabled:opacity-60"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handlePermanentDelete}
+                          disabled={permanentDeleteConfirmation !== 'DELETE' || isPermanentDeleting}
+                          className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Delete permanently
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
 
                 {missingClientEmail ? (
                   <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
