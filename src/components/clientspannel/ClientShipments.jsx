@@ -996,6 +996,12 @@ const getServiceTaskSku = (service = {}) =>
 const getServiceTaskLabel = (service = {}) =>
   formatServiceLabel(firstPresent(service?.serviceType, service?.service_type, service?.name, service?.serviceName, service?.service_name, service?.type));
 
+const filterBundlingServiceLabels = (services = []) =>
+  services.filter((service) => !isBundlingServiceValue(service));
+
+const isBundlingServiceTask = (service = {}) =>
+  isBundlingServiceValue(typeof service === 'object' ? getServiceTaskLabel(service) : service);
+
 const isOtherServiceTask = (service = {}) => {
   const rawType = String(firstPresent(service?.serviceType, service?.service_type, service?.type)).trim().toLowerCase();
   const label = String(getServiceTaskLabel(service) || '').trim().toLowerCase();
@@ -1013,7 +1019,7 @@ const getServiceTaskStatus = (service = {}) =>
   firstPresent(service?.status, service?.taskStatus, service?.task_status, service?.state) || 'PENDING';
 
 const getItemServicesForView = (item = {}, services = [], itemCount = 0) => {
-  const itemServices = getItemServices(item);
+  const itemServices = filterBundlingServiceLabels(getItemServices(item));
   if (itemServices.length) return itemServices;
 
   const itemId = String(getItemRecordId(item) || '').trim();
@@ -1028,7 +1034,11 @@ const getItemServicesForView = (item = {}, services = [], itemCount = 0) => {
     );
   });
 
-  return [...new Set(matchedServices.map((service) => getServiceTaskLabel(service)).filter(isDisplayServiceLabel))];
+  return [
+    ...new Set(
+      filterBundlingServiceLabels(matchedServices.map((service) => getServiceTaskLabel(service)).filter(isDisplayServiceLabel))
+    ),
+  ];
 };
 
 const SERVICE_TASK_KEYS = [
@@ -2805,6 +2815,29 @@ const normalizeItemFileMatchValue = (value = '') => {
   return normalized && !['-', 'n/a', 'na', 'none', 'null', 'undefined'].includes(normalized) ? normalized : '';
 };
 
+const normalizeLabelFileNameForMatch = (value = '') => {
+  const withoutQuery = String(value || '').trim().split('?')[0].replace(/\\/g, '/');
+  const fileName = withoutQuery.split('/').filter(Boolean).pop() || withoutQuery;
+  try {
+    return normalizeItemFileMatchValue(decodeURIComponent(fileName));
+  } catch {
+    return normalizeItemFileMatchValue(fileName);
+  }
+};
+
+const fileNameMatchesLineItemLabel = (file = {}, item = {}) => {
+  const fileName = normalizeLabelFileNameForMatch(getFileName(file));
+  const itemFileName = normalizeLabelFileNameForMatch(getItemLabelFileName(item));
+
+  return Boolean(
+    fileName &&
+      itemFileName &&
+      fileName !== 'download' &&
+      itemFileName !== 'download' &&
+      (fileName === itemFileName || fileName.includes(itemFileName) || itemFileName.includes(fileName))
+  );
+};
+
 const fileIdentityMatchesLineItem = (file = {}, item = {}) => {
   const fileSku = normalizeItemFileMatchValue(getFileSku(file));
   const fileFnsku = normalizeItemFileMatchValue(getFileFnsku(file));
@@ -2863,7 +2896,6 @@ const rawFileMatchesLineItem = (file = {}, item = {}) => {
   const itemLabelFileId = String(getItemLabelFileId(item) || '').trim();
   const itemSku = normalizeItemFileMatchValue(getItemSku(item));
   const itemFnsku = normalizeItemFileMatchValue(getItemFnsku(item));
-  const itemFileName = normalizeItemFileMatchValue(getItemLabelFileName(item));
   const hasIdentityConflict = fileIdentityConflictsWithLineItem(file, item);
 
   return Boolean(
@@ -2872,7 +2904,7 @@ const rawFileMatchesLineItem = (file = {}, item = {}) => {
       fileIdentityMatchesLineItem(file, item) ||
       (itemSku && fileName.includes(itemSku)) ||
       (itemFnsku && fileName.includes(itemFnsku)) ||
-      (itemFileName && fileName.includes(itemFileName))
+      fileNameMatchesLineItemLabel(file, item)
   );
 };
 
@@ -3103,6 +3135,30 @@ const getFileItemIndex = (file = {}) => {
   return Number.isInteger(index) && index >= 0 ? index : null;
 };
 
+const shouldUseOneBasedFileIndexes = (files = [], itemCount = 0) => {
+  if (itemCount < 2) return false;
+  const uniqueIndexes = [
+    ...new Set(
+      files
+        .map((file) => getFileItemIndex(file))
+        .filter((index) => index !== null)
+    ),
+  ];
+
+  return Boolean(
+    uniqueIndexes.length >= Math.min(itemCount, 2) &&
+      !uniqueIndexes.includes(0) &&
+      uniqueIndexes.every((index) => index >= 1 && index <= itemCount)
+  );
+};
+
+const getFileAssignmentIndex = (file = {}, useOneBasedFileIndexes = false) => {
+  const index = getFileItemIndex(file);
+  if (index === null) return null;
+  const assignmentIndex = useOneBasedFileIndexes ? index - 1 : index;
+  return assignmentIndex >= 0 ? assignmentIndex : null;
+};
+
 const getFileCreatedTime = (file = {}) => {
   const value = firstPresent(
     file?.createdAt,
@@ -3187,7 +3243,7 @@ const isItemLabelCandidateFile = (file = {}, itemList = []) => {
   return (isFnskuLabelFile(file) || isAnyItemLabelFile(file)) && itemList.length === 1;
 };
 
-const getLatestShipmentLabelBatchFiles = (candidateFiles = [], itemCount = 0) => {
+const getLatestShipmentLabelBatchFiles = (candidateFiles = [], itemCount = 0, useOneBasedFileIndexes = false) => {
   if (!itemCount) return [];
   const shipmentLabelFiles = candidateFiles
     .map((file, index) => ({ file, index }))
@@ -3207,8 +3263,8 @@ const getLatestShipmentLabelBatchFiles = (candidateFiles = [], itemCount = 0) =>
 
   return latestFiles
     .sort((firstFile, secondFile) => {
-      const firstIndex = getFileItemIndex(firstFile.file);
-      const secondIndex = getFileItemIndex(secondFile.file);
+      const firstIndex = getFileAssignmentIndex(firstFile.file, useOneBasedFileIndexes);
+      const secondIndex = getFileAssignmentIndex(secondFile.file, useOneBasedFileIndexes);
       if (firstIndex !== null && secondIndex !== null && firstIndex !== secondIndex) return firstIndex - secondIndex;
       if (firstIndex !== null && secondIndex === null) return -1;
       if (firstIndex === null && secondIndex !== null) return 1;
@@ -3223,14 +3279,16 @@ const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) 
   if (!itemList.length) return [];
 
   const itemInlineFiles = itemList.flatMap((item) => getItemInlineLabelFiles(item));
-  const candidateFiles = mergeFileLists(itemInlineFiles, files, visibleFiles)
-    .filter((file) => isItemLabelCandidateFile(file, itemList))
+  const unsortedCandidateFiles = mergeFileLists(itemInlineFiles, files, visibleFiles)
+    .filter((file) => isItemLabelCandidateFile(file, itemList));
+  const useOneBasedFileIndexes = shouldUseOneBasedFileIndexes(unsortedCandidateFiles, itemList.length);
+  const candidateFiles = unsortedCandidateFiles
     .sort((firstFile, secondFile) => {
       if (Boolean(firstFile?.localPreview) !== Boolean(secondFile?.localPreview)) return firstFile?.localPreview ? -1 : 1;
       const timeDifference = getFileCreatedTime(secondFile) - getFileCreatedTime(firstFile);
       if (timeDifference) return timeDifference;
-      const firstIndex = getFileItemIndex(firstFile);
-      const secondIndex = getFileItemIndex(secondFile);
+      const firstIndex = getFileAssignmentIndex(firstFile, useOneBasedFileIndexes);
+      const secondIndex = getFileAssignmentIndex(secondFile, useOneBasedFileIndexes);
       if (firstIndex !== null && secondIndex !== null && firstIndex !== secondIndex) return firstIndex - secondIndex;
       if (firstIndex !== null && secondIndex === null) return -1;
       if (firstIndex === null && secondIndex !== null) return 1;
@@ -3249,25 +3307,28 @@ const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) 
     usedKeys.add(key);
     return true;
   };
-
-  const latestShipmentLabelBatch = getLatestShipmentLabelBatchFiles(candidateFiles, itemList.length);
-  if (latestShipmentLabelBatch.length === itemList.length) {
+  const assignUniqueMatches = (matchesItem) => {
     itemList.forEach((item, itemIndex) => {
-      const batchFile = latestShipmentLabelBatch[itemIndex];
-      if (batchFile) assignFile(itemIndex, batchFile, candidateFiles.indexOf(batchFile));
+      if (assignments[itemIndex]) return;
+      const matchedFile = getUnusedFiles().find((file) => {
+        if (!matchesItem(file, item)) return false;
+        const matchedIndexes = itemList
+          .map((candidateItem, candidateIndex) => (matchesItem(file, candidateItem) ? candidateIndex : -1))
+          .filter((candidateIndex) => candidateIndex >= 0);
+        return matchedIndexes.length === 1 && matchedIndexes[0] === itemIndex;
+      });
+      if (matchedFile) assignFile(itemIndex, matchedFile, candidateFiles.indexOf(matchedFile));
     });
-  }
+  };
+
+  assignUniqueMatches(fileNameMatchesLineItemLabel);
+  assignUniqueMatches(fileIdentityMatchesLineItem);
+  assignUniqueMatches(isExactItemLabelFileMatch);
 
   itemList.forEach((item, itemIndex) => {
     if (assignments[itemIndex]) return;
-    const indexedFile = getUnusedFiles().find((file) => getFileItemIndex(file) === itemIndex);
+    const indexedFile = getUnusedFiles().find((file) => getFileAssignmentIndex(file, useOneBasedFileIndexes) === itemIndex);
     if (indexedFile) assignFile(itemIndex, indexedFile, candidateFiles.indexOf(indexedFile));
-  });
-
-  itemList.forEach((item, itemIndex) => {
-    if (assignments[itemIndex]) return;
-    const exactFile = getUnusedFiles().find((file) => isExactItemLabelFileMatch(file, item));
-    if (exactFile) assignFile(itemIndex, exactFile, candidateFiles.indexOf(exactFile));
   });
 
   itemList.forEach((item, itemIndex) => {
@@ -3281,6 +3342,15 @@ const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) 
     });
     if (uniqueMatchedFile) assignFile(itemIndex, uniqueMatchedFile, candidateFiles.indexOf(uniqueMatchedFile));
   });
+
+  const latestShipmentLabelBatch = getLatestShipmentLabelBatchFiles(candidateFiles, itemList.length, useOneBasedFileIndexes);
+  if (latestShipmentLabelBatch.length === itemList.length) {
+    itemList.forEach((item, itemIndex) => {
+      if (assignments[itemIndex]) return;
+      const batchFile = latestShipmentLabelBatch[itemIndex];
+      if (batchFile) assignFile(itemIndex, batchFile, candidateFiles.indexOf(batchFile));
+    });
+  }
 
   const remainingFiles = getUnusedFiles();
   if (itemList.length === 1 && remainingFiles.length === 1 && !assignments[0]) {
@@ -4401,7 +4471,7 @@ const getShipmentViewStats = (shipment = {}) => {
   return {
     items,
     totalUnits: items.reduce((sum, item) => sum + Number(getItemExpectedQty(item) || 0), 0),
-    services: getShipmentServiceLabels(shipment),
+    services: filterBundlingServiceLabels(getShipmentServiceLabels(shipment)),
   };
 };
 
@@ -8728,7 +8798,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                 const itemCount = viewStats.items.length;
                 const itemLabelFiles = getItemLabelFileAssignments(viewStats.items, trackFiles, visibleShipmentFiles);
                 const customServicesForView = extractCustomServices(selectedShipment, detailServices);
-                const standardServiceTasks = detailServices.filter((service) => !isCustomServiceTask(service));
+                const standardServiceTasks = detailServices.filter((service) => !isCustomServiceTask(service) && !isBundlingServiceTask(service));
                 const unassignedServiceTasks = standardServiceTasks.filter(
                   (service) => !viewStats.items.some((item) => isServiceTaskForItem(service, item, itemCount))
                 );

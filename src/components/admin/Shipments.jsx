@@ -527,7 +527,15 @@ const isPositiveBundleSize = (value) => {
   return Number.isFinite(bundleSize) && bundleSize > 0;
 };
 
-const isBundlingServiceValue = (value = '') => normalizeServiceType(String(value || '').split('/')[0]) === 'BUNDLING';
+const isBundlingServiceValue = (value = '') => {
+  const rawValue = typeof value === 'object'
+    ? firstPresent(value?.serviceType, value?.service_type, value?.name, value?.serviceName, value?.service_name, value?.label, value?.type)
+    : value;
+  return normalizeServiceType(String(rawValue || '').split('/')[0]) === 'BUNDLING';
+};
+
+const filterBundlingServiceLabels = (services = []) =>
+  services.filter((service) => !isBundlingServiceValue(service));
 
 const buildBundleSizeNote = (items = []) => {
   const bundleSizes = (Array.isArray(items) ? items : [])
@@ -4988,7 +4996,7 @@ const Shipments = () => {
                 ) : (
                   (() => {
                     const detailServices = extractServiceTasks(quickViewServices);
-                    const standardServiceTasks = detailServices.filter((service) => !isCustomServiceTask(service));
+                    const standardServiceTasks = detailServices.filter((service) => !isCustomServiceTask(service) && !isBundlingServiceValue(service));
                     const detailDiscrepancies = extractList(quickViewDiscrepancies, ['discrepancies']);
                     const customServicesForView = extractCustomServices(
                       { ...quickViewShipment, items: quickViewItems, lineItems: quickViewItems },
@@ -5180,7 +5188,7 @@ const Shipments = () => {
                                 const matchedServiceTasks = standardServiceTasks.filter((service) => isServiceTaskForItem(service, item, itemCount));
                                 const itemServices = [
                                   ...new Set([
-                                    ...getLineItemServiceLabels(item),
+                                    ...filterBundlingServiceLabels(getLineItemServiceLabels(item)),
                                     ...matchedServiceTasks.map(getServiceTaskLabel).filter(Boolean),
                                   ]),
                                 ];

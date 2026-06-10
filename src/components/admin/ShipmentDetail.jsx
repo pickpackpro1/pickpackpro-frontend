@@ -1415,6 +1415,13 @@ const formatQuantityValue = (value) => {
 const normalizeCompletionStatus = (value = '') =>
   String(value || '').trim().toLowerCase().replace(/\s+/g, '_');
 
+const normalizeShipmentStatusValue = (value = '') =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
 const getShipmentCompletionBlockers = (lineItemList = [], boxList = []) =>
   toArray(lineItemList)
     .map((lineItem) => {
@@ -1711,7 +1718,15 @@ const extractSubShipments = (payload) =>
   extractList(payload, ['subShipments', 'sub_shipments', 'subshipments']);
 
 const extractSubShipmentAvailability = (payload) =>
-  extractList(payload, ['availability', 'availableItems', 'available_items']);
+  extractList(payload, [
+    'availability',
+    'availableItems',
+    'available_items',
+    'availablePreparedItems',
+    'available_prepared_items',
+    'preparedItems',
+    'prepared_items',
+  ]);
 
 const getSubShipmentId = (subShipment = {}) =>
   firstPresent(subShipment?.id, subShipment?.uuid, subShipment?.subShipmentId, subShipment?.sub_shipment_id);
@@ -1790,13 +1805,36 @@ const getAvailabilityAssignedQty = (item = {}) =>
 const getAvailabilityRemainingQty = (item = {}) =>
   firstPresent(item?.remainingQty, item?.remaining_qty, item?.availableQty, item?.available_qty, 0);
 
-const getAvailabilityAvailableQty = (item = {}) =>
-  Number(firstPresent(item?.availableQty, item?.available_qty, item?.remainingQty, item?.remaining_qty, 0) || 0);
+const getAvailabilityAvailableQty = (item = {}) => {
+  const explicitQuantity = firstPresent(
+    item?.availableQty,
+    item?.available_qty,
+    item?.qtyAvailable,
+    item?.qty_available,
+    item?.available,
+    item?.remainingQty,
+    item?.remaining_qty
+  );
+  const explicitNumber = Number(explicitQuantity);
+  if (explicitQuantity !== '' && Number.isFinite(explicitNumber)) return explicitNumber;
 
-const isAvailabilityPrepared = (item = {}) =>
-  item?.prepared === true ||
-  String(firstPresent(item?.prepared, item?.service_status, item?.serviceStatus, '')).toLowerCase() === 'true' ||
-  ['done', 'completed', 'complete', 'prepped'].includes(String(firstPresent(item?.service_status, item?.serviceStatus, '')).toLowerCase());
+  const dispatchQuantity = Number(firstPresent(item?.dispatchQty, item?.dispatch_qty, getAvailabilityReceivedQty(item), getAvailabilityExpectedQty(item), 0) || 0);
+  const assignedQuantity = Number(getAvailabilityAssignedQty(item) || 0);
+  return Math.max(0, dispatchQuantity - assignedQuantity);
+};
+
+const isAvailabilityPrepared = (item = {}) => {
+  const preparedValue = String(firstPresent(item?.prepared, item?.isPrepared, item?.is_prepared, '')).trim().toLowerCase();
+  const serviceStatus = String(firstPresent(item?.service_status, item?.serviceStatus, item?.status, '')).trim().toLowerCase();
+
+  return (
+    item?.prepared === true ||
+    item?.isPrepared === true ||
+    item?.is_prepared === true ||
+    ['true', '1', 'yes', 'y'].includes(preparedValue) ||
+    ['done', 'completed', 'complete', 'prepped'].includes(serviceStatus)
+  );
+};
 
 const getSubShipmentAllocationItemId = (item = {}) =>
   firstPresent(item?.shipmentItemId, item?.shipment_item_id, item?.lineItemId, item?.line_item_id, item?.id);
@@ -2102,6 +2140,14 @@ const normalizeServiceKey = (value = '') =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '');
 
+const BUNDLING_SERVICE_KEY = normalizeServiceKey('Bundling');
+
+const isBundlingServiceValue = (value = '') =>
+  normalizeServiceKey(typeof value === 'object' ? getServiceTaskLabel(value) : value) === BUNDLING_SERVICE_KEY;
+
+const filterBundlingServiceLabels = (services = []) =>
+  services.filter((service) => !isBundlingServiceValue(service));
+
 const STANDARD_SERVICE_KEYS = new Set(
   [
     'FNSKU Labeling',
@@ -2173,7 +2219,7 @@ const extractServiceTasks = (source = {}) => {
 };
 
 const getLineItemServices = (item = {}, serviceTasks = []) => {
-  const inlineServices = getItemServices(item);
+  const inlineServices = filterBundlingServiceLabels(getItemServices(item));
   if (inlineServices.length) return inlineServices;
 
   const lineItemId = String(getLineItemId(item) || '').trim();
@@ -2192,7 +2238,7 @@ const getLineItemServices = (item = {}, serviceTasks = []) => {
           );
         })
         .map((service) => getServiceTaskLabel(service))
-        .filter(isDisplayServiceLabel)
+        .filter((service) => isDisplayServiceLabel(service) && !isBundlingServiceValue(service))
     ),
   ];
 };
@@ -3429,6 +3475,7 @@ const ShipmentDetail = () => {
       displayId: `${displayId}-${index}`,
     };
   });
+  const visibleServiceTasks = serviceTasks.filter((service) => !isBundlingServiceValue(service));
   const customServices = extractCustomServices(shipment, serviceTasks);
 
   const loadShipmentData = async ({ showLoader = true } = {}) => {
@@ -4650,11 +4697,19 @@ const ShipmentDetail = () => {
     }
   };
 
-  const currentStepIndex = statusSteps.indexOf(String(shipment?.status || '').toLowerCase());
-  const currentStatus = String(shipment?.status || '').toLowerCase();
+  const currentStatus = normalizeShipmentStatusValue(shipment?.status);
+  const currentStepIndex = statusSteps.indexOf(currentStatus);
   const sessionRole = String(getSession()?.role || getSession()?.rawUser?.role || '').toLowerCase();
+  const hasPreparedSubShipmentAvailability = subShipmentAvailability.some((availabilityItem) =>
+    Boolean(
+      getAvailabilityItemId(availabilityItem) &&
+        isAvailabilityPrepared(availabilityItem) &&
+        getAvailabilityAvailableQty(availabilityItem) > 0
+    )
+  );
   const canCreateSubShipment =
-    ['admin', 'staff'].includes(sessionRole) && SUB_SHIPMENT_CREATION_STATUSES.has(currentStatus);
+    ['admin', 'staff'].includes(sessionRole) &&
+    (SUB_SHIPMENT_CREATION_STATUSES.has(currentStatus) || hasPreparedSubShipmentAvailability);
   const nextStatusIndex = currentStepIndex >= 0 ? currentStepIndex + 1 : 1;
   const nextStatus = statusSteps[nextStatusIndex] || '';
   const primaryStatusAction = (() => {
@@ -5054,7 +5109,7 @@ const ShipmentDetail = () => {
                       const itemFnsku = getItemFnsku(item);
                       const expectedQty = getItemExpectedQty(item) || 0;
                       const receivedQty = getItemReceivedQty(item) || 0;
-                      const itemServices = getLineItemServices(item, serviceTasks);
+                      const itemServices = getLineItemServices(item, visibleServiceTasks);
                       const itemDiscrepancies = discrepancies.filter((discrepancy, discrepancyIndex) =>
                         isDiscrepancyForItem(discrepancy, item, lineItems, discrepancyIndex)
                       );
@@ -5076,8 +5131,8 @@ const ShipmentDetail = () => {
                         </div>
                         <div className="space-y-3 px-4 py-4">
                           {itemServices.length ? itemServices.map((serviceName, serviceIndex) => {
-                            const selectedStatus = getServiceDisplayStatus(serviceName, item, serviceTasks);
-                            const matchedTask = getServiceTaskForLine(serviceName, item, serviceTasks);
+                            const selectedStatus = getServiceDisplayStatus(serviceName, item, visibleServiceTasks);
+                            const matchedTask = getServiceTaskForLine(serviceName, item, visibleServiceTasks);
                             const taskIdForService = getServiceTaskId(matchedTask || {});
                             return (
                               <div key={`${serviceName}-${serviceIndex}`} className="flex items-center justify-between gap-4">
@@ -5374,9 +5429,9 @@ const ShipmentDetail = () => {
               </div>
               <div className="rounded-xl border border-gray-200 bg-white p-6">
                 <h3 className="mb-4 text-sm font-semibold uppercase tracking-wider text-gray-500">Services</h3>
-                {serviceTasks.length ? (
+                {visibleServiceTasks.length ? (
                   <div className="mb-4 space-y-3">
-                    {serviceTasks.map((service) => {
+                    {visibleServiceTasks.map((service) => {
                       const serviceId = getServiceTaskId(service);
                       const serviceLineItem = findLineItemForServiceTask(service, lineItems);
                       const serviceStatus = String(service?.status || 'PENDING').toUpperCase();

@@ -827,6 +827,14 @@ const normalizeServiceKey = (value = "") =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "");
 
+const BUNDLING_SERVICE_KEY = normalizeServiceKey("Bundling");
+
+const isBundlingServiceValue = (value = "") =>
+  normalizeServiceKey(typeof value === "object" ? getServiceTaskLabel(value) : value) === BUNDLING_SERVICE_KEY;
+
+const filterBundlingServiceLabels = (services = []) =>
+  services.filter((service) => !isBundlingServiceValue(service));
+
 const STANDARD_SERVICE_KEYS = new Set(
   [
     "FNSKU Labeling",
@@ -991,7 +999,7 @@ const findLineItemForServiceTask = (service = {}, items = []) => {
 };
 
 const getLineItemServices = (item, serviceTasks = [], itemCount = 0) => {
-  const inlineServices = getItemServices(item);
+  const inlineServices = filterBundlingServiceLabels(getItemServices(item));
   if (inlineServices.length) return inlineServices;
 
   const lineItemIds = [
@@ -1019,7 +1027,7 @@ const getLineItemServices = (item, serviceTasks = [], itemCount = 0) => {
       );
     })
     .map(getServiceTaskLabel)
-    .filter(isDisplayServiceLabel);
+    .filter((service) => isDisplayServiceLabel(service) && !isBundlingServiceValue(service));
 };
 
 const getItemBundleSize = (item = {}) =>
@@ -1904,6 +1912,13 @@ const formatQuantityValue = (value) => {
 const normalizeCompletionStatus = (value = "") =>
   String(value || "").trim().toLowerCase().replace(/\s+/g, "_");
 
+const normalizeShipmentStatusValue = (value = "") =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
 const getShipmentCompletionBlockers = (lineItemList = [], boxList = []) =>
   toArray(lineItemList)
     .map((lineItem) => {
@@ -1949,7 +1964,15 @@ const extractSubShipments = (payload) =>
   extractList(payload, ["subShipments", "sub_shipments", "subshipments"]);
 
 const extractSubShipmentAvailability = (payload) =>
-  extractList(payload, ["availability", "availableItems", "available_items"]);
+  extractList(payload, [
+    "availability",
+    "availableItems",
+    "available_items",
+    "availablePreparedItems",
+    "available_prepared_items",
+    "preparedItems",
+    "prepared_items",
+  ]);
 
 const getSubShipmentId = (subShipment = {}) =>
   firstPresent(subShipment?.id, subShipment?.uuid, subShipment?.subShipmentId, subShipment?.sub_shipment_id);
@@ -2028,15 +2051,36 @@ const getAvailabilityAssignedQty = (item = {}) =>
 const getAvailabilityRemainingQty = (item = {}) =>
   firstPresent(item?.remainingQty, item?.remaining_qty, item?.availableQty, item?.available_qty, 0);
 
-const getAvailabilityAvailableQty = (item = {}) =>
-  Number(firstPresent(item?.availableQty, item?.available_qty, item?.remainingQty, item?.remaining_qty, 0) || 0);
-
-const isAvailabilityPrepared = (item = {}) =>
-  item?.prepared === true ||
-  String(firstPresent(item?.prepared, item?.service_status, item?.serviceStatus, "")).toLowerCase() === "true" ||
-  ["done", "completed", "complete", "prepped"].includes(
-    String(firstPresent(item?.service_status, item?.serviceStatus, "")).toLowerCase()
+const getAvailabilityAvailableQty = (item = {}) => {
+  const explicitQuantity = firstPresent(
+    item?.availableQty,
+    item?.available_qty,
+    item?.qtyAvailable,
+    item?.qty_available,
+    item?.available,
+    item?.remainingQty,
+    item?.remaining_qty
   );
+  const explicitNumber = Number(explicitQuantity);
+  if (explicitQuantity !== "" && Number.isFinite(explicitNumber)) return explicitNumber;
+
+  const dispatchQuantity = Number(firstPresent(item?.dispatchQty, item?.dispatch_qty, getAvailabilityReceivedQty(item), getAvailabilityExpectedQty(item), 0) || 0);
+  const assignedQuantity = Number(getAvailabilityAssignedQty(item) || 0);
+  return Math.max(0, dispatchQuantity - assignedQuantity);
+};
+
+const isAvailabilityPrepared = (item = {}) => {
+  const preparedValue = String(firstPresent(item?.prepared, item?.isPrepared, item?.is_prepared, "")).trim().toLowerCase();
+  const serviceStatus = String(firstPresent(item?.service_status, item?.serviceStatus, item?.status, "")).trim().toLowerCase();
+
+  return (
+    item?.prepared === true ||
+    item?.isPrepared === true ||
+    item?.is_prepared === true ||
+    ["true", "1", "yes", "y"].includes(preparedValue) ||
+    ["done", "completed", "complete", "prepped"].includes(serviceStatus)
+  );
+};
 
 const getSubShipmentAllocationItemId = (item = {}) =>
   firstPresent(item?.shipmentItemId, item?.shipment_item_id, item?.lineItemId, item?.line_item_id, item?.id);
@@ -5018,9 +5062,17 @@ const ShipmentsStaff = () => {
       })
     );
   };
-  const currentStepIndex = statusSteps.indexOf(String(selectedShipment?.status || "").toLowerCase());
-  const currentStatus = String(selectedShipment?.status || "").toLowerCase();
-  const canCreateSubShipment = SUB_SHIPMENT_CREATION_STATUSES.has(currentStatus);
+  const currentStatus = normalizeShipmentStatusValue(selectedShipment?.status);
+  const currentStepIndex = statusSteps.indexOf(currentStatus);
+  const hasPreparedSubShipmentAvailability = subShipmentAvailability.some((availabilityItem) =>
+    Boolean(
+      getAvailabilityItemId(availabilityItem) &&
+        isAvailabilityPrepared(availabilityItem) &&
+        getAvailabilityAvailableQty(availabilityItem) > 0
+    )
+  );
+  const canCreateSubShipment =
+    SUB_SHIPMENT_CREATION_STATUSES.has(currentStatus) || hasPreparedSubShipmentAvailability;
   const nextStatusIndex = currentStepIndex >= 0 ? currentStepIndex + 1 : 1;
   const nextStatus = statusSteps[nextStatusIndex] || "";
   const primaryStatusAction = (() => {
@@ -5051,6 +5103,7 @@ const ShipmentsStaff = () => {
     ...service,
     displayId: `${getServiceTaskId(service) || service?.lineItemId || service?.shipmentItemId || "task"}-${index}`,
   }));
+  const visibleServiceTasks = serviceTasks.filter((service) => !isBundlingServiceValue(service));
   const customServices = extractCustomServices(selectedShipment, serviceTasks);
 
   return (
@@ -5532,7 +5585,7 @@ const ShipmentsStaff = () => {
                   <div className="space-y-4">
                     {lineItems.length ? (
                       lineItems.map((item, index) => {
-                        const itemServices = getLineItemServices(item, serviceTasks, lineItems.length);
+                        const itemServices = getLineItemServices(item, visibleServiceTasks, lineItems.length);
                         const itemSku = getItemSku(item) || "-";
                         const itemName = getItemName(item);
                         const itemFnsku = getItemFnsku(item) || "-";
@@ -5561,8 +5614,8 @@ const ShipmentsStaff = () => {
                             <div className="space-y-3 px-4 py-4">
                               {itemServices.length ? (
                                 itemServices.map((serviceName, serviceIndex) => {
-                                  const selectedStatus = getServiceDisplayStatus(serviceName, item, serviceTasks);
-                                  const matchedTask = getServiceTaskForLine(serviceName, item, serviceTasks);
+                                  const selectedStatus = getServiceDisplayStatus(serviceName, item, visibleServiceTasks);
+                                  const matchedTask = getServiceTaskForLine(serviceName, item, visibleServiceTasks);
                                   const taskIdForService = getServiceTaskId(matchedTask || {});
                                   return (
                                     <div key={`${serviceName}-${serviceIndex}`} className="flex items-center justify-between gap-4">
@@ -5951,9 +6004,9 @@ const ShipmentsStaff = () => {
                   <CheckCircle2 className="h-4 w-4 text-green-600" />
                   Services
                 </div>
-                {serviceTasks.length ? (
+                {visibleServiceTasks.length ? (
                   <div className="mb-4 space-y-3">
-                    {serviceTasks.map((service) => {
+                    {visibleServiceTasks.map((service) => {
                       const serviceId = getServiceTaskId(service);
                       const serviceLineItem = findLineItemForServiceTask(service, lineItems);
                       const serviceStatus = String(service?.status || "PENDING").toUpperCase();
@@ -6122,7 +6175,7 @@ const ShipmentsStaff = () => {
                   ...service,
                   displayId: `${getServiceTaskId(service) || service?.lineItemId || service?.shipmentItemId || "task"}-${index}`,
                 }));
-                const standardServiceTasks = viewServiceTasks.filter((service) => !isCustomServiceTask(service));
+                const standardServiceTasks = viewServiceTasks.filter((service) => !isCustomServiceTask(service) && !isBundlingServiceValue(service));
                 const viewCustomServices = extractCustomServices(shipmentForView, viewServiceTasks);
                 const itemLabelFiles = getItemLabelFileAssignments(viewLineItems, viewShipmentFiles);
                 const orderData = getShipmentOrderData(shipmentForView);
@@ -6137,7 +6190,7 @@ const ShipmentsStaff = () => {
                 );
                 const viewStatus = firstPresent(shipmentForView?.status, viewShipment?.status, "-");
                 const viewUnits = getShipmentUnits(shipmentForView);
-                const allServiceLabels = getShipmentServiceLabels(shipmentForView, viewServiceTasks);
+                const allServiceLabels = filterBundlingServiceLabels(getShipmentServiceLabels(shipmentForView, viewServiceTasks));
                 const viewBundleSizeEntries = getBundleSizeEntriesFromNotes(getRawShipmentNotes(shipmentForView));
 
                 const getBoxContentRowsForView = (box = {}, boxIndex = -1) => {
@@ -6391,7 +6444,7 @@ const ShipmentsStaff = () => {
                                     ...itemCustomServices.map((service) => service.name),
                                   ]
                                     .map((service) => String(formatServiceLabel(service) || "").trim())
-                                    .filter(Boolean)
+                                    .filter((service) => service && !isBundlingServiceValue(service))
                                 ),
                               ];
                               const itemServiceTaskRows = [
