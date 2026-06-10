@@ -3540,6 +3540,7 @@ const ShipmentsStaff = () => {
   const [subShipmentSelections, setSubShipmentSelections] = useState({});
   const [subShipmentNotes, setSubShipmentNotes] = useState("");
   const [isCreatingSubShipment, setIsCreatingSubShipment] = useState(false);
+  const [isRefreshingSubShipmentAvailability, setIsRefreshingSubShipmentAvailability] = useState(false);
   const [activeSubShipmentIdForBox, setActiveSubShipmentIdForBox] = useState("");
   const [files, setFiles] = useState([]);
   const [statusValue, setStatusValue] = useState("in_progress");
@@ -4213,6 +4214,51 @@ const ShipmentsStaff = () => {
   const resetSubShipmentCreateForm = () => {
     setSubShipmentSelections({});
     setSubShipmentNotes("");
+  };
+
+  const refreshSubShipmentAvailability = async () => {
+    const lookupCandidates = getShipmentLookupCandidates(selectedShipment, {
+      id: selectedShipmentId,
+      reference: selectedShipment?.reference,
+    });
+    let lastError = null;
+
+    for (const lookupId of lookupCandidates) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(lookupId)}/sub-shipments`, {
+          method: "GET",
+          headers: buildHeaders(),
+          cache: "no-store",
+        });
+        const payload = await parseResponse(response);
+        const nextSubShipments = mergeSubShipmentLists(extractSubShipments(payload), extractSubShipments(selectedShipment));
+        const nextAvailability = extractSubShipmentAvailability(payload);
+
+        setSubShipments(nextSubShipments);
+        setSubShipmentAvailability(nextAvailability);
+        return nextAvailability;
+      } catch (requestError) {
+        lastError = requestError;
+      }
+    }
+
+    throw lastError || new Error("Failed to load sub-shipment availability.");
+  };
+
+  const handleOpenSubShipmentModal = async () => {
+    if (isRefreshingSubShipmentAvailability || updatingTaskId) return;
+
+    try {
+      setError("");
+      resetSubShipmentCreateForm();
+      setIsRefreshingSubShipmentAvailability(true);
+      await refreshSubShipmentAvailability();
+      setShowSubShipmentModal(true);
+    } catch (requestError) {
+      setError(requestError.message || "Failed to refresh sub-shipment availability.");
+    } finally {
+      setIsRefreshingSubShipmentAvailability(false);
+    }
   };
 
   const handleSubShipmentSelectionChange = (availabilityItem, field, value) => {
@@ -5343,14 +5389,12 @@ const ShipmentsStaff = () => {
                   {canCreateSubShipment ? (
                     <button
                       type="button"
-                      onClick={() => {
-                        resetSubShipmentCreateForm();
-                        setShowSubShipmentModal(true);
-                      }}
-                      className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00]"
+                      onClick={handleOpenSubShipmentModal}
+                      disabled={isRefreshingSubShipmentAvailability || Boolean(updatingTaskId)}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      <Plus size={15} />
-                      Create Sub-shipment
+                      {isRefreshingSubShipmentAvailability ? <RefreshCw size={15} className="animate-spin" /> : <Plus size={15} />}
+                      {isRefreshingSubShipmentAvailability ? "Refreshing..." : "Create Sub-shipment"}
                     </button>
                   ) : null}
                 </div>
