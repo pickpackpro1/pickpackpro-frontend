@@ -55,6 +55,9 @@ const isPayloadTooLargeMessage = (value = '') =>
 const getUploadTooLargeMessage = (fileName = 'file') =>
   `${fileName} is too large for upload. Please use a file under ${formatFileSize(SAFE_FILE_UPLOAD_BYTES)}; large images are optimized automatically.`;
 
+const getFnskuLabelTooLargeMessage = (fileName = 'FNSKU label file') =>
+  `${fileName} is too large. FNSKU label files must be ${formatFileSize(SAFE_FILE_UPLOAD_BYTES)} or less.`;
+
 const createEmptyProductItem = () => ({
   productName: '',
   sku: '',
@@ -2512,6 +2515,8 @@ const getFileEntityId = (file = {}) => {
     file?.shipment_line_item_id,
     file?.shipmentItemId,
     file?.shipment_item_id,
+    file?.linkedEntityId,
+    file?.linked_entity_id,
     file?.boxId,
     file?.box_id,
     file?.shipmentId,
@@ -2526,6 +2531,8 @@ const getFileEntityId = (file = {}) => {
     meta?.shipment_line_item_id,
     meta?.shipmentItemId,
     meta?.shipment_item_id,
+    meta?.linkedEntityId,
+    meta?.linked_entity_id,
     meta?.boxId,
     meta?.box_id,
     meta?.shipmentId,
@@ -2535,7 +2542,7 @@ const getFileEntityId = (file = {}) => {
 
 const getFileEntityType = (file = {}) => {
   const meta = getFileMeta(file);
-  return String(firstPresent(file?.entityType, file?.entity_type, meta?.entityType, meta?.entity_type)).trim().toLowerCase();
+  return String(firstPresent(file?.entityType, file?.entity_type, file?.linkedEntityType, file?.linked_entity_type, meta?.entityType, meta?.entity_type, meta?.linkedEntityType, meta?.linked_entity_type)).trim().toLowerCase();
 };
 
 const normalizeEntityType = (value = '') => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
@@ -2909,7 +2916,7 @@ const rawFileMatchesLineItem = (file = {}, item = {}) => {
 };
 
 const decorateItemLabelFile = (file = {}, item = {}) => {
-  const itemId = getItemRecordId(item);
+  const itemId = getItemEntityId(item) || getItemRecordId(item);
   const labelFileId = getItemLabelFileId(item);
   const fileName = firstPresent(getFileName(file), getItemLabelFileName(item), 'FNSKU label');
 
@@ -3208,13 +3215,16 @@ const isExactItemLabelFileMatch = (file = {}, item = {}) => {
   const itemLabelFileId = String(getItemLabelFileId(item) || '').trim();
   const fileRecordId = String(getFileRecordId(file) || '').trim();
   const fileEntityId = String(getFileEntityId(file) || '').trim();
+  const fileEntityType = getFileEntityType(file);
+  const linkedEntityId = String(firstPresent(file?.linkedEntityId, file?.linked_entity_id, getFileMeta(file)?.linkedEntityId, getFileMeta(file)?.linked_entity_id) || '').trim();
+  const linkedEntityType = String(firstPresent(file?.linkedEntityType, file?.linked_entity_type, getFileMeta(file)?.linkedEntityType, getFileMeta(file)?.linked_entity_type) || '').trim().toLowerCase();
   const itemIds = getItemLabelMatchIds(item);
   const hasIdentityConflict = fileIdentityConflictsWithLineItem(file, item);
 
   return Boolean(
-    !hasIdentityConflict &&
-      ((itemLabelFileId && fileRecordId && itemLabelFileId === fileRecordId) ||
-        (fileEntityId && itemIds.includes(fileEntityId)))
+    (itemLabelFileId && fileRecordId && itemLabelFileId === fileRecordId) ||
+      (!hasIdentityConflict && isItemFileEntityType(fileEntityType) && fileEntityId && itemIds.includes(fileEntityId)) ||
+      (!hasIdentityConflict && isItemFileEntityType(linkedEntityType) && linkedEntityId && itemIds.includes(linkedEntityId))
   );
 };
 
@@ -3279,117 +3289,61 @@ const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) 
   if (!itemList.length) return [];
 
   const itemInlineFiles = itemList.flatMap((item) => getItemInlineLabelFiles(item));
-  const unsortedCandidateFiles = mergeFileLists(itemInlineFiles, files, visibleFiles)
+  const candidateFiles = mergeFileLists(itemInlineFiles, files, visibleFiles)
     .filter((file) => isItemLabelCandidateFile(file, itemList));
-  const useOneBasedFileIndexes = shouldUseOneBasedFileIndexes(unsortedCandidateFiles, itemList.length);
-  const candidateFiles = unsortedCandidateFiles
-    .sort((firstFile, secondFile) => {
-      if (Boolean(firstFile?.localPreview) !== Boolean(secondFile?.localPreview)) return firstFile?.localPreview ? -1 : 1;
-      const timeDifference = getFileCreatedTime(secondFile) - getFileCreatedTime(firstFile);
-      if (timeDifference) return timeDifference;
-      const firstIndex = getFileAssignmentIndex(firstFile, useOneBasedFileIndexes);
-      const secondIndex = getFileAssignmentIndex(secondFile, useOneBasedFileIndexes);
-      if (firstIndex !== null && secondIndex !== null && firstIndex !== secondIndex) return firstIndex - secondIndex;
-      if (firstIndex !== null && secondIndex === null) return -1;
-      if (firstIndex === null && secondIndex !== null) return 1;
-      return 0;
-    });
 
-  const assignments = new Array(itemList.length).fill(null);
-  const usedKeys = new Set();
-  const getUnusedFiles = () =>
-    candidateFiles.filter((file, fileIndex) => !usedKeys.has(getLabelFileAssignmentKey(file, fileIndex)));
-  const assignFile = (itemIndex, file, fileIndex = 0) => {
-    if (!file || assignments[itemIndex]) return false;
-    const key = getLabelFileAssignmentKey(file, fileIndex);
-    if (usedKeys.has(key)) return false;
-    assignments[itemIndex] = file;
-    usedKeys.add(key);
-    return true;
-  };
-  const assignUniqueMatches = (matchesItem) => {
-    itemList.forEach((item, itemIndex) => {
-      if (assignments[itemIndex]) return;
-      const matchedFile = getUnusedFiles().find((file) => {
-        if (!matchesItem(file, item)) return false;
-        const matchedIndexes = itemList
-          .map((candidateItem, candidateIndex) => (matchesItem(file, candidateItem) ? candidateIndex : -1))
-          .filter((candidateIndex) => candidateIndex >= 0);
-        return matchedIndexes.length === 1 && matchedIndexes[0] === itemIndex;
-      });
-      if (matchedFile) assignFile(itemIndex, matchedFile, candidateFiles.indexOf(matchedFile));
-    });
-  };
-
-  assignUniqueMatches(fileNameMatchesLineItemLabel);
-  assignUniqueMatches(fileIdentityMatchesLineItem);
-  assignUniqueMatches(isExactItemLabelFileMatch);
-
-  itemList.forEach((item, itemIndex) => {
-    if (assignments[itemIndex]) return;
-    const indexedFile = getUnusedFiles().find((file) => getFileAssignmentIndex(file, useOneBasedFileIndexes) === itemIndex);
-    if (indexedFile) assignFile(itemIndex, indexedFile, candidateFiles.indexOf(indexedFile));
+  return itemList.map((item) => {
+    const matchingFiles = candidateFiles.filter((file) => isExactItemLabelFileMatch(file, item));
+    return (
+      matchingFiles.find(isPdfFile) ||
+      matchingFiles.find(isImageFile) ||
+      matchingFiles.find(isFnskuLabelFile) ||
+      matchingFiles.find(isAnyItemLabelFile) ||
+      matchingFiles.find(isCsvFile) ||
+      matchingFiles[0] ||
+      null
+    );
   });
-
-  itemList.forEach((item, itemIndex) => {
-    if (assignments[itemIndex]) return;
-    const uniqueMatchedFile = getUnusedFiles().find((file) => {
-      if (!rawFileMatchesLineItem(file, item)) return false;
-      const matchedIndexes = itemList
-        .map((candidateItem, candidateIndex) => (rawFileMatchesLineItem(file, candidateItem) ? candidateIndex : -1))
-        .filter((candidateIndex) => candidateIndex >= 0);
-      return matchedIndexes.length === 1 && matchedIndexes[0] === itemIndex;
-    });
-    if (uniqueMatchedFile) assignFile(itemIndex, uniqueMatchedFile, candidateFiles.indexOf(uniqueMatchedFile));
-  });
-
-  const latestShipmentLabelBatch = getLatestShipmentLabelBatchFiles(candidateFiles, itemList.length, useOneBasedFileIndexes);
-  if (latestShipmentLabelBatch.length === itemList.length) {
-    itemList.forEach((item, itemIndex) => {
-      if (assignments[itemIndex]) return;
-      const batchFile = latestShipmentLabelBatch[itemIndex];
-      if (batchFile) assignFile(itemIndex, batchFile, candidateFiles.indexOf(batchFile));
-    });
-  }
-
-  const remainingFiles = getUnusedFiles();
-  if (itemList.length === 1 && remainingFiles.length === 1 && !assignments[0]) {
-    assignFile(0, remainingFiles[0], candidateFiles.indexOf(remainingFiles[0]));
-  }
-
-  return assignments;
 };
 
 const getItemUploadMatchKey = (item = {}, index = 0) =>
-  String(getItemEntityId(item) || getItemSku(item) || getItemFnsku(item) || `index:${index}`);
+  String(getItemEntityId(item) || `index:${index}`);
 
 const findSavedLineItemForUpload = (sourceItem = {}, fallbackIndex = 0, savedLineItems = [], usedKeys = new Set()) => {
   const sourceSku = normalizeItemFileMatchValue(getItemSku(sourceItem));
   const sourceFnsku = normalizeItemFileMatchValue(getItemFnsku(sourceItem));
   const sourceProduct = normalizeItemFileMatchValue(getItemProductName(sourceItem));
-  const sourceOrder = getLineItemExplicitOrder(sourceItem);
   const candidates = toArray(savedLineItems).map((lineItem, index) => ({ lineItem, index }));
   const isUnused = ({ lineItem, index }) => !usedKeys.has(getItemUploadMatchKey(lineItem, index));
   const useMatch = (match) => {
-    const resolvedMatch = match?.lineItem || {};
+    const resolvedMatch = match?.lineItem || null;
     if (match) usedKeys.add(getItemUploadMatchKey(resolvedMatch, match.index));
-    return resolvedMatch;
+    return { lineItem: resolvedMatch, matchType: match?.matchType || 'none' };
   };
-  const findBy = (predicate) => candidates.find((candidate) => isUnused(candidate) && predicate(candidate.lineItem, candidate.index));
+  const findUniqueBy = (matchType, predicate) => {
+    const matches = candidates.filter((candidate) => isUnused(candidate) && predicate(candidate.lineItem, candidate.index));
+    return matches.length === 1 ? { ...matches[0], matchType } : null;
+  };
 
-  return useMatch(
-    findBy((lineItem) => {
-      const candidateSku = normalizeItemFileMatchValue(getItemSku(lineItem));
-      const candidateFnsku = normalizeItemFileMatchValue(getItemFnsku(lineItem));
-      return sourceSku && sourceFnsku && sourceSku === candidateSku && sourceFnsku === candidateFnsku;
-    }) ||
-      findBy((lineItem) => sourceSku && sourceSku === normalizeItemFileMatchValue(getItemSku(lineItem))) ||
-      findBy((lineItem) => sourceFnsku && sourceFnsku === normalizeItemFileMatchValue(getItemFnsku(lineItem))) ||
-      findBy((lineItem) => sourceProduct && sourceProduct === normalizeItemFileMatchValue(getItemProductName(lineItem))) ||
-      findBy((lineItem) => sourceOrder !== null && sourceOrder === getLineItemExplicitOrder(lineItem)) ||
-      candidates.find((candidate) => candidate.index === fallbackIndex && isUnused(candidate)) ||
-      candidates.find(isUnused)
-  );
+  const stableMatch =
+    findUniqueBy('sku', (lineItem) => sourceSku && sourceSku === normalizeItemFileMatchValue(getItemSku(lineItem))) ||
+    findUniqueBy('fnsku', (lineItem) => sourceFnsku && sourceFnsku === normalizeItemFileMatchValue(getItemFnsku(lineItem))) ||
+    findUniqueBy('product_name', (lineItem) => sourceProduct && sourceProduct === normalizeItemFileMatchValue(getItemProductName(lineItem)));
+
+  if (stableMatch) return useMatch(stableMatch);
+
+  const indexMatch = candidates.find((candidate) => candidate.index === fallbackIndex && isUnused(candidate));
+  if (indexMatch) {
+    console.warn('[PickPackPro] Falling back to line item index for FNSKU label upload match.', {
+      fallbackIndex,
+      sourceSku: getItemSku(sourceItem),
+      sourceFnsku: getItemFnsku(sourceItem),
+      sourceProduct: getItemProductName(sourceItem),
+    });
+    return useMatch({ ...indexMatch, matchType: 'index' });
+  }
+
+  return useMatch(null);
 };
 
 const hasFileShape = (file = {}) =>
@@ -4028,50 +3982,6 @@ const sanitizeFileName = (value = 'download') =>
     .replace(/^-+|-+$/g, '')
     .toLowerCase() || 'download';
 
-const buildLocalShipmentLabelFile = ({ file, entityType = 'shipment', entityId = '', item = {}, index = 0, fileType = 'fnsku_label' }) => ({
-  id: `local-label-${entityId || getItemSku(item) || index}-${file.name}-${Date.now()}`,
-  name: file.name,
-  fileName: file.name,
-  file_name: file.name,
-  originalName: file.name,
-  original_name: file.name,
-  original_filename: file.name,
-  mimeType: file.type,
-  mime_type: file.type,
-  fileType,
-  file_type: fileType,
-  entityType,
-  entity_type: entityType,
-  entityId,
-  entity_id: entityId,
-  itemIndex: index,
-  item_index: index,
-  lineItemIndex: index,
-  line_item_index: index,
-  sku: getItemSku(item),
-  fnsku: getItemFnsku(item),
-  productName: getItemProductName(item),
-  product_name: getItemProductName(item),
-  metadata: {
-    itemIndex: index,
-    item_index: index,
-    lineItemIndex: index,
-    line_item_index: index,
-    lineItemId: entityType === 'item' ? entityId : '',
-    line_item_id: entityType === 'item' ? entityId : '',
-    shipmentLineItemId: entityType === 'item' ? entityId : '',
-    shipment_line_item_id: entityType === 'item' ? entityId : '',
-    shipmentItemId: entityType === 'item' ? entityId : '',
-    shipment_item_id: entityType === 'item' ? entityId : '',
-    sku: getItemSku(item),
-    fnsku: getItemFnsku(item),
-    productName: getItemProductName(item),
-    product_name: getItemProductName(item),
-  },
-  url: URL.createObjectURL(file),
-  localPreview: true,
-});
-
 const decorateShipmentLabelFile = (file = {}, { sourceFile, entityType = 'shipment', entityId = '', item = {}, index = 0, fileType = 'fnsku_label' }) => ({
   ...file,
   name: file?.name || file?.fileName || file?.file_name || sourceFile?.name,
@@ -4095,6 +4005,36 @@ const decorateShipmentLabelFile = (file = {}, { sourceFile, entityType = 'shipme
   productName: firstPresent(file?.productName, file?.product_name, getFileMeta(file)?.productName, getFileMeta(file)?.product_name, getItemProductName(item)),
   product_name: firstPresent(file?.product_name, file?.productName, getFileMeta(file)?.product_name, getFileMeta(file)?.productName, getItemProductName(item)),
 });
+
+const reloadSavedShipmentLabelFiles = async (shipmentId, fallbackItems = []) => {
+  const detailResponse = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentId)}`, {
+    method: 'GET',
+    headers: buildHeaders(),
+    cache: 'no-store',
+  });
+  const detailPayload = await parseResponse(detailResponse);
+  const detail = extractShipmentDetail(detailPayload);
+  const detailItems = getLineItems(detail);
+  const lineItems = detailItems.length ? detailItems : fallbackItems;
+  const itemFileResults = await Promise.allSettled(
+    lineItems
+      .map((item) => String(getItemEntityId(item) || '').trim())
+      .filter(Boolean)
+      .map(async (lineItemId) => {
+        const filesResponse = await fetch(`${API_BASE_URL}/api/files?entityType=item&entityId=${encodeURIComponent(lineItemId)}`, {
+          method: 'GET',
+          headers: buildHeaders(),
+          cache: 'no-store',
+        });
+        return extractFiles(await parseResponse(filesResponse));
+      })
+  );
+
+  return {
+    detail,
+    itemFiles: itemFileResults.flatMap((result) => (result.status === 'fulfilled' ? result.value : [])),
+  };
+};
 
 const downloadTextFile = (fileName, content) => {
   const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
@@ -4681,6 +4621,12 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
   const handleProductLabelFile = (index, file) => {
     if (!file) return;
+    if (file.size > SAFE_FILE_UPLOAD_BYTES) {
+      const errorMessage = getFnskuLabelTooLargeMessage(file.name);
+      setError(errorMessage);
+      showToast('error', errorMessage);
+      return;
+    }
     setProductItems((current) =>
       current.map((item, itemIndex) =>
         itemIndex === index
@@ -5539,6 +5485,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       const savedLineItems = savedShipmentLineItems || [];
       const labelUploadWarnings = [];
       let uploadedLabelFiles = [];
+      let uploadedLabelCount = 0;
 
       if (isDraft) {
         savedShipmentForList.status = 'draft';
@@ -5561,37 +5508,30 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       }
 
       if (labelFileInputs.length) {
-        const usedSavedLineItemKeys = new Set();
-        const labelUploadMatches = labelFileInputs.map(({ file, item, index }) => {
-          const savedLineItem = findSavedLineItemForUpload(item, index, savedLineItems, usedSavedLineItemKeys);
-          const lineItemId = getItemEntityId(savedLineItem);
-          const entityType = lineItemId ? 'item' : 'shipment';
-          const entityId = lineItemId || savedShipmentRecordId;
-
-          return { file, item, index, savedLineItem, lineItemId, entityType, entityId };
-        });
-        const localLabelFiles = labelUploadMatches.map(({ file, item, index, entityType, entityId }) =>
-          buildLocalShipmentLabelFile({
-            file,
-            entityType,
-            entityId,
-            item,
-            index,
-          })
-        );
-        uploadedLabelFiles = localLabelFiles;
-
         if (savedShipmentRecordId) {
+          const usedSavedLineItemKeys = new Set();
           const uploadResults = await Promise.allSettled(
-            labelUploadMatches.map(async ({ file, item, index, savedLineItem, lineItemId, entityType, entityId }) => {
-              const uploadFile = await prepareFileForUpload(file, 'FNSKU label');
+            labelFileInputs.map(async ({ file, item, index }) => {
+              const match = findSavedLineItemForUpload(item, index, savedLineItems, usedSavedLineItemKeys);
+              const savedLineItem = match.lineItem;
               const sku = getItemSku(item) || item.sku || getItemSku(savedLineItem) || '';
               const fnsku = getItemFnsku(item) || item.fnskuLabel || getItemFnsku(savedLineItem) || '';
               const productName = getItemProductName(item) || item.productName || getItemProductName(savedLineItem) || '';
+              const failedSku = sku || fnsku || productName || `line ${index + 1}`;
+              const lineItemId = getItemEntityId(savedLineItem);
+
+              if (!lineItemId) {
+                const uploadError = new Error(`Could not match FNSKU label to product ${failedSku}. Please upload it from shipment details.`);
+                uploadError.sku = failedSku;
+                uploadError.unmatched = true;
+                throw uploadError;
+              }
+
+              const uploadFile = await prepareFileForUpload(file, 'FNSKU label');
               const formData = new FormData();
               formData.append('file', uploadFile, uploadFile.name);
-              formData.append('entityType', entityType);
-              formData.append('entityId', entityId);
+              formData.append('entityType', 'item');
+              formData.append('entityId', lineItemId);
               formData.append('fileType', 'fnsku_label');
               formData.append('sku', sku);
               formData.append('fnsku', fnsku);
@@ -5631,50 +5571,74 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                 headers: buildHeaders(),
                 body: formData,
               });
-              const uploadPayload = await parseResponse(uploadResponse);
+              let uploadPayload;
+              try {
+                uploadPayload = await parseResponse(uploadResponse);
+              } catch (uploadError) {
+                uploadError.sku = failedSku;
+                throw uploadError;
+              }
               const uploadedFiles = extractFiles(uploadPayload).map((uploadedFile) =>
                 decorateShipmentLabelFile(uploadedFile, {
                   sourceFile: uploadFile,
-                  entityType,
-                  entityId,
+                  entityType: 'item',
+                  entityId: lineItemId,
                   item,
                   index,
                 })
               );
 
-              return uploadedFiles.length
-                ? uploadedFiles
-                : [
-                    buildLocalShipmentLabelFile({
-                      file: uploadFile,
-                      entityType,
-                      entityId,
-                      item,
-                      index,
-                    }),
-                  ];
+              return uploadedFiles;
             })
           );
 
           const backendFiles = uploadResults.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
-          const failedUploads = uploadResults.filter((result) => result.status === 'rejected').length;
-          uploadedLabelFiles = mergeFileLists(backendFiles, localLabelFiles);
+          const failedResults = uploadResults.filter((result) => result.status === 'rejected');
+          const unmatchedMessages = failedResults
+            .filter((result) => result.reason?.unmatched)
+            .map((result) => result.reason.message)
+            .filter(Boolean);
+          const failedUploadSkus = [
+            ...new Set(
+              failedResults
+                .filter((result) => !result.reason?.unmatched)
+                .map((result) => result.reason?.sku)
+                .filter(Boolean)
+            ),
+          ];
+          uploadedLabelCount = uploadResults.filter((result) => result.status === 'fulfilled').length;
+          uploadedLabelFiles = mergeFileLists(backendFiles);
 
-          if (failedUploads) {
-            labelUploadWarnings.push(`${failedUploads} label file(s) could not upload to server, but will show in this session.`);
+          if (unmatchedMessages.length) {
+            labelUploadWarnings.push(...unmatchedMessages);
+          }
+
+          if (failedUploadSkus.length) {
+            labelUploadWarnings.push(`FNSKU label upload failed for SKU(s): ${failedUploadSkus.join(', ')}.`);
+          } else if (failedResults.length && !unmatchedMessages.length) {
+            labelUploadWarnings.push(`${failedResults.length} label file(s) could not upload to server.`);
+          }
+
+          try {
+            const refreshed = await reloadSavedShipmentLabelFiles(savedShipmentRecordId, savedLineItems);
+            uploadedLabelFiles = mergeFileLists(uploadedLabelFiles, refreshed.itemFiles);
+          } catch (refreshError) {
+            labelUploadWarnings.push(refreshError.message || 'Shipment detail refresh failed after label upload.');
           }
         } else {
           labelUploadWarnings.push('Label file upload skipped because shipment database ID was not returned.');
         }
 
-        rememberUploadedFiles(
-          uploadedLabelFiles,
-          savedShipmentForList,
-          savedShipment,
-          savedShipmentRecordId,
-          savedShipmentForList.id,
-          savedShipmentForList.reference
-        );
+        if (uploadedLabelFiles.length) {
+          rememberUploadedFiles(
+            uploadedLabelFiles,
+            savedShipmentForList,
+            savedShipment,
+            savedShipmentRecordId,
+            savedShipmentForList.id,
+            savedShipmentForList.reference
+          );
+        }
       }
 
       const savedShipmentWithFiles = uploadedLabelFiles.length
@@ -5710,7 +5674,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
       const successMessage = [
         isDraft ? 'Draft saved' : 'Shipment submitted successfully.',
-        uploadedLabelFiles.length ? `${labelFileInputs.length} label file(s) attached.` : '',
+        uploadedLabelCount ? `${uploadedLabelCount} label file(s) attached.` : '',
         ...labelUploadWarnings,
       ]
         .filter(Boolean)
@@ -5952,7 +5916,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     const lineItemFileLookupIds = [
       ...new Set(
         selectedItems
-          .map((item) => String(getItemRecordId(item) || '').trim())
+          .map((item) => String(getItemEntityId(item) || '').trim())
           .filter(Boolean)
       ),
     ];
@@ -6058,7 +6022,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     if (itemLabelFileLookups.length) {
       const itemLabelFileResponses = await Promise.allSettled(
         itemLabelFileLookups.map(async ({ fileId, item }) => {
-          const itemId = getItemRecordId(item);
+          const itemId = getItemEntityId(item) || getItemRecordId(item);
           const files = await fetchFileById(fileId, {
             source: 'item-label-file-id',
             entityType: 'item',
@@ -8077,7 +8041,10 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                                 type="file"
                                 accept=".pdf,.csv,application/pdf,text/csv,application/vnd.ms-excel,image/*"
                                 className="hidden"
-                                onChange={(e) => handleProductLabelFile(index, e.target.files?.[0] || null)}
+                                onChange={(e) => {
+                                  handleProductLabelFile(index, e.target.files?.[0] || null);
+                                  e.target.value = '';
+                                }}
                               />
                             </label>
                           </div>

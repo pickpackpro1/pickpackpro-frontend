@@ -946,9 +946,6 @@ const BUNDLING_SERVICE_KEY = normalizeServiceKey("Bundling");
 const isBundlingServiceValue = (value = "") =>
   normalizeServiceKey(typeof value === "object" ? getServiceTaskLabel(value) : value) === BUNDLING_SERVICE_KEY;
 
-const filterBundlingServiceLabels = (services = []) =>
-  services.filter((service) => !isBundlingServiceValue(service));
-
 const STANDARD_SERVICE_KEYS = new Set(
   [
     "FNSKU Labeling",
@@ -981,18 +978,85 @@ const isCustomServiceTask = (service = {}) => {
   return isOtherServiceTask(service) || !STANDARD_SERVICE_KEYS.has(normalizeServiceKey(label));
 };
 
-const getItemServices = (item = {}) => {
+const getItemBundleMetadataSize = (item = {}) =>
+  firstPresent(
+    item?.bundleSize,
+    item?.bundle_size,
+    item?.bundleQty,
+    item?.bundle_qty,
+    item?.bundleQuantity,
+    item?.bundle_quantity,
+    item?.bundle,
+    item?.casePack,
+    item?.case_pack,
+    item?.unitsPerBundle,
+    item?.units_per_bundle,
+    item?.packSize,
+    item?.pack_size,
+    item?.product?.bundleSize,
+    item?.product?.bundle_size,
+    item?.product?.bundleQty,
+    item?.product?.bundle_qty,
+    item?.product?.bundleQuantity,
+    item?.product?.bundle_quantity,
+    item?.product?.bundle,
+    item?.product?.casePack,
+    item?.product?.case_pack,
+    item?.products?.bundleSize,
+    item?.products?.bundle_size,
+    item?.products?.bundleQty,
+    item?.products?.bundle_qty,
+    item?.products?.bundleQuantity,
+    item?.products?.bundle_quantity,
+    item?.products?.bundle,
+    item?.products?.casePack,
+    item?.products?.case_pack,
+    0
+  );
+
+const itemHasBundlingMetadata = (item = {}) => {
+  const bundleSize = Number(getItemBundleMetadataSize(item) || 0);
+  return Boolean(item?.needsBundling || item?.needs_bundling || (Number.isFinite(bundleSize) && bundleSize > 0));
+};
+
+const getItemSelectedServices = (item = {}) => {
+  const hasBundlingMetadata = itemHasBundlingMetadata(item);
   const services = [
     ...toLabelList(item?.services),
+    ...toLabelList(item?.selectedServices),
+    ...toLabelList(item?.selected_services),
+    ...toLabelList(item?.servicesSelected),
+    ...toLabelList(item?.services_selected),
     ...toLabelList(item?.serviceTypes),
     ...toLabelList(item?.service_types),
     ...toLabelList(item?.serviceType),
     ...toLabelList(item?.service_type),
     ...toLabelList(item?.requiredServices),
     ...toLabelList(item?.required_services),
+    ...toLabelList(item?.requiredServiceTypes),
+    ...toLabelList(item?.required_service_types),
     ...toLabelList(item?.prepServices),
     ...toLabelList(item?.prep_services),
-    ...(item?.needsBundling || item?.needs_bundling ? ["Bundling"] : []),
+  ];
+
+  return [
+    ...new Set(
+      services
+        .map((service) => String(formatServiceLabel(service) || "").trim())
+        .filter((service) => isDisplayServiceLabel(service) && !(hasBundlingMetadata && isBundlingServiceValue(service)))
+    ),
+  ];
+};
+
+const hasSelectedBundlingService = (item = {}) =>
+  getItemSelectedServices(item).some(isBundlingServiceValue);
+
+const shouldDisplayServiceTaskForItem = (service, item = {}) =>
+  !isBundlingServiceValue(service) || hasSelectedBundlingService(item) || !itemHasBundlingMetadata(item);
+
+const getItemServices = (item = {}) => {
+  const services = [
+    ...getItemSelectedServices(item),
     ...(item?.polyBag || item?.poly_bag || item?.needsPolyBag || item?.needs_poly_bag ? ["Poly Bag"] : []),
     ...(item?.bubbleWrap || item?.bubble_wrap || item?.needsBubbleWrap || item?.needs_bubble_wrap ? ["Bubble Wrap"] : []),
   ];
@@ -1071,19 +1135,29 @@ const mergeServiceTasks = (...taskGroups) => {
 const getShipmentServiceLabels = (shipment = {}, serviceTasks = []) => {
   const lineItems = getLineItems(shipment);
   const shipmentServiceTasks = mergeServiceTasks(extractServiceTasks(shipment), extractServiceTasks(serviceTasks));
+  const itemCount = lineItems.length;
+  const shouldDisplayShipmentService = (service) => {
+    if (!isBundlingServiceValue(service)) return true;
+    if (!service || typeof service !== "object") return lineItems.some(hasSelectedBundlingService);
+
+    const matchedItems = lineItems.filter((item) => isServiceTaskForItem(service, item, itemCount));
+    if (!matchedItems.length) return lineItems.some(hasSelectedBundlingService);
+
+    return matchedItems.some((item) => shouldDisplayServiceTaskForItem(service, item));
+  };
   const labels = [
     ...lineItems.flatMap((item) => getItemServices(item)),
     ...shipmentServiceTasks.flatMap((service) =>
-      typeof service === "object" ? [getServiceTaskLabel(service)] : toLabelList(service)
+      shouldDisplayShipmentService(service) ? (typeof service === "object" ? [getServiceTaskLabel(service)] : toLabelList(service)) : []
     ),
-    ...toLabelList(shipment?.serviceTypes),
-    ...toLabelList(shipment?.service_types),
-    ...toLabelList(shipment?.serviceType),
-    ...toLabelList(shipment?.service_type),
-    ...toLabelList(shipment?.requiredServices),
-    ...toLabelList(shipment?.required_services),
-    ...toLabelList(shipment?.prepServices),
-    ...toLabelList(shipment?.prep_services),
+    ...toLabelList(shipment?.serviceTypes).filter(shouldDisplayShipmentService),
+    ...toLabelList(shipment?.service_types).filter(shouldDisplayShipmentService),
+    ...toLabelList(shipment?.serviceType).filter(shouldDisplayShipmentService),
+    ...toLabelList(shipment?.service_type).filter(shouldDisplayShipmentService),
+    ...toLabelList(shipment?.requiredServices).filter(shouldDisplayShipmentService),
+    ...toLabelList(shipment?.required_services).filter(shouldDisplayShipmentService),
+    ...toLabelList(shipment?.prepServices).filter(shouldDisplayShipmentService),
+    ...toLabelList(shipment?.prep_services).filter(shouldDisplayShipmentService),
   ];
 
   return [...new Set(labels.map((service) => String(formatServiceLabel(service) || "").trim()).filter(isDisplayServiceLabel))];
@@ -1142,52 +1216,19 @@ const getLineItemServiceTaskLabels = (item, serviceTasks = [], itemCount = 0) =>
   ...new Set(
     getLineItemServiceTasks(item, serviceTasks, itemCount)
     .map(getServiceTaskLabel)
-    .filter((service) => isDisplayServiceLabel(service) && !isBundlingServiceValue(service))
+    .filter((service) => isDisplayServiceLabel(service) && shouldDisplayServiceTaskForItem(service, item))
   ),
 ];
 
 const getLineItemServices = (item, serviceTasks = [], itemCount = 0) => [
   ...new Set([
-    ...filterBundlingServiceLabels(getItemServices(item)),
+    ...getItemServices(item),
     ...getLineItemServiceTaskLabels(item, serviceTasks, itemCount),
   ]),
 ];
 
 const getItemBundleSize = (item = {}) =>
-  firstPresent(
-    item?.bundleSize,
-    item?.bundle_size,
-    item?.bundleQty,
-    item?.bundle_qty,
-    item?.bundleQuantity,
-    item?.bundle_quantity,
-    item?.bundle,
-    item?.casePack,
-    item?.case_pack,
-    item?.unitsPerBundle,
-    item?.units_per_bundle,
-    item?.packSize,
-    item?.pack_size,
-    item?.product?.bundleSize,
-    item?.product?.bundle_size,
-    item?.product?.bundleQty,
-    item?.product?.bundle_qty,
-    item?.product?.bundleQuantity,
-    item?.product?.bundle_quantity,
-    item?.product?.bundle,
-    item?.product?.casePack,
-    item?.product?.case_pack,
-    item?.products?.bundleSize,
-    item?.products?.bundle_size,
-    item?.products?.bundleQty,
-    item?.products?.bundle_qty,
-    item?.products?.bundleQuantity,
-    item?.products?.bundle_quantity,
-    item?.products?.bundle,
-    item?.products?.casePack,
-    item?.products?.case_pack,
-    0
-  );
+  getItemBundleMetadataSize(item);
 
 const hasDisplayBundleSize = (value) => {
   const bundleSize = Number(value || 0);
@@ -3892,6 +3933,23 @@ const ShipmentsStaff = () => {
           : []
       );
       const detailLineItems = getLineItems(shipmentData);
+      let loadedServices = extractServiceTasks(servicesPayload);
+      const syncedHiddenAutoTasks = await syncHiddenAutoBundlingTasksForItems(
+        detailLineItems,
+        mergeServiceTasks(loadedServices, shipmentData)
+      );
+      if (syncedHiddenAutoTasks) {
+        try {
+          const refreshedServicesResponse = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentId)}/services`, {
+            method: "GET",
+            headers: buildHeaders(),
+            cache: "no-store",
+          });
+          loadedServices = extractServiceTasks(await parseResponse(refreshedServicesResponse));
+        } catch {
+          // Keep the services payload already loaded; availability is fetched after the sync.
+        }
+      }
       const itemLabelFileLookups = detailLineItems
         .map((item) => ({
           fileId: String(getItemLabelFileId(item) || "").trim(),
@@ -4080,7 +4138,7 @@ const ShipmentsStaff = () => {
       setSelectedShipment(shipmentData);
       setStatusValue(shipmentData?.status || "in_progress");
       setDiscrepancies(toArray(discrepanciesPayload?.discrepancies || discrepanciesPayload?.data || discrepanciesPayload));
-      setServices(extractServiceTasks(servicesPayload));
+      setServices(loadedServices);
       setBoxes(loadedBoxes);
       setSubShipments(loadedSubShipments);
       setSubShipmentAvailability(subShipmentData.availability || []);
@@ -4604,6 +4662,101 @@ const ShipmentsStaff = () => {
     }
   };
 
+  const getServiceTasksWithPatch = (taskIdToPatch = "", patchPayload = {}, taskList = serviceTasks) =>
+    taskList.map((service) => {
+      if (String(getServiceTaskId(service) || "") !== String(taskIdToPatch || "")) {
+        return service;
+      }
+
+      return {
+        ...service,
+        status: patchPayload.status,
+        taskStatus: patchPayload.status,
+        task_status: patchPayload.status,
+        ...(patchPayload.unitsDone !== undefined
+          ? {
+              unitsDone: patchPayload.unitsDone,
+              units_done: patchPayload.unitsDone,
+            }
+          : {}),
+      };
+    });
+
+  const areDisplayedServicesDoneForItem = (item = {}, nextServiceTasks = [], itemList = lineItems) => {
+    const itemCount = itemList.length;
+    const displayedServices = getLineItemServices(item, nextServiceTasks, itemCount);
+    if (!displayedServices.length) return false;
+
+    return displayedServices.every(
+      (serviceName) => getServiceDisplayStatus(serviceName, item, nextServiceTasks, itemCount) === "Done"
+    );
+  };
+
+  const getHiddenAutoBundlingTasksForItem = (item = {}, nextServiceTasks = [], itemList = lineItems) =>
+    nextServiceTasks.filter((service) =>
+      Boolean(
+        getServiceTaskId(service) &&
+          isServiceTaskForItem(service, item, itemList.length) &&
+          isBundlingServiceValue(service) &&
+          !shouldDisplayServiceTaskForItem(service, item) &&
+          !isServiceTaskCompleteForPrep(service, item)
+      )
+    );
+
+  const syncHiddenAutoBundlingTasksForItems = async (itemsToCheck = lineItems, nextServiceTasks = serviceTasks) => {
+    const itemList = toArray(itemsToCheck);
+    const syncRows = itemList
+      .filter((item) => areDisplayedServicesDoneForItem(item, nextServiceTasks, itemList))
+      .flatMap((item) =>
+        getHiddenAutoBundlingTasksForItem(item, nextServiceTasks, itemList).map((service) => ({
+          service,
+          item,
+        }))
+      )
+      .filter((row, index, rows) => {
+        const serviceId = String(getServiceTaskId(row.service) || "");
+        return serviceId && rows.findIndex((currentRow) => String(getServiceTaskId(currentRow.service) || "") === serviceId) === index;
+      });
+
+    if (!syncRows.length) return 0;
+
+    await Promise.all(
+      syncRows.map(({ service, item }) => {
+        const serviceId = getServiceTaskId(service);
+        const unitsDone = getServiceUnits(service, item);
+        const hiddenPayload = { status: "DONE" };
+
+        if (Number.isFinite(unitsDone)) {
+          hiddenPayload.unitsDone = unitsDone;
+          hiddenPayload.units_done = unitsDone;
+        }
+
+        return fetch(`${API_BASE_URL}/api/services/${encodeURIComponent(serviceId)}`, {
+          method: "PATCH",
+          headers: buildHeaders(true),
+          body: JSON.stringify(hiddenPayload),
+        }).then((response) => parseResponse(response));
+      })
+    );
+
+    return syncRows.length;
+  };
+
+  const syncHiddenAutoBundlingTasks = async (updatedTaskId = "", patchPayload = {}) => {
+    const nextStatus = String(patchPayload.status || "").toUpperCase();
+    if (!["DONE", "COMPLETED", "COMPLETE"].includes(nextStatus)) return;
+
+    const nextServiceTasks = getServiceTasksWithPatch(updatedTaskId, patchPayload);
+    const updatedTask = nextServiceTasks.find(
+      (service) => String(getServiceTaskId(service) || "") === String(updatedTaskId || "")
+    );
+    const candidateItems = updatedTask
+      ? lineItems.filter((item) => isServiceTaskForItem(updatedTask, item, lineItems.length))
+      : [];
+
+    await syncHiddenAutoBundlingTasksForItems(candidateItems, nextServiceTasks);
+  };
+
   const handleUpdateTask = async (taskOverride = {}) => {
     try {
       setError("");
@@ -4629,6 +4782,7 @@ const ShipmentsStaff = () => {
         body: JSON.stringify(payload),
       });
       await parseResponse(response);
+      await syncHiddenAutoBundlingTasks(resolvedTaskId, payload);
       setMessage("Service task updated.");
       await loadShipmentDetail(selectedShipmentId);
       await refreshSubShipmentAvailability();
@@ -5276,7 +5430,7 @@ const ShipmentsStaff = () => {
     ...service,
     displayId: `${getServiceTaskId(service) || service?.lineItemId || service?.shipmentItemId || "task"}-${index}`,
   }));
-  const visibleServiceTasks = serviceTasks.filter((service) => !isBundlingServiceValue(service));
+  const visibleServiceTasks = serviceTasks;
   const customServices = extractCustomServices(selectedShipment, serviceTasks);
   const currentStatus = normalizeShipmentStatusValue(selectedShipment?.status);
   const currentStepIndex = statusSteps.indexOf(currentStatus);
@@ -6391,7 +6545,7 @@ const ShipmentsStaff = () => {
                   ...service,
                   displayId: `${getServiceTaskId(service) || service?.lineItemId || service?.shipmentItemId || "task"}-${index}`,
                 }));
-                const standardServiceTasks = viewServiceTasks.filter((service) => !isCustomServiceTask(service) && !isBundlingServiceValue(service));
+                const standardServiceTasks = viewServiceTasks.filter((service) => !isCustomServiceTask(service));
                 const viewCustomServices = extractCustomServices(shipmentForView, viewServiceTasks);
                 const itemLabelFiles = getItemLabelFileAssignments(viewLineItems, viewShipmentFiles);
                 const orderData = getShipmentOrderData(shipmentForView);
@@ -6406,7 +6560,7 @@ const ShipmentsStaff = () => {
                 );
                 const viewStatus = firstPresent(shipmentForView?.status, viewShipment?.status, "-");
                 const viewUnits = getShipmentUnits(shipmentForView);
-                const allServiceLabels = filterBundlingServiceLabels(getShipmentServiceLabels(shipmentForView, viewServiceTasks));
+                const allServiceLabels = getShipmentServiceLabels(shipmentForView, viewServiceTasks);
                 const viewBundleSizeEntries = getBundleSizeEntriesFromNotes(getRawShipmentNotes(shipmentForView));
 
                 const getBoxContentRowsForView = (box = {}, boxIndex = -1) => {
@@ -6650,7 +6804,9 @@ const ShipmentsStaff = () => {
                         {viewLineItems.length ? (
                           <div className="space-y-3">
                             {viewLineItems.map((item, index) => {
-                              const itemServiceTasks = standardServiceTasks.filter((service) => isServiceTaskForItem(service, item, itemCount));
+                              const itemServiceTasks = standardServiceTasks.filter(
+                                (service) => isServiceTaskForItem(service, item, itemCount) && shouldDisplayServiceTaskForItem(service, item)
+                              );
                               const itemCustomServices = viewCustomServices.filter((service) => isCustomServiceForItem(service, item, itemCount));
                               const itemServices = [
                                 ...new Set(
@@ -6660,7 +6816,7 @@ const ShipmentsStaff = () => {
                                     ...itemCustomServices.map((service) => service.name),
                                   ]
                                     .map((service) => String(formatServiceLabel(service) || "").trim())
-                                    .filter((service) => service && !isBundlingServiceValue(service))
+                                    .filter(Boolean)
                                 ),
                               ];
                               const itemServiceTaskRows = [

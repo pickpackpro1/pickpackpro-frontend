@@ -2787,9 +2787,29 @@ const getFileTypeValue = (file = {}) =>
   String(file?.fileType || file?.file_type || file?.type || file?.mimeType || file?.mime_type || '').toLowerCase();
 
 const getFileEntityId = (file = {}) =>
-  file?.entityId || file?.entity_id || file?.boxId || file?.box_id || file?.itemId || file?.item_id || file?.lineItemId || file?.line_item_id || file?.shipmentItemId || file?.shipment_item_id || file?.shipmentId || file?.shipment_id || '';
+  file?.entityId ||
+  file?.entity_id ||
+  file?.linkedEntityId ||
+  file?.linked_entity_id ||
+  file?.itemId ||
+  file?.item_id ||
+  file?.lineItemId ||
+  file?.line_item_id ||
+  file?.shipmentLineItemId ||
+  file?.shipment_line_item_id ||
+  file?.shipmentItemId ||
+  file?.shipment_item_id ||
+  file?.boxId ||
+  file?.box_id ||
+  file?.shipmentId ||
+  file?.shipment_id ||
+  '';
 
-const getFileEntityType = (file = {}) => String(file?.entityType || file?.entity_type || '').trim().toLowerCase();
+const getFileEntityType = (file = {}) => String(file?.entityType || file?.entity_type || file?.linkedEntityType || file?.linked_entity_type || '').trim().toLowerCase();
+
+const normalizeEntityType = (value = '') => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+const ITEM_FILE_ENTITY_TYPES = new Set(['item', 'shipment_item', 'shipmentitem', 'shipment_line_item', 'shipmentlineitem', 'line_item', 'lineitem']);
+const isItemFileEntityType = (value = '') => ITEM_FILE_ENTITY_TYPES.has(normalizeEntityType(value));
 
 const getFileRecordId = (file = {}) =>
   firstPresent(file?.id, file?.uuid, file?.fileId, file?.file_id);
@@ -2822,6 +2842,34 @@ const getItemLabelFileId = (item = {}) =>
 
 const getItemLabelRecordId = (item = {}) =>
   firstPresent(getShipmentLineItemId(item), getBoxAllocationLineItemId(item), getLineItemId(item));
+
+const getItemLabelMatchIds = (item = {}) => [
+  getShipmentLineItemId(item),
+  getBoxAllocationLineItemId(item),
+  item?.id,
+  item?.uuid,
+  item?.shipmentItemId,
+  item?.shipment_item_id,
+  item?.shipmentLineItemId,
+  item?.shipment_line_item_id,
+  item?.lineItemId,
+  item?.line_item_id,
+  item?.itemId,
+  item?.item_id,
+  item?.lineItem?.id,
+  item?.lineItem?.uuid,
+  item?.line_item?.id,
+  item?.line_item?.uuid,
+  item?.shipmentItem?.id,
+  item?.shipmentItem?.uuid,
+  item?.shipment_item?.id,
+  item?.shipment_item?.uuid,
+]
+  .map((value) => String(value || '').trim())
+  .filter(Boolean);
+
+const getItemLabelEntityId = (item = {}) =>
+  getItemLabelMatchIds(item)[0] || getItemLabelRecordId(item);
 
 const normalizeItemFileMatchValue = (value = '') => {
   const normalized = String(value || '').trim().toLowerCase();
@@ -2858,6 +2906,22 @@ const rawFileMatchesLineItem = (file = {}, item = {}) => {
   );
 };
 
+const isExactItemLabelFileMatch = (file = {}, item = {}) => {
+  const itemLabelFileId = String(getItemLabelFileId(item) || '').trim();
+  const fileRecordId = String(getFileRecordId(file) || '').trim();
+  const fileEntityId = String(getFileEntityId(file) || '').trim();
+  const fileEntityType = getFileEntityType(file);
+  const linkedEntityId = String(file?.linkedEntityId || file?.linked_entity_id || '').trim();
+  const linkedEntityType = String(file?.linkedEntityType || file?.linked_entity_type || '').trim().toLowerCase();
+  const itemIds = getItemLabelMatchIds(item);
+
+  return Boolean(
+    (itemLabelFileId && fileRecordId && itemLabelFileId === fileRecordId) ||
+      (isItemFileEntityType(fileEntityType) && fileEntityId && itemIds.includes(fileEntityId)) ||
+      (isItemFileEntityType(linkedEntityType) && linkedEntityId && itemIds.includes(linkedEntityId))
+  );
+};
+
 const hasFileShape = (file = {}) =>
   Boolean(
     file &&
@@ -2883,7 +2947,7 @@ const hasFileShape = (file = {}) =>
   );
 
 const decorateItemLabelFile = (file = {}, item = {}) => {
-  const itemId = getItemLabelRecordId(item);
+  const itemId = getItemLabelEntityId(item);
   const labelFileId = getItemLabelFileId(item);
   const fileName = firstPresent(getFileName(file), getItemLabelFileName(item), 'FNSKU label');
 
@@ -3348,7 +3412,7 @@ const isFnskuLabelFile = (file = {}) => {
   const name = getFileName(file).toLowerCase();
   const entityType = getFileEntityType(file);
 
-  return !isFbaBoxLabelFile(file) && (type.includes('fnsku') || name.includes('fnsku') || (entityType === 'item' && (type.includes('label') || isPdfFile(file) || isImageFile(file) || isCsvFile(file))));
+  return !isFbaBoxLabelFile(file) && (type.includes('fnsku') || name.includes('fnsku') || (isItemFileEntityType(entityType) && (type.includes('label') || isPdfFile(file) || isImageFile(file) || isCsvFile(file))));
 };
 
 const isAnyItemLabelFile = (file = {}) => {
@@ -3375,54 +3439,16 @@ const getPreferredLabelFile = (files = []) =>
   files[0] ||
   null;
 
-const findLineItemLabelFile = (item, files, itemCount = 0, itemIndex = 0) => {
+const findLineItemLabelFile = (item, files) => {
   const candidateFiles = getItemLabelCandidateFiles(mergeFileLists(getItemInlineLabelFiles(item), files));
-  const fnskuLabelFiles = candidateFiles.filter(isFnskuLabelFile);
-  const labelFiles = candidateFiles.filter(isAnyItemLabelFile);
-  const shipmentOrItemFiles = candidateFiles.filter((file) => {
-    const entityType = getFileEntityType(file);
-    return entityType !== 'box' && (isPdfFile(file) || isImageFile(file) || isCsvFile(file) || isAnyItemLabelFile(file));
-  });
-  const matchingFiles = candidateFiles.filter((file) => fileMatchesLineItem(file, item));
+  const matchingFiles = candidateFiles.filter((file) => isExactItemLabelFileMatch(file, item));
 
-  return (
-    getPreferredLabelFile(matchingFiles) ||
-    getPreferredLabelFile(candidateFiles.filter((file) => getFileEntityType(file) === 'item' && fileMatchesLineItem(file, item))) ||
-    (itemCount === 1 && fnskuLabelFiles.length === 1 ? fnskuLabelFiles[0] : null) ||
-    (itemCount === 1 && labelFiles.length === 1 ? labelFiles[0] : null) ||
-    (itemCount === 1 && shipmentOrItemFiles.length === 1 ? shipmentOrItemFiles[0] : null) ||
-    (itemCount > 1 && fnskuLabelFiles.length === itemCount ? fnskuLabelFiles[itemIndex] : null) ||
-    (itemCount > 1 && labelFiles.length === itemCount ? labelFiles[itemIndex] : null) ||
-    (itemCount > 1 && shipmentOrItemFiles.length === itemCount ? shipmentOrItemFiles[itemIndex] : null) ||
-    (itemCount > 1 && candidateFiles.length === itemCount ? candidateFiles[itemIndex] : null) ||
-    (itemCount === 1 && candidateFiles.length === 1 ? candidateFiles[0] : null)
-  );
+  return getPreferredLabelFile(matchingFiles);
 };
 
 const normalizeFileMatchValue = (value = '') => {
   const normalized = String(value || '').trim().toLowerCase();
   return normalized && !['-', 'n/a', 'na', 'none', 'null', 'undefined'].includes(normalized) ? normalized : '';
-};
-
-const isDisplayableLineItemFile = (file = {}) => {
-  if (!getFileUrl(file) && !getFileName(file)) return false;
-  const entityType = getFileEntityType(file);
-  if (entityType === 'box' || isFbaBoxLabelFile(file)) return false;
-  return isFnskuLabelFile(file) || isAnyItemLabelFile(file) || isImageFile(file) || isPdfFile(file) || isCsvFile(file);
-};
-
-const fileMatchesLineItem = (file = {}, item = {}) => {
-  return rawFileMatchesLineItem(file, item);
-};
-
-const getLineItemFiles = (item = {}, files = [], itemCount = 0, itemIndex = 0) => {
-  const fileList = mergeFileLists(getItemInlineLabelFiles(item), files).filter(isDisplayableLineItemFile);
-  const matchedFiles = fileList.filter((file) => fileMatchesLineItem(file, item));
-
-  if (matchedFiles.length) return mergeFileLists(matchedFiles);
-  if (itemCount === 1) return mergeFileLists(fileList);
-  if (fileList.length === itemCount && fileList[itemIndex]) return [fileList[itemIndex]];
-  return [];
 };
 
 const ShipmentDetail = () => {
@@ -3744,7 +3770,7 @@ const ShipmentDetail = () => {
         )
       );
       const lineItemFileRequests = shipmentLineItems
-        .map((item) => getItemLabelRecordId(item))
+        .map((item) => getItemLabelEntityId(item))
         .filter(isUuidValue)
         .filter(Boolean)
         .map((lineItemId) =>
@@ -3767,7 +3793,7 @@ const ShipmentDetail = () => {
         .filter(({ fileId }) => fileId);
       const itemLabelFileResults = await Promise.allSettled(
         itemLabelFileLookups.map(async ({ fileId, item }) => {
-          const itemId = getItemLabelRecordId(item);
+          const itemId = getItemLabelEntityId(item);
           const itemFiles = await fetchFileById(fileId);
           return itemFiles.map((file) =>
             decorateItemLabelFile(
@@ -4844,12 +4870,7 @@ const ShipmentDetail = () => {
   const resolveLineItemLabelFileForOpen = async (item, index) => {
     let labelFile = findLineItemLabelFile(item, files, lineItems.length, index);
     const labelFileId = String(getItemLabelFileId(item) || getFileRecordId(labelFile) || '').trim();
-    const itemLookupIds = [
-      getItemLabelRecordId(item),
-      getShipmentLineItemId(item),
-      getBoxAllocationLineItemId(item),
-      getLineItemId(item),
-    ]
+    const itemLookupIds = getItemLabelMatchIds(item)
       .map((value) => String(value || '').trim())
       .filter(Boolean)
       .filter((value, valueIndex, values) => values.indexOf(value) === valueIndex);
@@ -4859,8 +4880,7 @@ const ShipmentDetail = () => {
       const decoratedFiles = entityFiles.map((file) => decorateItemLabelFile(file, item));
       const matchedFile =
         decoratedFiles.find((file) => labelFileId && String(getFileRecordId(file) || '').trim() === labelFileId) ||
-        getPreferredLabelFile(decoratedFiles.filter((file) => fileMatchesLineItem(file, item))) ||
-        (decoratedFiles.length === 1 ? decoratedFiles[0] : null);
+        getPreferredLabelFile(decoratedFiles.filter((file) => isExactItemLabelFileMatch(file, item)));
 
       if (matchedFile) {
         labelFile = matchedFile;
@@ -4873,8 +4893,7 @@ const ShipmentDetail = () => {
       const decoratedFiles = freshFiles.map((file) => decorateItemLabelFile(file, item));
       const freshLabel =
         decoratedFiles.find((file) => String(getFileRecordId(file) || '').trim() === labelFileId) ||
-        getPreferredLabelFile(decoratedFiles.filter((file) => fileMatchesLineItem(file, item))) ||
-        (decoratedFiles.length === 1 ? decoratedFiles[0] : null);
+        getPreferredLabelFile(decoratedFiles.filter((file) => isExactItemLabelFileMatch(file, item)));
 
       if (freshLabel) labelFile = freshLabel;
     }
