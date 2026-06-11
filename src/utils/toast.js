@@ -1,12 +1,44 @@
 export const TOAST_EVENT_NAME = 'pickpackpro-toast';
 export const API_MUTATION_EVENT_NAME = 'pickpackpro-api-mutated';
 
+export const formatToastMessage = (value, fallback = 'Something went wrong.') => {
+  if (value instanceof Error) return formatToastMessage(value.message, fallback);
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || fallback;
+  }
+
+  if (value === 0 || value === false) return String(value);
+
+  if (value && typeof value === 'object') {
+    const nestedMessage =
+      value.message ??
+      value.error ??
+      value.details ??
+      value.detail ??
+      value.description;
+
+    if (nestedMessage !== undefined && nestedMessage !== null && nestedMessage !== value) {
+      return formatToastMessage(nestedMessage, fallback);
+    }
+
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return fallback;
+    }
+  }
+
+  return fallback;
+};
+
 export const showToast = (type, message) => {
   if (typeof window === 'undefined') return;
 
   window.dispatchEvent(
     new CustomEvent(TOAST_EVENT_NAME, {
-      detail: { type, message },
+      detail: { type, message: formatToastMessage(message) },
     })
   );
 };
@@ -55,7 +87,7 @@ const parseResponseMessage = async (response) => {
 
     try {
       const payload = JSON.parse(text);
-      return payload?.message || payload?.error || payload?.details || '';
+      return formatToastMessage(payload?.message ?? payload?.error ?? payload?.details, '');
     } catch {
       return trimmedText.length > 240 ? '' : trimmedText;
     }

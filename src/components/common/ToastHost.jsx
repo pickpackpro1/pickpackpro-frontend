@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { TOAST_EVENT_NAME } from '../../utils/toast';
+import { TOAST_EVENT_NAME, formatToastMessage } from '../../utils/toast';
 
 const toastStyles = {
   success: 'border-green-200 bg-green-50 text-green-700',
@@ -14,7 +14,7 @@ const ToastHost = () => {
       setToast({
         id: Date.now(),
         type: event.detail?.type || 'error',
-        message: event.detail?.message || 'Something went wrong.',
+        message: formatToastMessage(event.detail?.message),
       });
     };
 

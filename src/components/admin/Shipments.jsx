@@ -18,6 +18,7 @@ import {
   ClipboardList,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { formatToastMessage } from '../../utils/toast';
 
 const API_BASE_URL = '';
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app';
@@ -152,12 +153,10 @@ const parseResponse = async (response) => {
   }
 
   if (!response.ok) {
-    const message =
-      payload?.message ||
-      payload?.error ||
-      payload?.details ||
-      (typeof payload === 'string' ? payload : '') ||
-      `Request failed with status ${response.status}`;
+    const message = formatToastMessage(
+      payload?.message ?? payload?.error ?? payload?.details ?? (typeof payload === 'string' ? payload : ''),
+      `Request failed with status ${response.status}`
+    );
 
     throw new Error(
       String(message).toLowerCase().includes('max clients reached')
@@ -3610,7 +3609,7 @@ const Shipments = () => {
   };
 
   const showToast = (type, message) => {
-    setToast({ type, message });
+    setToast({ type, message: formatToastMessage(message) });
   };
 
   const loadClients = async () => {
@@ -4996,7 +4995,7 @@ const Shipments = () => {
                 ) : (
                   (() => {
                     const detailServices = extractServiceTasks(quickViewServices);
-                    const standardServiceTasks = detailServices.filter((service) => !isCustomServiceTask(service) && !isBundlingServiceValue(service));
+                    const standardServiceTasks = detailServices.filter((service) => !isCustomServiceTask(service));
                     const detailDiscrepancies = extractList(quickViewDiscrepancies, ['discrepancies']);
                     const customServicesForView = extractCustomServices(
                       { ...quickViewShipment, items: quickViewItems, lineItems: quickViewItems },
@@ -5188,7 +5187,7 @@ const Shipments = () => {
                                 const matchedServiceTasks = standardServiceTasks.filter((service) => isServiceTaskForItem(service, item, itemCount));
                                 const itemServices = [
                                   ...new Set([
-                                    ...filterBundlingServiceLabels(getLineItemServiceLabels(item)),
+                                    ...getLineItemServiceLabels(item),
                                     ...matchedServiceTasks.map(getServiceTaskLabel).filter(Boolean),
                                   ]),
                                 ];
