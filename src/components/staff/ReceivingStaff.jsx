@@ -4,6 +4,12 @@ import LayoutStaff from "./stafflayout/LayoutStaff";
 import LoadingState from "../common/LoadingState";
 import FullPageLoader from "../common/FullPageLoader";
 import { getSession } from "../../utils/auth";
+import {
+  getLineItemId as getMappedLineItemId,
+  getShipmentItems as getMappedShipmentItems,
+  normalizeShipment as normalizeMappedShipment,
+  normalizeShipmentList as normalizeMappedShipmentList,
+} from "../../utils/shipmentMapper";
 
 const API_BASE_URL = '';
 
@@ -44,13 +50,7 @@ const parseResponse = async (response) => {
   return payload;
 };
 
-const extractShipments = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.shipments)) return payload.shipments;
-  if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
-  if (Array.isArray(payload?.data)) return payload.data;
-  return [];
-};
+const extractShipments = (payload) => normalizeMappedShipmentList(payload);
 
 const RECEIVING_QUEUE_STATUSES = ["pending_arrival", "submitted"];
 
@@ -69,36 +69,23 @@ const LINE_ITEM_KEYS = [
 
 const LINE_ITEM_CONTAINERS = ["shipment", "data", "record", "result", "payload", "detail"];
 
-const getLineItems = (source) => {
-  if (Array.isArray(source)) return source;
-  if (!source || typeof source !== "object") return [];
-
-  for (const key of LINE_ITEM_KEYS) {
-    if (Array.isArray(source[key])) return source[key];
-  }
-
-  for (const key of LINE_ITEM_CONTAINERS) {
-    const nested = source[key];
-    if (!nested || nested === source || typeof nested !== "object") continue;
-    const nestedItems = getLineItems(nested);
-    if (nestedItems.length) return nestedItems;
-  }
-
-  return [];
-};
+const getLineItems = (source) => getMappedShipmentItems(source);
 
 const extractShipmentDetail = (payload) =>
-  payload?.shipment ||
-  payload?.data?.shipment ||
-  payload?.data?.record ||
-  payload?.data?.detail ||
-  payload?.record ||
-  payload?.detail ||
-  payload?.data ||
-  payload;
+  normalizeMappedShipment(
+    payload?.shipment ||
+      payload?.data?.shipment ||
+      payload?.data?.record ||
+      payload?.data?.detail ||
+      payload?.record ||
+      payload?.detail ||
+      payload?.data ||
+      payload ||
+      {}
+  );
 
 const getItemId = (item) =>
-  item?.id || item?.shipmentItemId || item?.shipment_item_id || item?.lineItemId || item?.line_item_id || "";
+  getMappedLineItemId(item) || item?.id || item?.shipmentItemId || item?.shipment_item_id || item?.lineItemId || item?.line_item_id || "";
 
 const getExpectedQty = (item) =>
   Number(
@@ -448,17 +435,19 @@ const ReceivingStaff = () => {
                       type="button"
                       disabled={isSaving}
                       onClick={() => receiveShipment(false)}
-                      className="rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      Confirm Receipt
+                      {isSaving ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
+                      {isSaving ? "Confirming..." : "Confirm Receipt"}
                     </button>
                     <button
                       type="button"
                       disabled={isSaving}
                       onClick={() => receiveShipment(true)}
-                      className="rounded-xl bg-[#2d6cdf] px-4 py-3 text-sm font-semibold text-white hover:bg-[#2358b5] disabled:opacity-60"
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2d6cdf] px-4 py-3 text-sm font-semibold text-white hover:bg-[#2358b5] disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      Receive + Start Prep
+                      {isSaving ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
+                      {isSaving ? "Starting..." : "Receive + Start Prep"}
                     </button>
                   </div>
                 </>

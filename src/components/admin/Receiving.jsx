@@ -165,6 +165,7 @@ const Receiving = () => {
   const [selectedShipment, setSelectedShipment] = useState(null);
   const [receivedQuantities, setReceivedQuantities] = useState({});
   const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
@@ -230,8 +231,9 @@ const Receiving = () => {
   };
 
   const handleConfirmArrival = async () => {
-    if (!selectedShipment) return;
+    if (!selectedShipment || isSaving) return;
     try {
+      setIsSaving(true);
       setError('');
       setMessage('');
       const items = getLineItems(selectedShipment)
@@ -256,6 +258,8 @@ const Receiving = () => {
       await loadPendingArrivals();
     } catch (requestError) {
       setError(requestError.message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -389,7 +393,15 @@ const Receiving = () => {
               </div>
               <div className="flex items-center gap-3 border-t border-gray-200 px-6 py-5">
                 <button onClick={handleCancel} className="flex-1 rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50">Cancel</button>
-                <button onClick={handleConfirmArrival} className="flex-1 rounded-lg bg-[#ff6900] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#e55d00]">Confirm Receipt</button>
+                <button
+                  type="button"
+                  onClick={handleConfirmArrival}
+                  disabled={isSaving}
+                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isSaving ? <RefreshCw size={14} className="animate-spin" /> : null}
+                  {isSaving ? 'Confirming...' : 'Confirm Receipt'}
+                </button>
               </div>
             </div>
           </div>

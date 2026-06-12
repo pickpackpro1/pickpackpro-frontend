@@ -23,6 +23,15 @@ import LoadingState from "../common/LoadingState";
 import FullPageLoader from "../common/FullPageLoader";
 import { getSession } from "../../utils/auth";
 import { formatToastMessage, showToast } from "../../utils/toast";
+import {
+  findLineItemLabelFile as findMappedLineItemLabelFile,
+  getItemLabelFileAssignments as getMappedItemLabelFileAssignments,
+  getLineItemId as getMappedLineItemId,
+  getShipmentItems as getMappedShipmentItems,
+  lineItemFileMatches as mappedFileMatchesLineItem,
+  normalizeShipment as normalizeMappedShipment,
+  normalizeShipmentList as normalizeMappedShipmentList,
+} from "../../utils/shipmentMapper";
 
 const API_BASE_URL = '';
 const SUPABASE_STORAGE_PUBLIC_BASE_URL = import.meta.env.VITE_SUPABASE_URL
@@ -96,13 +105,7 @@ const parseResponse = async (response) => {
   return payload;
 };
 
-const extractShipments = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.shipments)) return payload.shipments;
-  if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
-  if (Array.isArray(payload?.data)) return payload.data;
-  return [];
-};
+const extractShipments = (payload) => normalizeMappedShipmentList(payload);
 
 const getShipmentId = (shipment = {}) =>
   shipment?.id ||
@@ -114,31 +117,37 @@ const getShipmentId = (shipment = {}) =>
   shipment?.shipment_number ||
   "";
 
-const normalizeShipment = (shipment) => ({
-  id: getShipmentId(shipment),
-  reference: shipment?.reference || shipment?.shipmentNumber || shipment?.id || "N/A",
-  client:
-    shipment?.client?.companyName ||
-    shipment?.client?.company_name ||
-    shipment?.client?.name ||
-    shipment?.clients?.companyName ||
-    shipment?.clients?.company_name ||
-    shipment?.clients?.name ||
-    shipment?.clientName ||
-    shipment?.client_name ||
-    shipment?.clientId ||
-    shipment?.client_id ||
-    "-",
-  units: getShipmentUnits(shipment),
-  arrived:
-    shipment?.arrivedDate ||
-    shipment?.receivedAt ||
-    shipment?.actual_arrival_date ||
-    shipment?.expectedArrivalDate ||
-    shipment?.expected_arrival_date ||
-    "-",
-  status: shipment?.status || "draft",
-});
+const normalizeShipment = (shipment) => {
+  const mappedShipment = normalizeMappedShipment(shipment);
+
+  return {
+    ...mappedShipment,
+    id: getShipmentId(mappedShipment),
+    reference: mappedShipment?.reference || mappedShipment?.shipmentNumber || mappedShipment?.id || "N/A",
+    client:
+      mappedShipment?.clientName ||
+      mappedShipment?.client_name ||
+      mappedShipment?.client?.companyName ||
+      mappedShipment?.client?.company_name ||
+      mappedShipment?.client?.name ||
+      mappedShipment?.clients?.companyName ||
+      mappedShipment?.clients?.company_name ||
+      mappedShipment?.clients?.name ||
+      mappedShipment?.clientId ||
+      mappedShipment?.client_id ||
+      "-",
+    units: getShipmentUnits(mappedShipment),
+    arrived:
+      mappedShipment?.arrivedDate ||
+      mappedShipment?.receivedAt ||
+      mappedShipment?.actualArrivalDate ||
+      mappedShipment?.actual_arrival_date ||
+      mappedShipment?.expectedArrivalDate ||
+      mappedShipment?.expected_arrival_date ||
+      "-",
+    status: mappedShipment?.status || "draft",
+  };
+};
 
 const statCards = (shipments) => [
   {
@@ -372,22 +381,7 @@ const getDirectLineItems = (source = {}) => {
   return rows.some(hasLineItemShape) ? rows : [];
 };
 
-const getLineItems = (shipment = {}) => {
-  if (Array.isArray(shipment)) return shipment.some(hasLineItemShape) ? shipment : [];
-  if (!shipment || typeof shipment !== "object") return [];
-
-  const directItems = getDirectLineItems(shipment);
-  if (directItems.length) return directItems;
-
-  for (const key of LINE_ITEM_CONTAINERS) {
-    const nestedValue = shipment[key];
-    if (!nestedValue || typeof nestedValue !== "object" || nestedValue === shipment) continue;
-    const nestedItems = getDirectLineItems(nestedValue);
-    if (nestedItems.length) return nestedItems;
-  }
-
-  return [];
-};
+const getLineItems = (shipment = {}) => getMappedShipmentItems(shipment);
 
 const extractCustomServices = (shipment, serviceTasks = []) => {
   const items = getLineItems(shipment);
@@ -577,21 +571,15 @@ const getShipmentUnits = (shipment = {}) => {
   return getLineItems(shipment).reduce((sum, item) => sum + Number(getLineItemExpectedQty(item) || 0), 0);
 };
 
-const extractShipmentDetail = (payload) => {
-  const detail =
+const extractShipmentDetail = (payload) =>
+  normalizeMappedShipment(
     payload?.shipment ||
-    payload?.data?.shipment ||
-    payload?.data?.row ||
-    payload?.data ||
-    payload ||
-    {};
-
-  if (!detail || typeof detail !== "object") return {};
-
-  const detailItems = getLineItems(detail);
-  const payloadItems = getLineItems(payload);
-  return !detailItems.length && payloadItems.length ? { ...detail, shipment_line_items: payloadItems } : detail;
-};
+      payload?.data?.shipment ||
+      payload?.data?.row ||
+      payload?.data ||
+      payload ||
+      {}
+  );
 
 const getShipmentLookupCandidates = (shipment = {}, normalizedShipment = {}) => [
   ...new Set(
@@ -613,6 +601,7 @@ const getShipmentLookupCandidates = (shipment = {}, normalizedShipment = {}) => 
 
 const getLineItemId = (item) =>
   firstPresent(
+    getMappedLineItemId(item),
     item?.id,
     item?.uuid,
     item?.shipmentItemId,
@@ -633,6 +622,7 @@ const getLineItemId = (item) =>
 
 const getShipmentLineItemId = (item) =>
   firstPresent(
+    getMappedLineItemId(item),
     item?.id,
     item?.uuid,
     item?.shipmentItemId,
@@ -1121,13 +1111,7 @@ const getItemBundleMetadataSize = (item = {}) =>
     0
   );
 
-const itemHasBundlingMetadata = (item = {}) => {
-  const bundleSize = Number(getItemBundleMetadataSize(item) || 0);
-  return Boolean(item?.needsBundling || item?.needs_bundling || (Number.isFinite(bundleSize) && bundleSize > 0));
-};
-
 const getItemSelectedServices = (item = {}) => {
-  const hasBundlingMetadata = itemHasBundlingMetadata(item);
   const services = [
     ...toLabelList(item?.services),
     ...toLabelList(item?.selectedServices),
@@ -1150,7 +1134,7 @@ const getItemSelectedServices = (item = {}) => {
     ...new Set(
       services
         .map((service) => String(formatServiceLabel(service) || "").trim())
-        .filter((service) => isDisplayServiceLabel(service) && !(hasBundlingMetadata && isBundlingServiceValue(service)))
+        .filter(isDisplayServiceLabel)
     ),
   ];
 };
@@ -1159,7 +1143,7 @@ const hasSelectedBundlingService = (item = {}) =>
   getItemSelectedServices(item).some(isBundlingServiceValue);
 
 const shouldDisplayServiceTaskForItem = (service, item = {}) =>
-  !isBundlingServiceValue(service) || hasSelectedBundlingService(item) || !itemHasBundlingMetadata(item);
+  !isBundlingServiceValue(service) || hasSelectedBundlingService(item);
 
 const getItemServices = (item = {}) => {
   const services = [
@@ -1339,7 +1323,7 @@ const getItemBundleSize = (item = {}) =>
 
 const hasDisplayBundleSize = (value) => {
   const bundleSize = Number(value || 0);
-  return Number.isFinite(bundleSize) && bundleSize > 1;
+  return Number.isFinite(bundleSize) && bundleSize > 0;
 };
 
 const getBundleSizeEntriesFromNotes = (notes = "") => {
@@ -1379,12 +1363,25 @@ const getBundleSizeForLineItem = (item = {}, entries = []) => {
   return hasDisplayBundleSize(bundleSize) ? bundleSize : "";
 };
 
-const getViewItemBundleSize = (item = {}, bundleSizeEntries = []) => {
-  const noteBundleSize = getBundleSizeForLineItem(item, bundleSizeEntries);
-  if (hasDisplayBundleSize(noteBundleSize)) return noteBundleSize;
+const applyBundleMetadataFromNotes = (items = [], shipment = {}) => {
+  const entries = getBundleSizeEntriesFromNotes(getRawShipmentNotes(shipment));
+  if (!entries.length) return items;
 
+  return toArray(items).map((item) => {
+    if (hasDisplayBundleSize(getItemBundleSize(item))) return item;
+    const bundleSize = getBundleSizeForLineItem(item, entries);
+    return hasDisplayBundleSize(bundleSize)
+      ? { ...item, bundleSize, bundle_size: bundleSize }
+      : item;
+  });
+};
+
+const getViewItemBundleSize = (item = {}, bundleSizeEntries = []) => {
   const directBundleSize = getItemBundleSize(item);
-  return hasDisplayBundleSize(directBundleSize) ? directBundleSize : "";
+  if (hasDisplayBundleSize(directBundleSize)) return directBundleSize;
+
+  const noteBundleSize = getBundleSizeForLineItem(item, bundleSizeEntries);
+  return hasDisplayBundleSize(noteBundleSize) ? noteBundleSize : "";
 };
 
 const getServiceTaskStatus = (service = {}) => {
@@ -1575,20 +1572,56 @@ const getBoxDimensions = (box = {}) => {
 const getBoxWeight = (box = {}) =>
   firstPresent(box?.weight, box?.weightKg, box?.weight_kg, box?.grossWeight, box?.gross_weight, box?.totalWeight, box?.total_weight);
 
-const getBoxStatus = (box = {}) =>
-  formatBoxMetaValue(
-    firstPresent(
-      box?.status,
-      box?.boxStatus,
-      box?.box_status,
-      box?.state,
-      box?.dispatchStatus,
-      box?.dispatch_status,
-      box?.labelStatus,
-      box?.label_status,
-      "No status"
-    )
+const getBoxRawStatus = (box = {}) =>
+  firstPresent(
+    box?.status,
+    box?.boxStatus,
+    box?.box_status,
+    box?.state,
+    box?.dispatchStatus,
+    box?.dispatch_status,
+    box?.labelStatus,
+    box?.label_status
   );
+
+const isBoxDispatchedStatus = (box = {}) => {
+  const normalizedStatus = String(getBoxRawStatus(box) || "").trim().toLowerCase().replace(/\s+/g, "_");
+
+  return Boolean(
+    box?.dispatched_at ||
+      box?.dispatchedAt ||
+      box?.dispatch_date ||
+      box?.dispatchDate ||
+      ["dispatched", "sealed", "completed", "complete"].includes(normalizedStatus)
+  );
+};
+
+const getBoxStatus = (box = {}) => {
+  const rawStatus = getBoxRawStatus(box);
+  const normalizedStatus = String(rawStatus || "").trim().toLowerCase().replace(/\s+/g, "_");
+  if (["completed", "complete"].includes(normalizedStatus)) return "Completed";
+  if (isBoxDispatchedStatus(box)) return "Dispatched";
+  return formatBoxMetaValue(rawStatus || "No status");
+};
+
+const getBoxDisplayStatus = (box = {}, shipmentStatus = "") => {
+  const boxStatus = getBoxStatus(box);
+  const normalizedBoxStatus = String(boxStatus || "").trim().toLowerCase().replaceAll("_", " ");
+  const normalizedShipmentStatus = String(shipmentStatus || "").trim().toLowerCase().replaceAll("_", " ");
+
+  if (normalizedShipmentStatus === "completed" && normalizedBoxStatus !== "completed") {
+    return "Completed";
+  }
+
+  if (
+    ["", "no status", "draft", "pending", "pending arrival"].includes(normalizedBoxStatus) &&
+    normalizedShipmentStatus === "dispatched"
+  ) {
+    return "Dispatched";
+  }
+
+  return boxStatus;
+};
 
 const getBoxItemLineItemId = (item = {}) =>
   firstPresent(
@@ -2455,6 +2488,17 @@ const getSubShipmentAllocationItemId = (item = {}) =>
 const getSubShipmentBoxRows = (subShipment = {}, boxData = {}) =>
   mergeBoxLists(getSubShipmentBoxes(subShipment), extractBoxes(boxData));
 
+const hasBoxAllocationDetails = (box = {}) => {
+  const boxItems = getBoxItems(box);
+  const hasItemRows = boxItems.some((boxItem) =>
+    Boolean((getBoxItemLineItemId(boxItem) || getBoxItemSku(boxItem)) && getBoxItemQuantity(boxItem) !== "")
+  );
+
+  if (hasItemRows) return true;
+
+  return Boolean(getBoxDisplaySkuValues(box).length && getBoxUnits(box) !== "");
+};
+
 const getSubShipmentAllocationSummary = (subShipment = {}, boxData = {}) =>
   extractList(boxData, ["allocationSummary", "allocation_summary"]).length
     ? extractList(boxData, ["allocationSummary", "allocation_summary"])
@@ -2472,6 +2516,20 @@ const getSubShipmentAllocationSummary = (subShipment = {}, boxData = {}) =>
 const getSubShipmentLineItemsForBoxing = (subShipment = {}, boxData = {}, parentLineItems = []) => {
   const items = getSubShipmentItems(subShipment);
   const summaryRows = getSubShipmentAllocationSummary(subShipment, boxData);
+  const subShipmentBoxes = getSubShipmentBoxRows(subShipment, boxData);
+  const hasDetailedBoxAllocation = subShipmentBoxes.some(hasBoxAllocationDetails);
+  const hasSummaryAllocation = summaryRows.some((summary) => {
+    const plannedQty = Number(firstPresent(summary?.plannedQty, summary?.planned_qty, getSubShipmentItemQuantity(summary), 0) || 0);
+    const allocatedQty = Number(firstPresent(summary?.allocated, summary?.allocatedQty, summary?.allocated_qty, 0) || 0);
+    const remainingValue = firstPresent(summary?.remainingQty, summary?.remaining_qty);
+    const remainingQty = Number(remainingValue);
+
+    return (
+      (Number.isFinite(allocatedQty) && allocatedQty > 0) ||
+      (remainingValue !== "" && Number.isFinite(remainingQty) && Number.isFinite(plannedQty) && remainingQty < plannedQty)
+    );
+  });
+  const assumeExistingBoxesConsumedPlannedQty = subShipmentBoxes.length > 0 && !hasDetailedBoxAllocation && !hasSummaryAllocation;
 
   return summaryRows
     .map((summary) => {
@@ -2496,18 +2554,41 @@ const getSubShipmentLineItemsForBoxing = (subShipment = {}, boxData = {}, parent
       });
       const sourceLineItem = matchedSubItem ? getSubShipmentItemLineItem(matchedSubItem) : matchedParentLine || {};
       const plannedQty = Number(firstPresent(summary?.plannedQty, summary?.planned_qty, getSubShipmentItemQuantity(matchedSubItem || {}), 0) || 0);
-      const allocatedQty = Number(firstPresent(summary?.allocated, summary?.allocatedQty, summary?.allocated_qty, 0) || 0);
-      const remainingQty = Number(firstPresent(summary?.remainingQty, summary?.remaining_qty, Math.max(0, plannedQty - allocatedQty)) || 0);
       const shipmentItemId = summaryItemId || getShipmentLineItemId(sourceLineItem) || getLineItemId(sourceLineItem);
       const sku = getAvailabilitySku(summary) || getItemSku(sourceLineItem);
 
       if (!shipmentItemId && !sku) return null;
 
-      return {
+      const allocationLineItem = {
         ...sourceLineItem,
         id: shipmentItemId || sourceLineItem?.id,
         shipmentItemId,
         shipment_item_id: shipmentItemId,
+        sku,
+        sellerSku: sku,
+        seller_sku: sku,
+      };
+      const summaryAllocatedQty = Number(firstPresent(summary?.allocated, summary?.allocatedQty, summary?.allocated_qty, 0) || 0);
+      const actualAllocatedQty = getAllocatedQuantityForLineItem(allocationLineItem, subShipmentBoxes, []);
+      const allocatedQty = Math.min(
+        plannedQty,
+        assumeExistingBoxesConsumedPlannedQty
+          ? plannedQty
+          : Math.max(
+              Number.isFinite(summaryAllocatedQty) ? summaryAllocatedQty : 0,
+              Number.isFinite(actualAllocatedQty) ? actualAllocatedQty : 0
+            )
+      );
+      const summaryRemainingValue = firstPresent(summary?.remainingQty, summary?.remaining_qty);
+      const summaryRemainingQty = Number(summaryRemainingValue);
+      const computedRemainingQty = Math.max(0, plannedQty - allocatedQty);
+      const remainingQty =
+        summaryRemainingValue !== "" && Number.isFinite(summaryRemainingQty)
+          ? Math.min(Math.max(0, summaryRemainingQty), computedRemainingQty)
+          : computedRemainingQty;
+
+      return {
+        ...allocationLineItem,
         sku,
         productName: getAvailabilityProductName(summary) || getItemName(sourceLineItem),
         product_name: getAvailabilityProductName(summary) || getItemName(sourceLineItem),
@@ -2524,6 +2605,15 @@ const getSubShipmentLineItemsForBoxing = (subShipment = {}, boxData = {}, parent
     })
     .filter(Boolean);
 };
+
+const getSubShipmentResolvedAllocationSummary = (subShipment = {}, boxData = {}, parentLineItems = []) =>
+  getSubShipmentLineItemsForBoxing(subShipment, boxData, parentLineItems).map((item) => ({
+    shipmentItemId: getBoxAllocationLineItemId(item) || getShipmentLineItemId(item) || getLineItemId(item),
+    sku: getItemSku(item),
+    plannedQty: item.__subShipmentPlannedQty,
+    allocated: item.__subShipmentAllocatedQty,
+    remainingQty: item.__subShipmentAvailableQty,
+  }));
 
 const getSubShipmentLabelSummary = (subShipmentBoxes = [], files = []) => {
   if (!subShipmentBoxes.length) return "No boxes";
@@ -3624,76 +3714,25 @@ const buildItemLabelFile = (item = {}, file = {}) => {
 };
 
 const getItemDirectLabelFile = (item = {}) => {
-  const directFile = item?.fnskuLabelFile || item?.fnsku_label_file || item?.labelFile || item?.label_file || item?.file;
+  const directFile = item?.fnskuLabelFile || item?.fnsku_label_file;
   if (directFile && typeof directFile === "object" && !Array.isArray(directFile)) return buildItemLabelFile(item, directFile);
-
-  const uploadedFile = getItemUploadedLabelFiles(item)[0];
-  if (uploadedFile) return buildItemLabelFile(item, uploadedFile);
-
-  const labelUrl = firstPresent(
-    item?.fnskuLabelFileUrl,
-    item?.fnsku_label_file_url,
-    item?.fnskuLabelUrl,
-    item?.fnsku_label_url,
-    item?.labelFileUrl,
-    item?.label_file_url,
-    item?.labelUrl,
-    item?.label_url,
-    item?.fileUrl,
-    item?.file_url,
-    item?.fnskuLabelPath,
-    item?.fnsku_label_path,
-    item?.labelFilePath,
-    item?.label_file_path,
-    item?.labelPath,
-    item?.label_path
-  );
-
-  if (!labelUrl) return null;
-
-  return buildItemLabelFile(item, {
-    url: labelUrl,
-    fileUrl: labelUrl,
-    file_url: labelUrl,
-    name: firstPresent(getItemLabelFileName(item), labelUrl),
-  });
+  return null;
 };
 
 const getItemInlineLabelFiles = (item = {}) =>
   mergeFileLists(
     [getItemDirectLabelFile(item)].filter(Boolean),
-    getItemUploadedLabelFiles(item),
-    extractList(item?.files, ["files"]),
-    extractList(item?.attachments, ["files"]),
-    extractList(item?.labels, ["files"]),
-    extractList(item?.fnskuLabels, ["files"]),
-    extractList(item?.fnsku_labels, ["files"])
+    mergeFileLists(
+      getItemUploadedLabelFiles(item),
+      extractList(item?.files, ["files"]),
+      extractList(item?.attachments, ["files"]),
+      extractList(item?.labels, ["files"]),
+      extractList(item?.fnskuLabels, ["files"]),
+      extractList(item?.fnsku_labels, ["files"])
+    ).filter((file) => fileMatchesLineItem(file, item))
   ).map((file) => buildItemLabelFile(item, file));
 
-const fileMatchesLineItem = (file = {}, item = {}) => {
-  const shipmentLineItemId = String(getShipmentLineItemId(item) || "").trim();
-  const lineItemId = String(getLineItemId(item) || "").trim();
-  const itemLabelFileId = String(getItemLabelFileId(item) || "").trim();
-  const sku = normalizeFileMatchValue(getItemSku(item));
-  const fnsku = normalizeFileMatchValue(getItemFnsku(item));
-  const itemFileName = normalizeFileMatchValue(getItemLabelFileName(item));
-  const fileId = String(getFileRecordId(file) || "").trim();
-  const name = getFileName(file).toLowerCase();
-  const entityId = String(getFileEntityId(file) || "").trim();
-  const fileSku = normalizeFileMatchValue(getFileSku(file));
-  const fileFnsku = normalizeFileMatchValue(getFileFnsku(file));
-
-  return Boolean(
-    (itemLabelFileId && fileId === itemLabelFileId) ||
-      (shipmentLineItemId && entityId === shipmentLineItemId) ||
-      (lineItemId && entityId === lineItemId) ||
-      (sku && fileSku && sku === fileSku) ||
-      (fnsku && fileFnsku && fnsku === fileFnsku) ||
-      (sku && name.includes(sku)) ||
-      (fnsku && name.includes(fnsku)) ||
-      (itemFileName && name.includes(itemFileName))
-  );
-};
+const fileMatchesLineItem = (file = {}, item = {}) => mappedFileMatchesLineItem(file, item);
 
 const getItemLabelCandidateFiles = (files = []) =>
   extractList(files, ["files"]).filter((file) => {
@@ -3702,76 +3741,14 @@ const getItemLabelCandidateFiles = (files = []) =>
     return isFnskuLabelFile(file) || isAnyItemLabelFile(file) || isPdfFile(file) || isImageFile(file);
   });
 
-const findLineItemLabelFile = (item, files, itemCount = 0, itemIndex = 0) => {
+const findLineItemLabelFile = (item, files) => {
   const allFiles = mergeFileLists(getItemInlineLabelFiles(item), files).filter((file) => {
     if (!getFileUrl(file) && !getFileName(file)) return false;
     if (getFileEntityType(file) === "box" || isFbaBoxLabelFile(file)) return false;
     return isPdfFile(file) || isImageFile(file) || isAnyItemLabelFile(file);
   });
-  const candidateFiles = getItemLabelCandidateFiles(allFiles);
-  const fnskuLabelFiles = candidateFiles.filter(isFnskuLabelFile);
-  const labelFiles = candidateFiles.filter(isAnyItemLabelFile);
-  const shipmentOrItemFiles = allFiles.filter((file) => {
-    const entityType = getFileEntityType(file);
-    return !isFbaBoxLabelFile(file) && entityType !== "box" && (isPdfFile(file) || isImageFile(file) || isAnyItemLabelFile(file));
-  });
 
-  return (
-    fnskuLabelFiles.find((file) => fileMatchesLineItem(file, item)) ||
-    labelFiles.find((file) => fileMatchesLineItem(file, item)) ||
-    allFiles.find((file) => getFileEntityType(file) === "item" && fileMatchesLineItem(file, item)) ||
-    allFiles.find((file) => fileMatchesLineItem(file, item)) ||
-    (itemCount === 1 && fnskuLabelFiles.length === 1 ? fnskuLabelFiles[0] : null) ||
-    (itemCount === 1 && labelFiles.length === 1 ? labelFiles[0] : null) ||
-    (itemCount === 1 && shipmentOrItemFiles.length === 1 ? shipmentOrItemFiles[0] : null) ||
-    (itemCount > 1 && fnskuLabelFiles.length === itemCount ? fnskuLabelFiles[itemIndex] : null) ||
-    (itemCount > 1 && labelFiles.length === itemCount ? labelFiles[itemIndex] : null) ||
-    (itemCount > 1 && shipmentOrItemFiles.length === itemCount ? shipmentOrItemFiles[itemIndex] : null) ||
-    (itemCount > 1 && candidateFiles.length === itemCount ? candidateFiles[itemIndex] : null) ||
-    (itemCount === 1 && allFiles.length === 1 ? allFiles[0] : null)
-  );
-};
-
-const getLabelFileAssignmentKey = (file = {}, index = 0) => {
-  const fileId = String(getFileRecordId(file) || "").trim();
-  if (fileId) return `id:${fileId}`;
-
-  const stablePath = getFileStablePath(file);
-  if (stablePath) return `path:${stablePath}`;
-
-  const fileName = String(getFileName(file) || "").trim().toLowerCase();
-  const fileSize = firstPresent(file?.size, file?.fileSize, file?.file_size, getFileMeta(file)?.size);
-  return `name:${fileName || "file"}:${fileSize || ""}:${index}`;
-};
-
-const getFileItemIndex = (file = {}) => {
-  const value = firstPresent(
-    file?.itemIndex,
-    file?.item_index,
-    file?.lineItemIndex,
-    file?.line_item_index,
-    getFileMeta(file)?.itemIndex,
-    getFileMeta(file)?.item_index,
-    getFileMeta(file)?.lineItemIndex,
-    getFileMeta(file)?.line_item_index
-  );
-  const index = Number(value);
-  return Number.isInteger(index) && index >= 0 ? index : null;
-};
-
-const getFileCreatedTime = (file = {}) => {
-  const value = firstPresent(
-    file?.createdAt,
-    file?.created_at,
-    file?.uploadedAt,
-    file?.uploaded_at,
-    getFileMeta(file)?.createdAt,
-    getFileMeta(file)?.created_at,
-    getFileMeta(file)?.uploadedAt,
-    getFileMeta(file)?.uploaded_at
-  );
-  const time = value ? new Date(value).getTime() : 0;
-  return Number.isFinite(time) ? time : 0;
+  return findMappedLineItemLabelFile(item, getItemLabelCandidateFiles(allFiles));
 };
 
 const getItemLabelMatchIds = (item = {}) => [
@@ -3823,62 +3800,9 @@ const getItemLabelFileAssignments = (items = [], files = []) => {
       const entityType = getFileEntityType(file);
       if (entityType === "box" || isFbaBoxLabelFile(file)) return false;
       return isFnskuLabelFile(file) || isAnyItemLabelFile(file) || isPdfFile(file) || isImageFile(file) || isCsvFile(file);
-    })
-    .sort((firstFile, secondFile) => {
-      const firstIndex = getFileItemIndex(firstFile);
-      const secondIndex = getFileItemIndex(secondFile);
-      if (firstIndex !== null && secondIndex !== null && firstIndex !== secondIndex) return firstIndex - secondIndex;
-      if (firstIndex !== null && secondIndex === null) return -1;
-      if (firstIndex === null && secondIndex !== null) return 1;
-      return getFileCreatedTime(firstFile) - getFileCreatedTime(secondFile);
     });
 
-  const assignments = new Array(itemList.length).fill(null);
-  const usedKeys = new Set();
-  const getUnusedFiles = () =>
-    candidateFiles.filter((file, fileIndex) => !usedKeys.has(getLabelFileAssignmentKey(file, fileIndex)));
-  const assignFile = (itemIndex, file, fileIndex = 0) => {
-    if (!file || assignments[itemIndex]) return false;
-    const key = getLabelFileAssignmentKey(file, fileIndex);
-    if (usedKeys.has(key)) return false;
-    assignments[itemIndex] = file;
-    usedKeys.add(key);
-    return true;
-  };
-
-  itemList.forEach((item, itemIndex) => {
-    const exactFile = getUnusedFiles().find((file) => isExactItemLabelFileMatch(file, item));
-    if (exactFile) assignFile(itemIndex, exactFile, candidateFiles.indexOf(exactFile));
-  });
-
-  itemList.forEach((item, itemIndex) => {
-    if (assignments[itemIndex]) return;
-    const uniqueMatchedFile = getUnusedFiles().find((file) => {
-      if (!fileMatchesLineItem(file, item)) return false;
-      const matchedIndexes = itemList
-        .map((candidateItem, candidateIndex) => (fileMatchesLineItem(file, candidateItem) ? candidateIndex : -1))
-        .filter((candidateIndex) => candidateIndex >= 0);
-      return matchedIndexes.length === 1 && matchedIndexes[0] === itemIndex;
-    });
-    if (uniqueMatchedFile) assignFile(itemIndex, uniqueMatchedFile, candidateFiles.indexOf(uniqueMatchedFile));
-  });
-
-  const remainingItemIndexes = assignments
-    .map((file, itemIndex) => (file ? -1 : itemIndex))
-    .filter((itemIndex) => itemIndex >= 0);
-  const remainingFiles = getUnusedFiles();
-
-  if (remainingFiles.length === remainingItemIndexes.length) {
-    remainingItemIndexes.forEach((itemIndex, remainingIndex) => {
-      assignFile(itemIndex, remainingFiles[remainingIndex], candidateFiles.indexOf(remainingFiles[remainingIndex]));
-    });
-  } else if (candidateFiles.length >= itemList.length) {
-    remainingItemIndexes.forEach((itemIndex) => {
-      assignFile(itemIndex, candidateFiles[itemIndex], itemIndex);
-    });
-  }
-
-  return assignments;
+  return getMappedItemLabelFileAssignments(itemList, candidateFiles);
 };
 
 const ShipmentsStaff = () => {
@@ -3991,7 +3915,7 @@ const ShipmentsStaff = () => {
                 cache: "no-store",
               });
               const detail = extractShipmentDetail(await parseResponse(detailResponse));
-              const detailLineItems = sortLineItemsForDisplay(getLineItems(detail));
+              const detailLineItems = sortLineItemsForDisplay(applyBundleMetadataFromNotes(getLineItems(detail), detail));
               const rowLineItems = sortLineItemsForDisplay(getLineItems(shipmentRows[index]));
               const detailUnits = getShipmentUnits(detail);
               const rowUnits = getShipmentUnits(shipmentRows[index]);
@@ -4087,7 +4011,7 @@ const ShipmentsStaff = () => {
         }
       }
 
-      const detailLineItems = sortLineItemsForDisplay(getLineItems(shipmentData));
+      const detailLineItems = sortLineItemsForDisplay(applyBundleMetadataFromNotes(getLineItems(shipmentData), shipmentData));
       const lineItemFileRequests = detailLineItems
         .flatMap((item) => [
           getShipmentLineItemId(item),
@@ -4220,9 +4144,10 @@ const ShipmentsStaff = () => {
         loadedSubShipments.map(async (subShipment) => {
           const subShipmentId = getSubShipmentId(subShipment);
           if (!subShipmentId) {
+            const boxes = await enrichBoxesWithItems(getSubShipmentBoxes(subShipment), detailLineItems);
             return {
               subShipmentId,
-              boxes: getSubShipmentBoxes(subShipment),
+              boxes,
               allocationSummary: getSubShipmentAllocationSummary(subShipment, {}),
             };
           }
@@ -4234,15 +4159,20 @@ const ShipmentsStaff = () => {
               cache: "no-store",
             });
             const payload = await parseResponse(response);
+            const boxes = await enrichBoxesWithItems(
+              mergeBoxLists(getSubShipmentBoxes(subShipment), extractBoxes(payload)),
+              detailLineItems
+            );
             return {
               subShipmentId,
-              boxes: mergeBoxLists(getSubShipmentBoxes(subShipment), extractBoxes(payload)),
+              boxes,
               allocationSummary: extractList(payload, ["allocationSummary", "allocation_summary"]),
             };
           } catch {
+            const boxes = await enrichBoxesWithItems(getSubShipmentBoxes(subShipment), detailLineItems);
             return {
               subShipmentId,
-              boxes: getSubShipmentBoxes(subShipment),
+              boxes,
               allocationSummary: getSubShipmentAllocationSummary(subShipment, {}),
             };
           }
@@ -4731,6 +4661,16 @@ const ShipmentsStaff = () => {
   };
 
   const handleOpenSubShipmentBoxModal = (subShipmentId = "") => {
+    const subShipment = subShipments.find((currentSubShipment) => getSubShipmentId(currentSubShipment) === subShipmentId);
+    const boxData = subShipmentId ? subShipmentBoxData[subShipmentId] || {} : {};
+
+    if (!subShipmentId || !subShipment || getSubShipmentStatus(subShipment) === "cancelled") return;
+
+    if (getSubShipmentBoxableQuantity(subShipment, boxData) <= 0) {
+      showToast("error", "All SKU quantities in this sub-shipment are already boxed.");
+      return;
+    }
+
     setActiveSubShipmentIdForBox(subShipmentId);
     setBoxType("box");
     resetAddBoxSkuSelection();
@@ -4749,10 +4689,14 @@ const ShipmentsStaff = () => {
         cache: "no-store",
       });
       const payload = await parseResponse(response);
+      const boxes = await enrichBoxesWithItems(
+        mergeBoxLists(getSubShipmentBoxes(subShipment), extractBoxes(payload)),
+        lineItems
+      );
       setSubShipmentBoxData((currentData) => ({
         ...currentData,
         [subShipmentId]: {
-          boxes: mergeBoxLists(getSubShipmentBoxes(subShipment), extractBoxes(payload)),
+          boxes,
           allocationSummary: extractList(payload, ["allocationSummary", "allocation_summary"]),
         },
       }));
@@ -5431,6 +5375,12 @@ const ShipmentsStaff = () => {
       setError("File aur entity id required hain.");
       return;
     }
+    const normalizedFileType = String(fileType || "").trim().toLowerCase();
+    const normalizedEntityType = String(fileEntityType || "").trim().toLowerCase();
+    if (normalizedFileType.includes("fnsku") && normalizedEntityType !== "item") {
+      setError('FNSKU labels must be uploaded against a shipment line item. Select entity type "item" and use the line item ID.');
+      return;
+    }
     try {
       setError("");
       setMessage("");
@@ -5514,7 +5464,7 @@ const ShipmentsStaff = () => {
   };
 
   const stats = statCards(shipments);
-  const lineItems = sortLineItemsForDisplay(getLineItems(selectedShipment));
+  const lineItems = sortLineItemsForDisplay(applyBundleMetadataFromNotes(getLineItems(selectedShipment), selectedShipment));
   const activeSubShipmentForBox = activeSubShipmentIdForBox
     ? subShipments.find((subShipment) => getSubShipmentId(subShipment) === activeSubShipmentIdForBox) || null
     : null;
@@ -5525,6 +5475,15 @@ const ShipmentsStaff = () => {
   const boxSelectionBoxes = activeSubShipmentForBox
     ? getSubShipmentBoxRows(activeSubShipmentForBox, activeSubShipmentBoxData)
     : boxes;
+  const getSubShipmentBoxableQuantity = (subShipment = {}, boxData = {}) => {
+    const subShipmentLineItems = getSubShipmentLineItemsForBoxing(subShipment, boxData, lineItems);
+    const subShipmentBoxes = getSubShipmentBoxRows(subShipment, boxData);
+
+    return subShipmentLineItems.reduce(
+      (total, item) => total + getLineItemAllocatableQuantity(item, subShipmentBoxes, subShipmentLineItems),
+      0
+    );
+  };
   const findLineItemBySelection = (selectedValue = "") => {
     const normalizedSelection = String(selectedValue || "").trim();
     if (!normalizedSelection) return null;
@@ -5606,7 +5565,16 @@ const ShipmentsStaff = () => {
     ...service,
     displayId: `${getServiceTaskId(service) || service?.lineItemId || service?.shipmentItemId || "task"}-${index}`,
   }));
-  const visibleServiceTasks = serviceTasks;
+  const visibleServiceTasks = serviceTasks.filter((service) => {
+    if (!isBundlingServiceValue(service)) return true;
+
+    const matchedItem = findLineItemForServiceTask(service, lineItems);
+    if (matchedItem && Object.keys(matchedItem).length) {
+      return shouldDisplayServiceTaskForItem(service, matchedItem);
+    }
+
+    return lineItems.some((item) => shouldDisplayServiceTaskForItem(service, item));
+  });
   const customServices = extractCustomServices(selectedShipment, serviceTasks);
   const currentStatus = normalizeShipmentStatusValue(selectedShipment?.status);
   const currentStepIndex = statusSteps.indexOf(currentStatus);
@@ -5954,9 +5922,11 @@ const ShipmentsStaff = () => {
                       const status = getSubShipmentStatus(subShipment);
                       const boxData = subShipmentBoxData[subShipmentId] || {};
                       const subBoxes = getSubShipmentBoxRows(subShipment, boxData);
-                      const allocationSummary = getSubShipmentAllocationSummary(subShipment, boxData);
+                      const allocationSummary = getSubShipmentResolvedAllocationSummary(subShipment, boxData, lineItems);
                       const items = getSubShipmentItems(subShipment);
                       const canDispatchBoxes = status !== "cancelled";
+                      const canAddSubShipmentBox =
+                        Boolean(subShipmentId) && status !== "cancelled" && getSubShipmentBoxableQuantity(subShipment, boxData) > 0;
 
                       return (
                         <div key={subShipmentId || subShipmentIndex} className="overflow-hidden rounded-lg border border-[#dbe5f3] bg-[#f8fbff]">
@@ -5979,7 +5949,8 @@ const ShipmentsStaff = () => {
                                 <button
                                   type="button"
                                   onClick={() => handleOpenSubShipmentBoxModal(subShipmentId)}
-                                  disabled={!subShipmentId || status === "cancelled"}
+                                  disabled={!canAddSubShipmentBox}
+                                  title={canAddSubShipmentBox ? "Add box" : "All SKU quantities are already boxed"}
                                   className="rounded-lg bg-[#132347] px-3 py-2 text-xs font-semibold text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:opacity-60"
                                 >
                                   Add Box
@@ -6050,8 +6021,6 @@ const ShipmentsStaff = () => {
                                     const dispatchComplete = ["dispatched", "sealed", "completed", "complete"].includes(
                                       String(firstPresent(box?.status, box?.boxStatus, box?.box_status, box?.dispatchStatus, box?.dispatch_status, "")).toLowerCase()
                                     ) || Boolean(box?.dispatched_at || box?.dispatchedAt);
-                                    const fbaUploadKey = `fba-${boxRecordId || boxIndex}`;
-                                    const isUploadingFbaLabel = uploadingBoxLabelId === fbaUploadKey;
 
                                     return (
                                       <div key={boxRecordId || getBoxId(box) || boxIndex} className="rounded-md border border-[#e2e8f0] bg-white px-3 py-3">
@@ -6074,22 +6043,7 @@ const ShipmentsStaff = () => {
                                               >
                                                 FBA Label
                                               </button>
-                                            ) : (
-                                              <label className={`rounded-lg bg-[#ff9d3a] px-3 py-2 text-xs font-semibold text-white hover:bg-[#f28a18] ${isUploadingFbaLabel || !boxRecordId ? "pointer-events-none opacity-60" : "cursor-pointer"}`}>
-                                                {isUploadingFbaLabel ? "Uploading..." : "Upload Label"}
-                                                <input
-                                                  type="file"
-                                                  accept=".pdf,image/*"
-                                                  className="hidden"
-                                                  disabled={!boxRecordId || isUploadingFbaLabel}
-                                                  onChange={(event) => {
-                                                    const file = event.target.files?.[0] || null;
-                                                    event.target.value = "";
-                                                    handleUploadBoxFbaLabel(box, boxIndex, file);
-                                                  }}
-                                                />
-                                              </label>
-                                            )}
+                                            ) : null}
                                             <button
                                               type="button"
                                               onClick={dispatchComplete || !labelUploaded ? undefined : () => handleMarkBoxDispatched(boxRecordId)}
@@ -6138,6 +6092,8 @@ const ShipmentsStaff = () => {
                         const itemFnsku = getItemFnsku(item) || "-";
                         const expectedQty = getLineItemExpectedQty(item) || 0;
                         const receivedQty = getItemReceivedQty(item) || 0;
+                        const bundleSize = getViewItemBundleSize(item);
+                        const bundleSizeDisplay = bundleSize || "-";
                         return (
                           <div key={getLineItemId(item) || item?.sku || index} className="overflow-hidden rounded-md border border-[#d9e3f2] bg-[#f5f9ff]">
                             <div className="flex items-start justify-between gap-4 border-b border-[#e4ecf8] px-4 py-4">
@@ -6146,7 +6102,7 @@ const ShipmentsStaff = () => {
                                   SKU: {itemSku} {itemName ? `- ${itemName}` : ""}
                                 </p>
                                 <p className="mt-1 text-[12px] text-[#6b7a93]">
-                                  FNSKU: {itemFnsku} - Expected: {expectedQty} - Received: {receivedQty}
+                                  FNSKU: {itemFnsku} - Expected: {expectedQty} - Received: {receivedQty} - Bundle Size: {bundleSizeDisplay}
                                 </p>
                               </div>
                               <button
@@ -6224,7 +6180,7 @@ const ShipmentsStaff = () => {
                           ? lineItems[0]
                           : lineItems[Math.min(index, Math.max(lineItems.length - 1, 0))];
                         const boxUnits = firstPresent(getBoxUnits(box), getLineItemExpectedQty(fallbackLineItem || {}), "");
-                        const boxStatus = getBoxStatus(box);
+                        const boxStatus = getBoxDisplayStatus(box, currentStatus);
                         const boxSku = firstPresent(getBoxSkuValue(box, files), getItemSku(fallbackLineItem || {}));
                         const skuSummary = firstPresent(
                           getBoxSkuSummary(box, files),
@@ -6867,7 +6823,7 @@ const ShipmentsStaff = () => {
 
                         <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
                           {[
-                            { label: "Status", value: getBoxStatus(box) },
+                            { label: "Status", value: getBoxDisplayStatus(box, viewStatus) },
                             { label: "Dimensions", value: dimensions },
                             { label: "Weight", value: `${boxWeight || 0} kg` },
                             { label: "SKU", value: boxSku || "Pending" },
@@ -7345,9 +7301,10 @@ const ShipmentsStaff = () => {
                       <option value="">Select SKU</option>
                       {boxSelectionLineItems.map((item, index) => {
                         const optionValue = getLineItemOptionValue(item);
+                        const availableQty = getLineItemAllocatableQuantity(item, boxSelectionBoxes, boxSelectionLineItems);
 
                         return (
-                          <option key={optionValue || index} value={optionValue} disabled={isBoxSkuOptionSelectedElsewhere(optionValue, 0)}>
+                          <option key={optionValue || index} value={optionValue} disabled={availableQty <= 0 || isBoxSkuOptionSelectedElsewhere(optionValue, 0)}>
                             {getItemSku(item) || getLineItemId(item) || "-"}
                           </option>
                         );
@@ -7394,9 +7351,10 @@ const ShipmentsStaff = () => {
                                 <option value="">Select SKU</option>
                                 {boxSelectionLineItems.map((item, index) => {
                                   const optionValue = getLineItemOptionValue(item);
+                                  const availableQty = getLineItemAllocatableQuantity(item, boxSelectionBoxes, boxSelectionLineItems);
 
                                   return (
-                                    <option key={optionValue || index} value={optionValue} disabled={isBoxSkuOptionSelectedElsewhere(optionValue, visualRowIndex)}>
+                                    <option key={optionValue || index} value={optionValue} disabled={availableQty <= 0 || isBoxSkuOptionSelectedElsewhere(optionValue, visualRowIndex)}>
                                       {getItemSku(item) || getLineItemId(item) || "-"}
                                     </option>
                                   );

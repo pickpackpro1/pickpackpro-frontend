@@ -6,6 +6,12 @@ import FullPageLoader from "../common/FullPageLoader";
 import { getSession } from "../../utils/auth";
 import { useNavigate } from "react-router-dom";
 import { API_MUTATION_EVENT_NAME } from "../../utils/toast";
+import {
+  getLineItemId as getMappedLineItemId,
+  getShipmentItems as getMappedShipmentItems,
+  normalizeShipment as normalizeMappedShipment,
+  normalizeShipmentList as normalizeMappedShipmentList,
+} from "../../utils/shipmentMapper";
 
 const API_BASE_URL = '';
 
@@ -66,24 +72,20 @@ const firstPresent = (...values) => {
   return value === undefined || value === null ? "" : value;
 };
 
-const extractShipments = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.shipments)) return payload.shipments;
-  if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
-  if (Array.isArray(payload?.data)) return payload.data;
-  return [];
-};
+const extractShipments = (payload) => normalizeMappedShipmentList(payload);
 
 const extractShipmentDetail = (payload) =>
-  payload?.shipment ||
-  payload?.data?.shipment ||
-  payload?.data?.record ||
-  payload?.data?.row ||
-  payload?.record ||
-  payload?.row ||
-  payload?.data ||
-  payload ||
-  {};
+  normalizeMappedShipment(
+    payload?.shipment ||
+      payload?.data?.shipment ||
+      payload?.data?.record ||
+      payload?.data?.row ||
+      payload?.record ||
+      payload?.row ||
+      payload?.data ||
+      payload ||
+      {}
+  );
 
 const extractBoxes = (payload) => {
   if (Array.isArray(payload)) return payload;
@@ -154,6 +156,7 @@ const getShipmentLookupId = (shipment = {}) =>
 
 const getLineItemId = (item = {}) =>
   firstPresent(
+    getMappedLineItemId(item),
     item?.id,
     item?.uuid,
     item?.shipmentItemId,
@@ -389,16 +392,7 @@ const fetchSubShipmentsForDispatch = async (shipmentId = "", shipment = {}) => {
   }
 };
 
-const getLineItems = (shipment) =>
-  shipment?.shipment_line_items ||
-  shipment?.shipmentLineItems ||
-  shipment?.line_items ||
-  shipment?.items ||
-  shipment?.lineItems ||
-  shipment?.products ||
-  shipment?.productItems ||
-  shipment?.product_items ||
-  [];
+const getLineItems = (shipment) => getMappedShipmentItems(shipment);
 
 const getBoxes = (shipment) =>
   shipment?.boxes || shipment?.shipmentBoxes || shipment?.shipment_boxes || shipment?.outboundBoxes || shipment?.outbound_boxes || [];
@@ -510,6 +504,85 @@ const getBoxItemQuantity = (item = {}) =>
     item?.receivedQty,
     item?.received_qty
   );
+
+const getBoxUnits = (box = {}) =>
+  firstPresent(
+    box?.units,
+    box?.unitCount,
+    box?.unit_count,
+    box?.quantity,
+    box?.qty,
+    box?.boxQuantity,
+    box?.box_quantity,
+    box?.packedQuantity,
+    box?.packed_quantity,
+    box?.allocatedQuantity,
+    box?.allocated_quantity,
+    box?.allocatedQty,
+    box?.allocated_qty
+  );
+
+const getSubShipmentItems = (subShipment = {}) =>
+  toArray(
+    subShipment?.sub_shipment_items ||
+      subShipment?.subShipmentItems ||
+      subShipment?.sub_shipment_line_items ||
+      subShipment?.subShipmentLineItems ||
+      subShipment?.shipment_items ||
+      subShipment?.shipmentItems ||
+      subShipment?.allocationSummary ||
+      subShipment?.allocation_summary ||
+      subShipment?.items ||
+      subShipment?.lineItems ||
+      subShipment?.line_items
+  );
+
+const getSubShipmentItemLineItem = (item = {}) => {
+  const lineItem =
+    item?.shipment_line_items ||
+    item?.shipmentLineItems ||
+    item?.shipmentLineItem ||
+    item?.shipment_line_item ||
+    item?.lineItem ||
+    item?.line_item ||
+    item?.item;
+
+  return lineItem && typeof lineItem === "object" ? lineItem : item;
+};
+
+const getSubShipmentFallbackItems = (subShipment = {}, box = {}, lineItems = []) => {
+  const boxUnits = getBoxUnits(box);
+
+  return getSubShipmentItems(subShipment)
+    .map((item) => {
+      const lineItem = getSubShipmentItemLineItem(item);
+      const sku = firstPresent(getBoxItemDirectSku(item), getLineItemSku(lineItem), getBoxItemSku(item, lineItems));
+      const quantity = firstPresent(
+        boxUnits,
+        getBoxItemQuantity(item),
+        item?.plannedQty,
+        item?.planned_qty,
+        item?.allocatedQty,
+        item?.allocated_qty
+      );
+      const lineItemId = firstPresent(getBoxItemLineItemId(item), getLineItemId(lineItem));
+
+      return {
+        ...item,
+        ...(sku ? { sku, sellerSku: sku, seller_sku: sku } : {}),
+        ...(lineItemId
+          ? {
+              shipmentItemId: lineItemId,
+              shipment_item_id: lineItemId,
+              lineItemId,
+              line_item_id: lineItemId,
+            }
+          : {}),
+        ...(quantity !== "" ? { quantity, qty: quantity, units: quantity } : {}),
+      };
+    })
+    .filter((item) => getBoxItemSku(item, lineItems) || getBoxItemQuantity(item) !== "");
+};
 
 const parseBoxContents = (value) => {
   if (Array.isArray(value)) return value;
@@ -632,14 +705,14 @@ const getClientName = (shipment) =>
   shipment?.client_id ||
   "-";
 
-const formatBoxContents = (shipment, box) => {
-  const lineItems = getLineItems(shipment);
-  const boxItems = getBoxItems(box);
-  const contentRows = boxItems
+const formatBoxContentRows = (items = [], lineItems = [], box = {}) => {
+  const fallbackQuantity = toArray(items).length === 1 ? getBoxUnits(box) : "";
+
+  return toArray(items)
     .map((boxItem) => {
       const matchedLineItem = findLineItemForBoxItem(boxItem, lineItems);
       const sku = firstPresent(getBoxItemSku(boxItem, lineItems), getLineItemSku(matchedLineItem || {}));
-      const quantity = firstPresent(getBoxItemQuantity(boxItem), getLineItemQuantity(matchedLineItem || {}));
+      const quantity = firstPresent(getBoxItemQuantity(boxItem), fallbackQuantity);
 
       if (sku && quantity !== "") return `${sku} x ${quantity}`;
       if (sku) return sku;
@@ -647,8 +720,19 @@ const formatBoxContents = (shipment, box) => {
       return "";
     })
     .filter(Boolean);
+};
+
+const formatBoxContents = (shipment, box, subShipment = null) => {
+  const lineItems = getLineItems(shipment);
+  const boxItems = getBoxItems(box);
+  const contentRows = formatBoxContentRows(boxItems, lineItems, box);
 
   if (contentRows.length) return contentRows.join(", ");
+
+  const subShipmentContentRows = subShipment
+    ? formatBoxContentRows(getSubShipmentFallbackItems(subShipment, box, lineItems), lineItems, box)
+    : [];
+  if (subShipmentContentRows.length) return subShipmentContentRows.join(", ");
 
   const directSku = getBoxItemDirectSku(box);
   const directQuantity = getBoxItemQuantity(box);
@@ -666,6 +750,58 @@ const formatBoxContents = (shipment, box) => {
   }
 
   return "--";
+};
+
+const getBoxDimensionDedupeValue = (box = {}) => {
+  if (typeof box?.dimensions === "string") return box.dimensions;
+
+  const dimensions = box?.dimensions && typeof box.dimensions === "object" ? box.dimensions : {};
+  return [
+    dimensions?.length || dimensions?.l || box?.length || box?.lengthCm || box?.length_cm,
+    dimensions?.width || dimensions?.w || box?.width || box?.widthCm || box?.width_cm,
+    dimensions?.height || dimensions?.h || box?.height || box?.heightCm || box?.height_cm,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join("x");
+};
+
+const getDispatchBoxDedupeKey = (box = {}, shipment = {}, subShipment = null) => {
+  const boxId = String(getBoxId(box) || "").trim();
+  if (boxId) return `id:${boxId}`;
+
+  const label = String(box?.reference || box?.label || box?.name || box?.boxNumber || box?.box_number || "").trim().toLowerCase();
+  const dimensions = String(getBoxDimensionDedupeValue(box) || "").trim().toLowerCase();
+  const weight = String(box?.weight || box?.weightKg || box?.weight_kg || box?.grossWeight || box?.gross_weight || "").trim().toLowerCase();
+  const labelFileId = String(box?.fba_shipping_label_file_id || box?.fbaShippingLabelFileId || box?.label_file_id || box?.labelFileId || "").trim().toLowerCase();
+  const contents = String(formatBoxContents(shipment, box, subShipment) || "").trim().toLowerCase();
+  const fallbackParts = [label, dimensions, weight, labelFileId, contents].filter(Boolean);
+
+  return fallbackParts.length >= 2 ? `fallback:${fallbackParts.join("|")}` : "";
+};
+
+const dedupeDispatchBoxRows = (rows = [], shipment = {}) => {
+  const rowsByBox = new Map();
+  const rowsWithoutKey = [];
+
+  rows.forEach((row, index) => {
+    const key = getDispatchBoxDedupeKey(row?.box || {}, shipment, row?.subShipment || null);
+    const rowWithIndex = { ...row, __displayIndex: index };
+
+    if (!key) {
+      rowsWithoutKey.push(rowWithIndex);
+      return;
+    }
+
+    const existingRow = rowsByBox.get(key);
+    if (!existingRow || (!existingRow.subShipment && row?.subShipment)) {
+      rowsByBox.set(key, rowWithIndex);
+    }
+  });
+
+  return [...rowsByBox.values(), ...rowsWithoutKey]
+    .sort((firstRow, secondRow) => firstRow.__displayIndex - secondRow.__displayIndex)
+    .map(({ __displayIndex, ...row }) => row);
 };
 
 const enrichShipmentForDispatch = async (shipment) => {
@@ -744,7 +880,9 @@ const normalizeDispatchShipment = (shipment) => {
   const subShipmentRows = subShipments.flatMap((subShipment) =>
     getSubShipmentBoxes(subShipment).map((box) => ({ box, subShipment }))
   );
-  const normalizedBoxes = parentRows.length || subShipmentRows.length ? [...parentRows, ...subShipmentRows] : [{ box: {}, subShipment: null }];
+  const normalizedBoxes = parentRows.length || subShipmentRows.length
+    ? dedupeDispatchBoxRows([...parentRows, ...subShipmentRows], shipment)
+    : [{ box: {}, subShipment: null }];
 
   return normalizedBoxes.map(({ box, subShipment }, index) => {
     const subShipmentId = getSubShipmentId(subShipment || {});
@@ -775,7 +913,7 @@ const normalizeDispatchShipment = (shipment) => {
       box: boxLabel,
       type: String(boxType).replaceAll("_", " "),
       weight: weight ? `${weight} kg` : "--",
-      contents: formatBoxContents(shipment, box),
+      contents: formatBoxContents(shipment, box, subShipment),
       status,
       fbaLabelUploaded,
       fbaShippingLabelFileId: box?.fba_shipping_label_file_id || box?.fbaShippingLabelFileId || "",

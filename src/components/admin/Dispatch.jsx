@@ -6,6 +6,12 @@ import { getSession } from '../../utils/auth';
 import { Truck, Clock, Send, Search, Filter, Download, CheckCircle2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
+import {
+  getLineItemId as getMappedLineItemId,
+  getShipmentItems as getMappedShipmentItems,
+  normalizeShipment as normalizeMappedShipment,
+  normalizeShipmentList as normalizeMappedShipmentList,
+} from '../../utils/shipmentMapper';
 
 const API_BASE_URL = '';
 
@@ -49,16 +55,42 @@ const parseResponse = async (response) => {
   return payload;
 };
 
-const extractShipments = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.shipments)) return payload.shipments;
-  if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
-  if (Array.isArray(payload?.data)) return payload.data;
+const toArray = (value) => {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.rows)) return value.rows;
+  if (Array.isArray(value?.data?.rows)) return value.data.rows;
+  if (Array.isArray(value?.results)) return value.results;
+  if (Array.isArray(value?.data?.results)) return value.data.results;
+  if (Array.isArray(value?.data)) return value.data;
   return [];
 };
 
+const firstPresent = (...values) => {
+  const value = values.find((currentValue) => {
+    if (currentValue === 0 || currentValue === false) return true;
+    return currentValue !== undefined && currentValue !== null && String(currentValue).trim() !== '';
+  });
+
+  return value === undefined || value === null ? '' : value;
+};
+
+const extractShipments = (payload) => normalizeMappedShipmentList(payload);
+
+const extractShipmentDetail = (payload) =>
+  normalizeMappedShipment(
+    payload?.shipment ||
+      payload?.data?.shipment ||
+      payload?.data?.record ||
+      payload?.data?.row ||
+      payload?.record ||
+      payload?.row ||
+      payload?.data ||
+      payload ||
+      {}
+  );
+
 const getLineItems = (shipment) =>
-  shipment?.shipment_line_items || shipment?.shipmentLineItems || shipment?.items || shipment?.lineItems || [];
+  getMappedShipmentItems(shipment);
 
 const getBoxes = (shipment) =>
   shipment?.boxes || shipment?.shipmentBoxes || shipment?.shipment_boxes || shipment?.outboundBoxes || shipment?.outbound_boxes || [];
@@ -108,6 +140,44 @@ const extractFiles = (payload) => {
 
 const getBoxId = (box) => box?.id || box?.uuid || box?.boxId || box?.box_id || '';
 
+const getLineItemId = (item = {}) =>
+  firstPresent(
+    getMappedLineItemId(item),
+    item?.id,
+    item?.uuid,
+    item?.shipmentItemId,
+    item?.shipment_item_id,
+    item?.shipmentLineItemId,
+    item?.shipment_line_item_id,
+    item?.lineItemId,
+    item?.line_item_id,
+    item?.itemId,
+    item?.item_id,
+    item?.lineItem?.id,
+    item?.line_item?.id,
+    item?.shipmentItem?.id,
+    item?.shipment_item?.id
+  );
+
+const getLineItemSku = (item = {}) =>
+  firstPresent(
+    item?.sku,
+    item?.sellerSku,
+    item?.seller_sku,
+    item?.productSku,
+    item?.product_sku,
+    item?.shipmentItemSku,
+    item?.shipment_item_sku,
+    item?.lineItemSku,
+    item?.line_item_sku,
+    item?.product?.sku,
+    item?.product?.sellerSku,
+    item?.product?.seller_sku,
+    item?.products?.sku,
+    item?.products?.sellerSku,
+    item?.products?.seller_sku
+  );
+
 const getBoxLookupIds = (box = {}) => [
   ...new Set(
     [box?.id, box?.uuid, box?.boxId, box?.box_id, box?.recordId, box?.record_id]
@@ -115,6 +185,209 @@ const getBoxLookupIds = (box = {}) => [
       .filter(Boolean)
   ),
 ];
+
+const getBoxItemsLookupId = (box = {}) => getBoxId(box) || getBoxLookupIds(box).find(Boolean);
+
+const getBoxItemLineItemId = (item = {}) =>
+  firstPresent(
+    item?.shipmentItemId,
+    item?.shipment_item_id,
+    item?.shipmentLineItemId,
+    item?.shipment_line_item_id,
+    item?.lineItemId,
+    item?.line_item_id,
+    item?.itemId,
+    item?.item_id,
+    item?.shipmentItem?.id,
+    item?.shipmentItem?.uuid,
+    item?.shipment_item?.id,
+    item?.shipment_item?.uuid,
+    item?.lineItem?.id,
+    item?.lineItem?.uuid,
+    item?.line_item?.id,
+    item?.line_item?.uuid,
+    item?.item?.id,
+    item?.item?.uuid
+  );
+
+const getBoxItemDirectSku = (item = {}) =>
+  firstPresent(
+    item?.sku,
+    item?.sellerSku,
+    item?.seller_sku,
+    item?.shipmentItemSku,
+    item?.shipment_item_sku,
+    item?.lineItemSku,
+    item?.line_item_sku,
+    item?.productSku,
+    item?.product_sku,
+    item?.product?.sku,
+    item?.product?.sellerSku,
+    item?.product?.seller_sku,
+    item?.shipmentItem?.sku,
+    item?.shipmentItem?.sellerSku,
+    item?.shipmentItem?.seller_sku,
+    item?.shipment_item?.sku,
+    item?.shipment_item?.sellerSku,
+    item?.shipment_item?.seller_sku,
+    item?.lineItem?.sku,
+    item?.lineItem?.sellerSku,
+    item?.lineItem?.seller_sku,
+    item?.line_item?.sku,
+    item?.line_item?.sellerSku,
+    item?.line_item?.seller_sku,
+    item?.item?.sku,
+    item?.item?.sellerSku,
+    item?.item?.seller_sku
+  );
+
+const findLineItemForBoxItem = (boxItem = {}, lineItems = []) => {
+  const boxLineItemId = String(getBoxItemLineItemId(boxItem) || '').trim();
+  const boxSku = String(getBoxItemDirectSku(boxItem) || '').trim().toLowerCase();
+
+  return toArray(lineItems).find((lineItem) => {
+    const lineItemIds = [
+      getLineItemId(lineItem),
+      lineItem?.id,
+      lineItem?.uuid,
+      lineItem?.shipmentItemId,
+      lineItem?.shipment_item_id,
+      lineItem?.shipmentLineItemId,
+      lineItem?.shipment_line_item_id,
+      lineItem?.lineItemId,
+      lineItem?.line_item_id,
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+    const lineItemSku = String(getLineItemSku(lineItem) || '').trim().toLowerCase();
+
+    return Boolean(
+      (boxLineItemId && lineItemIds.includes(boxLineItemId)) ||
+        (boxSku && lineItemSku && boxSku === lineItemSku)
+    );
+  });
+};
+
+const getBoxItemSku = (item = {}, lineItems = []) =>
+  firstPresent(getBoxItemDirectSku(item), getLineItemSku(findLineItemForBoxItem(item, lineItems) || {}));
+
+const getBoxItemQuantity = (item = {}) =>
+  firstPresent(
+    item?.quantity,
+    item?.qty,
+    item?.units,
+    item?.itemQuantity,
+    item?.item_quantity,
+    item?.allocatedQuantity,
+    item?.allocated_quantity,
+    item?.allocatedQty,
+    item?.allocated_qty,
+    item?.boxedQuantity,
+    item?.boxed_quantity,
+    item?.packedQuantity,
+    item?.packed_quantity,
+    item?.receivedQty,
+    item?.received_qty
+  );
+
+const getBoxUnits = (box = {}) =>
+  firstPresent(
+    box?.units,
+    box?.unitCount,
+    box?.unit_count,
+    box?.quantity,
+    box?.qty,
+    box?.boxQuantity,
+    box?.box_quantity,
+    box?.packedQuantity,
+    box?.packed_quantity,
+    box?.allocatedQuantity,
+    box?.allocated_quantity,
+    box?.allocatedQty,
+    box?.allocated_qty
+  );
+
+const parseBoxContents = (value) => {
+  if (Array.isArray(value)) return value;
+  if (!value) return [];
+  if (typeof value === 'object') return [value];
+
+  const rawValue = String(value || '').trim();
+  if (!rawValue) return [];
+
+  try {
+    const parsedValue = JSON.parse(rawValue);
+    if (Array.isArray(parsedValue)) return parsedValue;
+    if (parsedValue && typeof parsedValue === 'object') return [parsedValue];
+  } catch {
+    // Plain text contents are handled below.
+  }
+
+  return [{ sku: rawValue }];
+};
+
+const getBoxItems = (box = {}) => {
+  const directItems = toArray(box?.items || box?.boxItems || box?.box_items || box?.lineItems || box?.line_items || box?.contents || box?.box_contents);
+  if (directItems.length) return directItems;
+
+  const parsedContents = parseBoxContents(firstPresent(box?.contents, box?.box_contents));
+  if (parsedContents.length) return parsedContents;
+
+  const inlineQuantity = getBoxItemQuantity(box);
+  return (getBoxItemLineItemId(box) || getBoxItemDirectSku(box)) && inlineQuantity !== '' ? [box] : [];
+};
+
+const extractBoxItems = (payload) => {
+  const directItems = toArray(
+    payload?.items ||
+      payload?.boxItems ||
+      payload?.box_items ||
+      payload?.contents ||
+      payload?.box_contents ||
+      payload?.lineItems ||
+      payload?.line_items ||
+      payload?.data?.items ||
+      payload?.data?.boxItems ||
+      payload?.data?.box_items ||
+      payload?.data?.contents ||
+      payload?.data?.box_contents ||
+      payload?.data
+  );
+  if (directItems.length) return directItems;
+
+  const containers = [
+    payload?.data,
+    payload?.box,
+    payload?.data?.box,
+    payload?.record,
+    payload?.data?.record,
+    payload?.payload,
+    payload?.data?.payload,
+  ];
+
+  for (const container of containers) {
+    const items = toArray(container?.items || container?.boxItems || container?.box_items || container?.contents || container?.box_contents || container?.lineItems || container?.line_items);
+    if (items.length) return items;
+  }
+
+  return [];
+};
+
+const fetchBoxItemsByBoxId = async (box = {}) => {
+  const boxId = String(getBoxItemsLookupId(box) || '').trim();
+  if (!boxId) return [];
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/boxes/${encodeURIComponent(boxId)}/items`, {
+      method: 'GET',
+      headers: buildHeaders(),
+      cache: 'no-store',
+    });
+    return extractBoxItems(await parseResponse(response));
+  } catch {
+    return [];
+  }
+};
 
 const getShipmentLookupId = (shipment = {}) =>
   shipment?.id ||
@@ -269,6 +542,30 @@ const hydrateBoxesWithLabelFiles = async (boxes = []) => {
   });
 };
 
+const enrichBoxWithItems = async (box = {}) => {
+  const existingItems = getBoxItems(box);
+  const hasUsableItems = existingItems.some((item) => (getBoxItemLineItemId(item) || getBoxItemSku(item)) && getBoxItemQuantity(item) !== '');
+  if (hasUsableItems) return box;
+
+  const boxItems = await fetchBoxItemsByBoxId(box);
+  return boxItems.length
+    ? {
+        ...box,
+        items: boxItems,
+        boxItems,
+        box_items: boxItems,
+        contents: boxItems,
+      }
+    : box;
+};
+
+const enrichBoxesWithItems = async (boxList = []) => {
+  if (!boxList.length) return [];
+
+  const results = await Promise.allSettled(boxList.map((box) => enrichBoxWithItems(box)));
+  return results.map((result, index) => (result.status === 'fulfilled' ? result.value : boxList[index]));
+};
+
 const fetchSubShipmentsForDispatch = async (shipmentId = '', shipment = {}) => {
   if (!shipmentId) return extractSubShipments(shipment);
 
@@ -318,7 +615,27 @@ const fetchSubShipmentsForDispatch = async (shipmentId = '', shipment = {}) => {
 
 const enrichShipmentForDispatch = async (shipment) => {
   const shipmentId = getShipmentLookupId(shipment);
+  let shipmentDetail = shipment;
   let boxes = getBoxes(shipment);
+
+  if (shipmentId && !getLineItems(shipmentDetail).length) {
+    try {
+      const detailResponse = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentId)}`, {
+        method: 'GET',
+        headers: buildHeaders(),
+        cache: 'no-store',
+      });
+      const detail = extractShipmentDetail(await parseResponse(detailResponse));
+      shipmentDetail = {
+        ...shipment,
+        ...detail,
+        id: shipment?.id || detail?.id,
+        reference: shipment?.reference || detail?.reference,
+      };
+    } catch {
+      shipmentDetail = shipment;
+    }
+  }
 
   if (shipmentId && !boxes.length) {
     try {
@@ -333,10 +650,10 @@ const enrichShipmentForDispatch = async (shipment) => {
     }
   }
 
-  boxes = await hydrateBoxesWithLabelFiles(boxes);
+  boxes = await hydrateBoxesWithLabelFiles(await enrichBoxesWithItems(boxes));
   const subShipments = await Promise.all(
-    (await fetchSubShipmentsForDispatch(shipmentId, shipment)).map(async (subShipment) => {
-      const subBoxes = await hydrateBoxesWithLabelFiles(getSubShipmentBoxes(subShipment));
+    (await fetchSubShipmentsForDispatch(shipmentId, shipmentDetail)).map(async (subShipment) => {
+      const subBoxes = await hydrateBoxesWithLabelFiles(await enrichBoxesWithItems(getSubShipmentBoxes(subShipment)));
       return {
         ...subShipment,
         boxes: subBoxes,
@@ -348,7 +665,7 @@ const enrichShipmentForDispatch = async (shipment) => {
   );
 
   return {
-    ...shipment,
+    ...shipmentDetail,
     boxes,
     shipmentBoxes: boxes,
     shipment_boxes: boxes,
@@ -357,37 +674,163 @@ const enrichShipmentForDispatch = async (shipment) => {
   };
 };
 
-const formatBoxContents = (shipment, box) => {
-  const boxItems = box?.items || box?.boxItems || box?.contents || box?.box_contents || [];
-  const firstBoxItem = Array.isArray(boxItems) ? boxItems[0] : null;
+const getSubShipmentItems = (subShipment = {}) =>
+  toArray(
+    subShipment?.sub_shipment_items ||
+      subShipment?.subShipmentItems ||
+      subShipment?.sub_shipment_line_items ||
+      subShipment?.subShipmentLineItems ||
+      subShipment?.shipment_items ||
+      subShipment?.shipmentItems ||
+      subShipment?.allocationSummary ||
+      subShipment?.allocation_summary ||
+      subShipment?.items ||
+      subShipment?.lineItems ||
+      subShipment?.line_items
+  );
 
-  if (firstBoxItem) {
-    const qty = firstBoxItem?.quantity || firstBoxItem?.qty || firstBoxItem?.units || firstBoxItem?.expectedQty || firstBoxItem?.expected_qty || 0;
-    const sku =
-      firstBoxItem?.sku ||
-      firstBoxItem?.productSku ||
-      firstBoxItem?.product_sku ||
-      firstBoxItem?.lineItem?.sku ||
-      firstBoxItem?.shipmentItem?.sku ||
-      '';
+const getSubShipmentItemLineItem = (item = {}) => {
+  const lineItem =
+    item?.shipment_line_items ||
+    item?.shipmentLineItems ||
+    item?.shipmentLineItem ||
+    item?.shipment_line_item ||
+    item?.lineItem ||
+    item?.line_item ||
+    item?.item;
 
-    return [qty ? `${qty}x` : '', sku].filter(Boolean).join(' ') || '--';
-  }
+  return lineItem && typeof lineItem === 'object' ? lineItem : item;
+};
+
+const getSubShipmentFallbackItems = (subShipment = {}, box = {}, lineItems = []) => {
+  const boxUnits = getBoxUnits(box);
+
+  return getSubShipmentItems(subShipment)
+    .map((item) => {
+      const lineItem = getSubShipmentItemLineItem(item);
+      const sku = firstPresent(getBoxItemDirectSku(item), getLineItemSku(lineItem), getBoxItemSku(item, lineItems));
+      const quantity = firstPresent(
+        boxUnits,
+        getBoxItemQuantity(item),
+        item?.plannedQty,
+        item?.planned_qty,
+        item?.allocatedQty,
+        item?.allocated_qty
+      );
+      const lineItemId = firstPresent(getBoxItemLineItemId(item), getLineItemId(lineItem));
+
+      return {
+        ...item,
+        ...(sku ? { sku, sellerSku: sku, seller_sku: sku } : {}),
+        ...(lineItemId
+          ? {
+              shipmentItemId: lineItemId,
+              shipment_item_id: lineItemId,
+              lineItemId,
+              line_item_id: lineItemId,
+            }
+          : {}),
+        ...(quantity !== '' ? { quantity, qty: quantity, units: quantity } : {}),
+      };
+    })
+    .filter((item) => getBoxItemSku(item, lineItems) || getBoxItemQuantity(item) !== '');
+};
+
+const formatBoxContentRows = (items = [], lineItems = [], box = {}) => {
+  const fallbackQuantity = toArray(items).length === 1 ? getBoxUnits(box) : '';
+
+  return toArray(items)
+    .map((boxItem) => {
+      const matchedLineItem = findLineItemForBoxItem(boxItem, lineItems);
+      const sku = firstPresent(getBoxItemSku(boxItem, lineItems), getLineItemSku(matchedLineItem || {}));
+      const quantity = firstPresent(getBoxItemQuantity(boxItem), fallbackQuantity);
+
+      if (sku && quantity !== '') return `${sku} x ${quantity}`;
+      if (sku) return sku;
+      if (quantity !== '') return `${quantity} units`;
+      return '';
+    })
+    .filter(Boolean);
+};
+
+const formatBoxContents = (shipment, box, subShipment = null) => {
+  const lineItems = getLineItems(shipment);
+  const contentRows = formatBoxContentRows(getBoxItems(box), lineItems, box);
+  if (contentRows.length) return contentRows.join(', ');
+
+  const subShipmentContentRows = subShipment
+    ? formatBoxContentRows(getSubShipmentFallbackItems(subShipment, box, lineItems), lineItems, box)
+    : [];
+  if (subShipmentContentRows.length) return subShipmentContentRows.join(', ');
+
+  const directSku = getBoxItemDirectSku(box);
+  const directQuantity = getBoxItemQuantity(box);
+  if (directSku && directQuantity !== '') return `${directSku} x ${directQuantity}`;
+  if (directSku) return directSku;
+  if (directQuantity !== '') return `${directQuantity} units`;
 
   const firstShipmentItem = getLineItems(shipment)[0];
-
-  if (firstShipmentItem) {
-    const qty =
-      firstShipmentItem?.receivedQty ||
-      firstShipmentItem?.received_qty ||
-      firstShipmentItem?.expectedQty ||
-      firstShipmentItem?.expected_qty ||
-      0;
-    const sku = firstShipmentItem?.sku || firstShipmentItem?.productSku || firstShipmentItem?.product_sku || '';
-    return [qty ? `${qty}x` : '', sku].filter(Boolean).join(' ') || '--';
+  if (getLineItems(shipment).length === 1 && firstShipmentItem) {
+    const sku = getLineItemSku(firstShipmentItem);
+    const quantity = firstPresent(getBoxUnits(box), firstShipmentItem?.receivedQty, firstShipmentItem?.received_qty, firstShipmentItem?.expectedQty, firstShipmentItem?.expected_qty);
+    if (sku && quantity !== '') return `${sku} x ${quantity}`;
+    if (sku) return sku;
+    if (quantity !== '') return `${quantity} units`;
   }
 
   return '--';
+};
+
+const getBoxDimensionDedupeValue = (box = {}) => {
+  if (typeof box?.dimensions === 'string') return box.dimensions;
+
+  const dimensions = box?.dimensions && typeof box.dimensions === 'object' ? box.dimensions : {};
+  return [
+    dimensions?.length || dimensions?.l || box?.length || box?.lengthCm || box?.length_cm,
+    dimensions?.width || dimensions?.w || box?.width || box?.widthCm || box?.width_cm,
+    dimensions?.height || dimensions?.h || box?.height || box?.heightCm || box?.height_cm,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join('x');
+};
+
+const getDispatchBoxDedupeKey = (box = {}, shipment = {}, subShipment = null) => {
+  const boxId = String(getBoxId(box) || '').trim();
+  if (boxId) return `id:${boxId}`;
+
+  const label = String(box?.reference || box?.label || box?.name || box?.boxNumber || box?.box_number || '').trim().toLowerCase();
+  const dimensions = String(getBoxDimensionDedupeValue(box) || '').trim().toLowerCase();
+  const weight = String(box?.weight || box?.weightKg || box?.weight_kg || box?.grossWeight || box?.gross_weight || '').trim().toLowerCase();
+  const labelFileId = String(box?.fba_shipping_label_file_id || box?.fbaShippingLabelFileId || box?.label_file_id || box?.labelFileId || '').trim().toLowerCase();
+  const contents = String(formatBoxContents(shipment, box, subShipment) || '').trim().toLowerCase();
+  const fallbackParts = [label, dimensions, weight, labelFileId, contents].filter(Boolean);
+
+  return fallbackParts.length >= 2 ? `fallback:${fallbackParts.join('|')}` : '';
+};
+
+const dedupeDispatchBoxRows = (rows = [], shipment = {}) => {
+  const rowsByBox = new Map();
+  const rowsWithoutKey = [];
+
+  rows.forEach((row, index) => {
+    const key = getDispatchBoxDedupeKey(row?.box || {}, shipment, row?.subShipment || null);
+    const rowWithIndex = { ...row, __displayIndex: index };
+
+    if (!key) {
+      rowsWithoutKey.push(rowWithIndex);
+      return;
+    }
+
+    const existingRow = rowsByBox.get(key);
+    if (!existingRow || (!existingRow.subShipment && row?.subShipment)) {
+      rowsByBox.set(key, rowWithIndex);
+    }
+  });
+
+  return [...rowsByBox.values(), ...rowsWithoutKey]
+    .sort((firstRow, secondRow) => firstRow.__displayIndex - secondRow.__displayIndex)
+    .map(({ __displayIndex, ...row }) => row);
 };
 
 const normalizeDispatchShipment = (shipment) => {
@@ -416,7 +859,9 @@ const normalizeDispatchShipment = (shipment) => {
   const subShipmentRows = subShipments.flatMap((subShipment) =>
     getSubShipmentBoxes(subShipment).map((box) => ({ box, subShipment }))
   );
-  const normalizedBoxes = parentRows.length || subShipmentRows.length ? [...parentRows, ...subShipmentRows] : [{ box: {}, subShipment: null }];
+  const normalizedBoxes = parentRows.length || subShipmentRows.length
+    ? dedupeDispatchBoxRows([...parentRows, ...subShipmentRows], shipment)
+    : [{ box: {}, subShipment: null }];
 
   return normalizedBoxes.map(({ box, subShipment }, index) => {
     const subShipmentId = getSubShipmentId(subShipment || {});
@@ -449,7 +894,7 @@ const normalizeDispatchShipment = (shipment) => {
       box: boxLabel,
       type: String(boxType).replaceAll('_', ' '),
       weight: weight ? `${weight} kg` : '--',
-      contents: formatBoxContents(shipment, box),
+      contents: formatBoxContents(shipment, box, subShipment),
       fbaLabel: fbaLabelUploaded ? 'Uploaded' : 'Missing',
       fbaLabelUploaded,
       fbaShippingLabelFileId: box?.fba_shipping_label_file_id || box?.fbaShippingLabelFileId || '',

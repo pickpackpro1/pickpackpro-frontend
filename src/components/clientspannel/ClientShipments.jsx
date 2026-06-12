@@ -5,6 +5,16 @@ import { Search, ChevronDown, Calendar, Plus, X, Eye, RefreshCw, Upload, FileUp,
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getSession } from '../../utils/auth';
 import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
+import {
+  buildShipmentItemPayload as mapShipmentItemPayload,
+  findSavedLineItemForUpload as findMappedSavedLineItemForUpload,
+  getItemLabelFileAssignments as getMappedItemLabelFileAssignments,
+  getLineItemId as getMappedLineItemId,
+  getShipmentItems as getMappedShipmentItems,
+  lineItemFileMatches as mappedFileMatchesLineItem,
+  normalizeShipment as normalizeMappedShipment,
+  normalizeShipmentList as normalizeMappedShipmentList,
+} from '../../utils/shipmentMapper';
 
 const DRAFT_CACHE_KEY = 'pickpackpro-shipment-drafts';
 const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
@@ -253,24 +263,7 @@ const normalizeServiceType = (value) => {
 const isBundlingServiceValue = (value = '') =>
   normalizeServiceType(String(value || '').split('/')[0]) === 'BUNDLING';
 
-const extractShipments = (payload) =>
-  Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload?.shipments)
-      ? payload.shipments
-      : Array.isArray(payload?.data?.shipments)
-        ? payload.data.shipments
-        : Array.isArray(payload?.rows)
-          ? payload.rows
-          : Array.isArray(payload?.data?.rows)
-            ? payload.data.rows
-            : Array.isArray(payload?.results)
-              ? payload.results
-              : Array.isArray(payload?.data?.results)
-                ? payload.data.results
-                : Array.isArray(payload?.data)
-                  ? payload.data
-                  : [];
+const extractShipments = (payload) => normalizeMappedShipmentList(payload);
 
 const extractList = (payload, keys = []) => {
   if (Array.isArray(payload)) return payload;
@@ -488,22 +481,7 @@ const getDirectLineItems = (source = {}) => {
   return genericRows.some(hasLineItemShape) ? genericRows : [];
 };
 
-const getLineItems = (shipment = {}) => {
-  if (Array.isArray(shipment)) return shipment.some(hasLineItemShape) ? shipment : [];
-  if (!shipment || typeof shipment !== 'object') return [];
-
-  const directItems = getDirectLineItems(shipment);
-  if (directItems.length) return directItems;
-
-  for (const key of LINE_ITEM_CONTAINERS) {
-    const value = shipment[key];
-    if (!value || typeof value !== 'object' || value === shipment) continue;
-    const nestedItems = getDirectLineItems(value);
-    if (nestedItems.length) return nestedItems;
-  }
-
-  return [];
-};
+const getLineItems = (shipment = {}) => getMappedShipmentItems(shipment);
 
 const firstPresent = (...values) => {
   const value = values.find((currentValue) => {
@@ -874,20 +852,6 @@ const isPositiveBundleSize = (value) => {
   return Number.isFinite(bundleSize) && bundleSize > 0;
 };
 
-const buildBundleSizeNote = (items = []) => {
-  const bundleSizes = toArray(items)
-    .map((item) => ({
-      sku: getItemSku(item),
-      fnsku: getItemFnsku(item),
-      bundleSize: Number(getItemBundleSize(item) || 0),
-      hasBundling: Boolean(item?.needsBundling || item?.needs_bundling || toArray(item?.services).some(isBundlingServiceValue)),
-    }))
-    .filter((item) => item.hasBundling && isPositiveBundleSize(item.bundleSize) && (item.sku || item.fnsku))
-    .map(({ hasBundling, ...item }) => item);
-
-  return bundleSizes.length ? `${BUNDLE_SIZE_NOTE_PREFIX} ${JSON.stringify(bundleSizes)}` : '';
-};
-
 const getBundleSizeEntriesFromNotes = (notes = '') => {
   const line = String(notes || '')
     .split('\n')
@@ -925,9 +889,10 @@ const applyBundleSizesFromNotes = (items = [], shipment = {}) => {
   if (!entries.length) return items;
 
   return toArray(items).map((item) => {
+    if (isPositiveBundleSize(getItemBundleSize(item))) return item;
     const bundleSize = getBundleSizeForLineItem(item, entries);
     return isPositiveBundleSize(bundleSize)
-      ? { ...item, bundleSize, bundle_size: bundleSize, needsBundling: true, needs_bundling: true }
+      ? { ...item, bundleSize, bundle_size: bundleSize }
       : item;
   });
 };
@@ -963,7 +928,6 @@ const getItemServices = (item = {}) => {
     ...toLabelList(item?.service_types),
     ...toLabelList(item?.serviceType),
     ...toLabelList(item?.service_type),
-    ...(item?.needsBundling || item?.needs_bundling ? ['Bundling'] : []),
   ];
 
   return [...new Set(services.map((service) => String(service).trim()).filter(isDisplayServiceLabel))];
@@ -1021,8 +985,14 @@ const isCustomServiceTask = (service = {}) => {
 const getServiceTaskStatus = (service = {}) =>
   firstPresent(service?.status, service?.taskStatus, service?.task_status, service?.state) || 'PENDING';
 
+const hasBundlingServiceForItem = (item = {}) =>
+  getItemServices(item).some(isBundlingServiceValue);
+
+const shouldDisplayServiceTaskForItem = (service = {}, item = {}) =>
+  !isBundlingServiceTask(service) || hasBundlingServiceForItem(item);
+
 const getItemServicesForView = (item = {}, services = [], itemCount = 0) => {
-  const itemServices = filterBundlingServiceLabels(getItemServices(item));
+  const itemServices = getItemServices(item);
   if (itemServices.length) return itemServices;
 
   const itemId = String(getItemRecordId(item) || '').trim();
@@ -1039,7 +1009,10 @@ const getItemServicesForView = (item = {}, services = [], itemCount = 0) => {
 
   return [
     ...new Set(
-      filterBundlingServiceLabels(matchedServices.map((service) => getServiceTaskLabel(service)).filter(isDisplayServiceLabel))
+      matchedServices
+        .filter((service) => shouldDisplayServiceTaskForItem(service, item))
+        .map((service) => getServiceTaskLabel(service))
+        .filter(isDisplayServiceLabel)
     ),
   ];
 };
@@ -1142,6 +1115,7 @@ const formatShipmentServices = (shipment = {}, serviceTasks = []) => {
 
 const getItemEntityId = (item = {}) =>
   firstPresent(
+    getMappedLineItemId(item),
     item?.id,
     item?.uuid,
     item?.shipmentLineItemId,
@@ -1412,31 +1386,34 @@ const buildShipmentPreview = (shipment = {}, shipmentId = '') => {
 };
 
 const extractShipmentDetail = (payload) =>
-  payload?.shipment ||
-  payload?.data?.shipment ||
-  payload?.data?.row ||
-  payload?.data ||
-  payload ||
-  {};
+  normalizeMappedShipment(
+    payload?.shipment ||
+      payload?.data?.shipment ||
+      payload?.data?.row ||
+      payload?.data ||
+      payload ||
+      {}
+  );
 
 const normalizeShipment = (shipment) => {
-  const lineItems = sortLineItemsForDisplay(getLineItems(shipment));
+  const mappedShipment = normalizeMappedShipment(shipment);
+  const lineItems = sortLineItemsForDisplay(getLineItems(mappedShipment));
 
   return {
-    ...shipment,
-    id: getShipmentId(shipment),
-    reference: getShipmentReference(shipment),
-    created: getShipmentCreatedDate(shipment),
-    expected: formatListDate(shipment?.expectedArrivalDate || shipment?.expected_arrival_date || shipment?.expected),
-    arrived: formatListDate(shipment?.arrivedDate || shipment?.receivedAt || shipment?.actual_arrival_date || shipment?.arrived),
+    ...mappedShipment,
+    id: getShipmentId(mappedShipment),
+    reference: getShipmentReference(mappedShipment),
+    created: getShipmentCreatedDate(mappedShipment),
+    expected: formatListDate(mappedShipment?.expectedArrivalDate || mappedShipment?.expected_arrival_date || mappedShipment?.expected),
+    arrived: formatListDate(mappedShipment?.arrivedDate || mappedShipment?.receivedAt || mappedShipment?.actual_arrival_date || mappedShipment?.arrived),
     units:
-      shipment?.units ||
-      shipment?.totalUnits ||
-      shipment?.total_units ||
+      mappedShipment?.units ||
+      mappedShipment?.totalUnits ||
+      mappedShipment?.total_units ||
       lineItems.reduce((sum, item) => sum + Number(getItemExpectedQty(item) || 0), 0) ||
       0,
-    services: formatShipmentServices({ ...shipment, items: lineItems, lineItems }),
-    status: shipment?.status || 'draft',
+    services: formatShipmentServices({ ...mappedShipment, items: lineItems, lineItems }),
+    status: mappedShipment?.status || 'draft',
     items: lineItems,
     lineItems,
   };
@@ -2210,7 +2187,7 @@ const getBoxExplicitFbaLabelFileId = (box = {}) =>
     box?.file?.id
   );
 
-const getBoxStatus = (box = {}) =>
+const getBoxRawStatus = (box = {}) =>
   firstPresent(
     box?.status,
     box?.boxStatus,
@@ -2224,7 +2201,30 @@ const getBoxStatus = (box = {}) =>
     box?.label_status,
     box?.metadata?.status,
     box?.meta?.status
-  ) || 'No status';
+  );
+
+const isBoxDispatchedForFba = (box = {}) => {
+  const status = String(getBoxRawStatus(box) || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_');
+
+  return Boolean(
+    box?.dispatched_at ||
+      box?.dispatchedAt ||
+      box?.dispatch_date ||
+      box?.dispatchDate ||
+      ['dispatched', 'sealed', 'completed', 'complete'].includes(status)
+  );
+};
+
+const getBoxStatus = (box = {}) => {
+  const rawStatus = getBoxRawStatus(box);
+  const normalizedStatus = String(rawStatus || '').trim().toLowerCase().replace(/\s+/g, '_');
+  if (['completed', 'complete'].includes(normalizedStatus)) return 'Completed';
+  if (isBoxDispatchedForFba(box)) return 'Dispatched';
+  return rawStatus || 'No status';
+};
 
 const getBoxDisplayStatus = (box = {}, shipmentStatus = '') => {
   const boxStatus = getBoxStatus(box);
@@ -2242,24 +2242,14 @@ const getBoxDisplayStatus = (box = {}, shipmentStatus = '') => {
     return 'Completed';
   }
 
+  if (
+    ['', 'no status', 'draft', 'pending', 'pending arrival'].includes(normalizedBoxStatus) &&
+    normalizedShipmentStatus === 'dispatched'
+  ) {
+    return 'Dispatched';
+  }
+
   return boxStatus;
-};
-
-const isBoxDispatchedForFba = (box = {}) => {
-  const status = String(
-    box?.status || box?.boxStatus || box?.box_status || box?.state || box?.dispatchStatus || box?.dispatch_status || ''
-  )
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, '_');
-
-  return Boolean(
-    box?.dispatched_at ||
-      box?.dispatchedAt ||
-      box?.dispatch_date ||
-      box?.dispatchDate ||
-      ['dispatched', 'sealed', 'completed', 'complete'].includes(status)
-  );
 };
 
 const getBoxWeight = (box = {}) =>
@@ -2829,98 +2819,7 @@ const normalizeItemFileMatchValue = (value = '') => {
   return normalized && !['-', 'n/a', 'na', 'none', 'null', 'undefined'].includes(normalized) ? normalized : '';
 };
 
-const normalizeLabelFileNameForMatch = (value = '') => {
-  const withoutQuery = String(value || '').trim().split('?')[0].replace(/\\/g, '/');
-  const fileName = withoutQuery.split('/').filter(Boolean).pop() || withoutQuery;
-  try {
-    return normalizeItemFileMatchValue(decodeURIComponent(fileName));
-  } catch {
-    return normalizeItemFileMatchValue(fileName);
-  }
-};
-
-const fileNameMatchesLineItemLabel = (file = {}, item = {}) => {
-  const fileName = normalizeLabelFileNameForMatch(getFileName(file));
-  const itemFileName = normalizeLabelFileNameForMatch(getItemLabelFileName(item));
-
-  return Boolean(
-    fileName &&
-      itemFileName &&
-      fileName !== 'download' &&
-      itemFileName !== 'download' &&
-      (fileName === itemFileName || fileName.includes(itemFileName) || itemFileName.includes(fileName))
-  );
-};
-
-const fileIdentityMatchesLineItem = (file = {}, item = {}) => {
-  const fileSku = normalizeItemFileMatchValue(getFileSku(file));
-  const fileFnsku = normalizeItemFileMatchValue(getFileFnsku(file));
-  const itemSku = normalizeItemFileMatchValue(getItemSku(item));
-  const itemFnsku = normalizeItemFileMatchValue(getItemFnsku(item));
-
-  return Boolean(
-    (fileSku && itemSku && fileSku === itemSku) ||
-      (fileFnsku && itemFnsku && fileFnsku === itemFnsku)
-  );
-};
-
-const fileIdentityConflictsWithLineItem = (file = {}, item = {}) => {
-  const fileSku = normalizeItemFileMatchValue(getFileSku(file));
-  const fileFnsku = normalizeItemFileMatchValue(getFileFnsku(file));
-  const itemSku = normalizeItemFileMatchValue(getItemSku(item));
-  const itemFnsku = normalizeItemFileMatchValue(getItemFnsku(item));
-
-  return Boolean(
-    (fileSku && itemSku && fileSku !== itemSku) ||
-      (fileFnsku && itemFnsku && fileFnsku !== itemFnsku)
-  );
-};
-
-const rawFileMatchesLineItem = (file = {}, item = {}) => {
-  const fileName = getFileName(file).toLowerCase();
-  const fileEntityId = String(getFileEntityId(file) || '').trim();
-  const fileRecordId = String(getFileRecordId(file) || '').trim();
-  const fileSku = normalizeItemFileMatchValue(getFileSku(file));
-  const fileFnsku = normalizeItemFileMatchValue(getFileFnsku(file));
-  const itemIds = [
-    getItemEntityId(item),
-    item?.id,
-    item?.uuid,
-    item?.shipmentLineItemId,
-    item?.shipment_line_item_id,
-    item?.lineItemId,
-    item?.line_item_id,
-    item?.shipmentItemId,
-    item?.shipment_item_id,
-    item?.itemId,
-    item?.item_id,
-    item?.shipmentItem?.id,
-    item?.shipmentItem?.uuid,
-    item?.shipment_item?.id,
-    item?.shipment_item?.uuid,
-    item?.lineItem?.id,
-    item?.lineItem?.uuid,
-    item?.line_item?.id,
-    item?.line_item?.uuid,
-    item?.item?.id,
-    item?.item?.uuid,
-  ]
-    .map((value) => String(value || '').trim())
-    .filter(Boolean);
-  const itemLabelFileId = String(getItemLabelFileId(item) || '').trim();
-  const itemSku = normalizeItemFileMatchValue(getItemSku(item));
-  const itemFnsku = normalizeItemFileMatchValue(getItemFnsku(item));
-  const hasIdentityConflict = fileIdentityConflictsWithLineItem(file, item);
-
-  return Boolean(
-    (!hasIdentityConflict && itemLabelFileId && fileRecordId && itemLabelFileId === fileRecordId) ||
-      (!hasIdentityConflict && fileEntityId && itemIds.includes(fileEntityId)) ||
-      fileIdentityMatchesLineItem(file, item) ||
-      (itemSku && fileName.includes(itemSku)) ||
-      (itemFnsku && fileName.includes(itemFnsku)) ||
-      fileNameMatchesLineItemLabel(file, item)
-  );
-};
+const rawFileMatchesLineItem = (file = {}, item = {}) => mappedFileMatchesLineItem(file, item);
 
 const decorateItemLabelFile = (file = {}, item = {}) => {
   const itemId = getItemEntityId(item) || getItemRecordId(item);
@@ -2950,47 +2849,10 @@ const getItemDirectLabelFile = (item = {}) => {
   const nestedFile = [
     item?.fnskuLabelFile,
     item?.fnsku_label_file,
-    item?.labelFile,
-    item?.label_file,
-    item?.label,
-    item?.file,
   ].find(hasFileShape);
 
   if (nestedFile) return decorateItemLabelFile(nestedFile, item);
-
-  const labelUrl = firstPresent(
-    item?.fnskuLabelFileUrl,
-    item?.fnsku_label_file_url,
-    item?.fnskuLabelUrl,
-    item?.fnsku_label_url,
-    item?.labelFileUrl,
-    item?.label_file_url,
-    item?.labelUrl,
-    item?.label_url,
-    item?.fileUrl,
-    item?.file_url,
-    item?.fnskuLabelPath,
-    item?.fnsku_label_path,
-    item?.labelFilePath,
-    item?.label_file_path,
-    item?.filePath,
-    item?.file_path
-  );
-
-  if (!labelUrl) return null;
-
-  const fileName = firstPresent(getItemLabelFileName(item), labelUrl);
-  return decorateItemLabelFile(
-    {
-      url: labelUrl,
-      fileUrl: labelUrl,
-      file_url: labelUrl,
-      name: fileName,
-      fileName,
-      file_name: fileName,
-    },
-    item
-  );
+  return null;
 };
 
 const getItemInlineLabelFiles = (item = {}) =>
@@ -2999,11 +2861,11 @@ const getItemInlineLabelFiles = (item = {}) =>
     mergeFileLists(
       extractList(item?.files, ['files']),
       extractList(item?.attachments, ['files']),
-      extractList(item?.uploads, ['files'])
-    ).filter((file) => rawFileMatchesLineItem(file, item)),
-    extractList(item?.labels, ['files']),
-    extractList(item?.fnskuLabels, ['files']),
-    extractList(item?.fnsku_labels, ['files'])
+      extractList(item?.uploads, ['files']),
+      extractList(item?.labels, ['files']),
+      extractList(item?.fnskuLabels, ['files']),
+      extractList(item?.fnsku_labels, ['files'])
+    ).filter((file) => rawFileMatchesLineItem(file, item))
   ).map((file) => decorateItemLabelFile(file, item));
 
 const isFnskuLabelFile = (file = {}) => {
@@ -3170,30 +3032,6 @@ const getFileItemIndex = (file = {}) => {
   return Number.isInteger(index) && index >= 0 ? index : null;
 };
 
-const shouldUseOneBasedFileIndexes = (files = [], itemCount = 0) => {
-  if (itemCount < 2) return false;
-  const uniqueIndexes = [
-    ...new Set(
-      files
-        .map((file) => getFileItemIndex(file))
-        .filter((index) => index !== null)
-    ),
-  ];
-
-  return Boolean(
-    uniqueIndexes.length >= Math.min(itemCount, 2) &&
-      !uniqueIndexes.includes(0) &&
-      uniqueIndexes.every((index) => index >= 1 && index <= itemCount)
-  );
-};
-
-const getFileAssignmentIndex = (file = {}, useOneBasedFileIndexes = false) => {
-  const index = getFileItemIndex(file);
-  if (index === null) return null;
-  const assignmentIndex = useOneBasedFileIndexes ? index - 1 : index;
-  return assignmentIndex >= 0 ? assignmentIndex : null;
-};
-
 const getFileCreatedTime = (file = {}) => {
   const value = firstPresent(
     file?.createdAt,
@@ -3247,12 +3085,11 @@ const isExactItemLabelFileMatch = (file = {}, item = {}) => {
   const linkedEntityId = String(firstPresent(file?.linkedEntityId, file?.linked_entity_id, getFileMeta(file)?.linkedEntityId, getFileMeta(file)?.linked_entity_id) || '').trim();
   const linkedEntityType = String(firstPresent(file?.linkedEntityType, file?.linked_entity_type, getFileMeta(file)?.linkedEntityType, getFileMeta(file)?.linked_entity_type) || '').trim().toLowerCase();
   const itemIds = getItemLabelMatchIds(item);
-  const hasIdentityConflict = fileIdentityConflictsWithLineItem(file, item);
 
   return Boolean(
     (itemLabelFileId && fileRecordId && itemLabelFileId === fileRecordId) ||
-      (!hasIdentityConflict && isItemFileEntityType(fileEntityType) && fileEntityId && itemIds.includes(fileEntityId)) ||
-      (!hasIdentityConflict && isItemFileEntityType(linkedEntityType) && linkedEntityId && itemIds.includes(linkedEntityId))
+      (isItemFileEntityType(fileEntityType) && fileEntityId && itemIds.includes(fileEntityId)) ||
+      (isItemFileEntityType(linkedEntityType) && linkedEntityId && itemIds.includes(linkedEntityId))
   );
 };
 
@@ -3274,42 +3111,10 @@ const isItemLabelCandidateFile = (file = {}, itemList = []) => {
   if (isBoxFileEntityType(entityType) || isFbaBoxLabelFile(file)) return false;
 
   if (isItemFileEntityType(entityType)) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
-  if (getFileItemIndex(file) !== null) return isSupportedItemLabelFile(file) && (isFnskuLabelFile(file) || isAnyItemLabelFile(file));
   if (fileMatchesAnyLineItem(file, itemList)) return isSupportedItemLabelFile(file) || isAnyItemLabelFile(file);
   if (isShipmentLevelItemLabelFile(file)) return true;
 
   return (isFnskuLabelFile(file) || isAnyItemLabelFile(file)) && itemList.length === 1;
-};
-
-const getLatestShipmentLabelBatchFiles = (candidateFiles = [], itemCount = 0, useOneBasedFileIndexes = false) => {
-  if (!itemCount) return [];
-  const shipmentLabelFiles = candidateFiles
-    .map((file, index) => ({ file, index }))
-    .filter(({ file }) => isShipmentLevelItemLabelFile(file));
-
-  if (shipmentLabelFiles.length < itemCount) return [];
-
-  const latestFiles = shipmentLabelFiles
-    .sort((firstFile, secondFile) => {
-      if (Boolean(firstFile.file?.localPreview) !== Boolean(secondFile.file?.localPreview)) {
-        return firstFile.file?.localPreview ? -1 : 1;
-      }
-      const timeDifference = getFileCreatedTime(secondFile.file) - getFileCreatedTime(firstFile.file);
-      return timeDifference || secondFile.index - firstFile.index;
-    })
-    .slice(0, itemCount);
-
-  return latestFiles
-    .sort((firstFile, secondFile) => {
-      const firstIndex = getFileAssignmentIndex(firstFile.file, useOneBasedFileIndexes);
-      const secondIndex = getFileAssignmentIndex(secondFile.file, useOneBasedFileIndexes);
-      if (firstIndex !== null && secondIndex !== null && firstIndex !== secondIndex) return firstIndex - secondIndex;
-      if (firstIndex !== null && secondIndex === null) return -1;
-      if (firstIndex === null && secondIndex !== null) return 1;
-      const timeDifference = getFileCreatedTime(firstFile.file) - getFileCreatedTime(secondFile.file);
-      return timeDifference || firstFile.index - secondFile.index;
-    })
-    .map(({ file }) => file);
 };
 
 const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) => {
@@ -3320,58 +3125,23 @@ const getItemLabelFileAssignments = (items = [], files = [], visibleFiles = []) 
   const candidateFiles = mergeFileLists(itemInlineFiles, files, visibleFiles)
     .filter((file) => isItemLabelCandidateFile(file, itemList));
 
-  return itemList.map((item) => {
-    const matchingFiles = candidateFiles.filter((file) => isExactItemLabelFileMatch(file, item));
-    return (
-      matchingFiles.find(isPdfFile) ||
-      matchingFiles.find(isImageFile) ||
-      matchingFiles.find(isFnskuLabelFile) ||
-      matchingFiles.find(isAnyItemLabelFile) ||
-      matchingFiles.find(isCsvFile) ||
-      matchingFiles[0] ||
-      null
-    );
-  });
+  return getMappedItemLabelFileAssignments(itemList, candidateFiles);
 };
 
 const getItemUploadMatchKey = (item = {}, index = 0) =>
   String(getItemEntityId(item) || `index:${index}`);
 
 const findSavedLineItemForUpload = (sourceItem = {}, fallbackIndex = 0, savedLineItems = [], usedKeys = new Set()) => {
-  const sourceSku = normalizeItemFileMatchValue(getItemSku(sourceItem));
-  const sourceFnsku = normalizeItemFileMatchValue(getItemFnsku(sourceItem));
-  const sourceProduct = normalizeItemFileMatchValue(getItemProductName(sourceItem));
-  const candidates = toArray(savedLineItems).map((lineItem, index) => ({ lineItem, index }));
-  const isUnused = ({ lineItem, index }) => !usedKeys.has(getItemUploadMatchKey(lineItem, index));
-  const useMatch = (match) => {
-    const resolvedMatch = match?.lineItem || null;
-    if (match) usedKeys.add(getItemUploadMatchKey(resolvedMatch, match.index));
-    return { lineItem: resolvedMatch, matchType: match?.matchType || 'none' };
-  };
-  const findUniqueBy = (matchType, predicate) => {
-    const matches = candidates.filter((candidate) => isUnused(candidate) && predicate(candidate.lineItem, candidate.index));
-    return matches.length === 1 ? { ...matches[0], matchType } : null;
-  };
-
-  const stableMatch =
-    findUniqueBy('sku', (lineItem) => sourceSku && sourceSku === normalizeItemFileMatchValue(getItemSku(lineItem))) ||
-    findUniqueBy('fnsku', (lineItem) => sourceFnsku && sourceFnsku === normalizeItemFileMatchValue(getItemFnsku(lineItem))) ||
-    findUniqueBy('product_name', (lineItem) => sourceProduct && sourceProduct === normalizeItemFileMatchValue(getItemProductName(lineItem)));
-
-  if (stableMatch) return useMatch(stableMatch);
-
-  const indexMatch = candidates.find((candidate) => candidate.index === fallbackIndex && isUnused(candidate));
-  if (indexMatch) {
-    console.warn('[PickPackPro] Falling back to line item index for FNSKU label upload match.', {
-      fallbackIndex,
-      sourceSku: getItemSku(sourceItem),
-      sourceFnsku: getItemFnsku(sourceItem),
-      sourceProduct: getItemProductName(sourceItem),
-    });
-    return useMatch({ ...indexMatch, matchType: 'index' });
-  }
-
-  return useMatch(null);
+  return findMappedSavedLineItemForUpload(
+    {
+      ...sourceItem,
+      displayOrder: firstPresent(sourceItem?.displayOrder, sourceItem?.display_order, fallbackIndex),
+      itemIndex: firstPresent(sourceItem?.itemIndex, sourceItem?.item_index, fallbackIndex),
+    },
+    fallbackIndex,
+    savedLineItems,
+    usedKeys
+  );
 };
 
 const hasFileShape = (file = {}) =>
@@ -4010,7 +3780,7 @@ const sanitizeFileName = (value = 'download') =>
     .replace(/^-+|-+$/g, '')
     .toLowerCase() || 'download';
 
-const decorateShipmentLabelFile = (file = {}, { sourceFile, entityType = 'shipment', entityId = '', item = {}, index = 0, fileType = 'fnsku_label' }) => ({
+const decorateShipmentLabelFile = (file = {}, { sourceFile, entityType = 'item', entityId = '', item = {}, index = 0, fileType = 'fnsku_label' }) => ({
   ...file,
   name: file?.name || file?.fileName || file?.file_name || sourceFile?.name,
   fileName: file?.fileName || file?.name || file?.file_name || sourceFile?.name,
@@ -4401,7 +4171,6 @@ const formatDateForInput = (value = '') => {
 const buildShipmentNotes = (form = {}, items = []) =>
   [
     String(form.notes || '').trim(),
-    buildBundleSizeNote(items),
     String(form.trackingNumber || '').trim() ? `Tracking: ${String(form.trackingNumber).trim()}` : '',
     String(form.boxCount || '').trim() ? `Boxes: ${String(form.boxCount).trim()}` : '',
     String(form.palletCount || '').trim() ? `Pallets: ${String(form.palletCount).trim()}` : '',
@@ -4439,7 +4208,7 @@ const getShipmentViewStats = (shipment = {}) => {
   return {
     items,
     totalUnits: items.reduce((sum, item) => sum + Number(getItemExpectedQty(item) || 0), 0),
-    services: filterBundlingServiceLabels(getShipmentServiceLabels(shipment)),
+    services: getShipmentServiceLabels(shipment),
   };
 };
 
@@ -4639,7 +4408,6 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
             ...item,
             needsBundling: value,
             bundleSize: value ? (item.needsBundling ? item.bundleSize : '') : '',
-            services: (item.services || []).filter((service) => !isBundlingServiceValue(service)),
           };
         }
         return { ...item, [key]: value };
@@ -4696,17 +4464,6 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     setProductItems((current) =>
       current.map((item, itemIndex) => {
         if (itemIndex !== index) return item;
-        if (isBundlingServiceValue(serviceLabel)) {
-          return {
-            ...item,
-            needsBundling: true,
-            bundleSize: item.needsBundling ? item.bundleSize : '',
-            services: (item.services || []).filter((service) => !isBundlingServiceValue(service)),
-            serviceType: '',
-            serviceQty: '',
-            customServiceName: '',
-          };
-        }
         const nextServices = [...new Set([...(item.services || []).map(formatServiceLabel).filter(Boolean), serviceLabel])];
         return { ...item, services: nextServices, serviceType: '', serviceQty: '', customServiceName: '' };
       })
@@ -4725,17 +4482,6 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     setProductItems((current) =>
       current.map((item, itemIndex) => {
         if (itemIndex !== index) return item;
-        if (isBundlingServiceValue(serviceLabel)) {
-          return {
-            ...item,
-            needsBundling: true,
-            bundleSize: item.needsBundling ? item.bundleSize : '',
-            services: (item.services || []).filter((service) => !isBundlingServiceValue(service)),
-            serviceType: '',
-            serviceQty: '',
-            customServiceName: '',
-          };
-        }
         const nextServices = [...new Set([...(item.services || []).map(formatServiceLabel).filter(Boolean), serviceLabel])];
         return { ...item, services: nextServices, serviceType: '', serviceQty: '', customServiceName: '' };
       })
@@ -5314,47 +5060,20 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       const items = productItems
         .map((item, index) => {
           const bundleSizeValue = Number(item.bundleSize || 0);
-          const bundlePayload = isPositiveBundleSize(bundleSizeValue)
-            ? {
-                bundleSize: bundleSizeValue,
-                bundle_size: bundleSizeValue,
-                bundle: bundleSizeValue,
-                casePack: bundleSizeValue,
-                case_pack: bundleSizeValue,
-                needsBundling: true,
-                needs_bundling: true,
-              }
-            : item.needsBundling
-              ? {
-                  needsBundling: true,
-                  needs_bundling: true,
-                }
-              : {};
           const services = [
-            ...(item.services || []).filter((service) => !isBundlingServiceValue(service)),
-            ...(item.needsBundling ? ['Bundling'] : []),
+            ...(item.services || []),
           ]
             .map((service) => normalizeServiceType(String(service).split('/')[0]))
             .filter(Boolean);
 
-          return {
-            sku: item.sku.trim(),
-            productName: item.productName.trim(),
-            expectedQty: Number(item.expectedQty || 0),
+          return mapShipmentItemPayload({
+            ...item,
             itemIndex: index,
-            item_index: index,
-            lineItemIndex: index,
-            line_item_index: index,
             displayOrder: index,
-            display_order: index,
-            ...bundlePayload,
-            fnskuLabel: item.fnskuLabel.trim(),
-            fileName: item.fileName || undefined,
-            file_name: item.fileName || undefined,
-            fnskuLabelFileName: item.fileName || undefined,
-            fnsku_label_file_name: item.fileName || undefined,
+            needsBundling: Boolean(item.needsBundling),
+            bundleSize: isPositiveBundleSize(bundleSizeValue) ? bundleSizeValue : 0,
             services: [...new Set(services)],
-          };
+          }, index);
         })
         .filter((item) => item.sku && item.productName && item.expectedQty > 0);
 
@@ -8141,11 +7860,10 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                             ) : null}
                           </div>
 
-                          {(item.services || []).filter((service) => !isBundlingServiceValue(service)).length ? (
+                          {(item.services || []).length ? (
                             <div className="mt-4 flex flex-wrap gap-3">
                               {item.services
                                 .map((service, serviceIndex) => ({ service, serviceIndex }))
-                                .filter(({ service }) => !isBundlingServiceValue(service))
                                 .map(({ service, serviceIndex }) => (
                                   <div key={`${service}-${serviceIndex}`} className="flex items-center gap-3 rounded-lg border border-[#e2e8f0] bg-white px-4 py-3 text-sm text-[#132347]">
                                     <span>{service}</span>
@@ -8793,9 +8511,20 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                 const itemCount = viewStats.items.length;
                 const itemLabelFiles = getItemLabelFileAssignments(viewStats.items, trackFiles, visibleShipmentFiles);
                 const customServicesForView = extractCustomServices(selectedShipment, detailServices);
-                const standardServiceTasks = detailServices.filter((service) => !isCustomServiceTask(service) && !isBundlingServiceTask(service));
+                const standardServiceTasks = detailServices.filter((service) =>
+                  Boolean(
+                    !isCustomServiceTask(service) &&
+                      (!isBundlingServiceTask(service) ||
+                        viewStats.items.some((item) =>
+                          isServiceTaskForItem(service, item, itemCount) && hasBundlingServiceForItem(item)
+                        ))
+                  )
+                );
                 const unassignedServiceTasks = standardServiceTasks.filter(
-                  (service) => !viewStats.items.some((item) => isServiceTaskForItem(service, item, itemCount))
+                  (service) =>
+                    !viewStats.items.some(
+                      (item) => isServiceTaskForItem(service, item, itemCount) && shouldDisplayServiceTaskForItem(service, item)
+                    )
                 );
                 const unassignedDiscrepancies = detailDiscrepancies.filter(
                   (discrepancy, index) => !viewStats.items.some((item) => isDiscrepancyForItem(discrepancy, item, viewStats.items, index))
@@ -8893,7 +8622,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                         <div className="space-y-3">
                           {viewStats.items.map((item, index) => {
                             const itemServices = getItemServicesForView(item, detailServices, itemCount);
-                            const itemServiceTasks = standardServiceTasks.filter((service) => isServiceTaskForItem(service, item, itemCount));
+                            const itemServiceTasks = standardServiceTasks.filter(
+                              (service) => isServiceTaskForItem(service, item, itemCount) && shouldDisplayServiceTaskForItem(service, item)
+                            );
                             const itemDiscrepancies = detailDiscrepancies.filter((discrepancy, discrepancyIndex) =>
                               isDiscrepancyForItem(discrepancy, item, viewStats.items, discrepancyIndex)
                             );

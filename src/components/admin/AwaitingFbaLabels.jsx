@@ -3,6 +3,12 @@ import { CheckCircle, RefreshCw, Tags, X } from 'lucide-react';
 import Layout from './adminlayout/Layout';
 import { getSession } from '../../utils/auth';
 import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
+import {
+  getLineItemId as getMappedLineItemId,
+  getShipmentItems as getMappedShipmentItems,
+  normalizeShipment as normalizeMappedShipment,
+  normalizeShipmentList as normalizeMappedShipmentList,
+} from '../../utils/shipmentMapper';
 
 const API_BASE_URL = '';
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app';
@@ -16,14 +22,6 @@ const BOX_ITEM_ENRICH_LIMIT =
   Number.isFinite(configuredBoxItemEnrichLimit) && configuredBoxItemEnrichLimit > 0
     ? configuredBoxItemEnrichLimit
     : 0;
-const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
-const VIEW_CACHE_KEY_PREFIX = 'pickpackpro-awaiting-fba-labels-view';
-const configuredViewCacheTtlMs = Number(import.meta.env.VITE_AWAITING_FBA_LABELS_CACHE_TTL_MS || 60_000);
-const VIEW_CACHE_TTL_MS =
-  Number.isFinite(configuredViewCacheTtlMs) && configuredViewCacheTtlMs > 0
-    ? configuredViewCacheTtlMs
-    : 60_000;
-
 const firstPresent = (...values) => {
   const value = values.find((currentValue) => {
     if (currentValue === 0 || currentValue === false) return true;
@@ -45,63 +43,6 @@ const buildHeaders = (includeJson = false) => {
   if (session?.token) headers.Authorization = `Bearer ${session.token}`;
   if (includeJson) headers['Content-Type'] = 'application/json';
   return headers;
-};
-
-const getViewCacheKey = () => {
-  const session = getSession() || {};
-  const userKey = firstPresent(
-    session.userId,
-    session.id,
-    session.uuid,
-    session.email,
-    session.role,
-    'anonymous'
-  );
-
-  return `${VIEW_CACHE_KEY_PREFIX}:${userKey}`;
-};
-
-const readCachedView = () => {
-  try {
-    const rawCache = sessionStorage.getItem(getViewCacheKey());
-    if (!rawCache) return null;
-
-    const cache = JSON.parse(rawCache);
-    if (!cache || Date.now() - Number(cache.timestamp || 0) > VIEW_CACHE_TTL_MS) {
-      sessionStorage.removeItem(getViewCacheKey());
-      return null;
-    }
-
-    return {
-      rows: Array.isArray(cache.rows) ? cache.rows : [],
-      filesByBox: cache.filesByBox && typeof cache.filesByBox === 'object' ? cache.filesByBox : {},
-    };
-  } catch {
-    return null;
-  }
-};
-
-const writeCachedView = (rows = [], filesByBox = {}) => {
-  try {
-    sessionStorage.setItem(
-      getViewCacheKey(),
-      JSON.stringify({
-        timestamp: Date.now(),
-        rows,
-        filesByBox,
-      })
-    );
-  } catch {
-    // Cache failures should not affect the live page.
-  }
-};
-
-const clearCachedView = () => {
-  try {
-    sessionStorage.removeItem(getViewCacheKey());
-  } catch {
-    // Ignore storage failures.
-  }
 };
 
 const formatFileSize = (bytes = 0) => {
@@ -158,8 +99,7 @@ const extractList = (payload, keys = []) => {
   return [];
 };
 
-const extractShipments = (payload) =>
-  extractList(payload, ['shipments', 'shipmentRows', 'shipment_rows']);
+const extractShipments = (payload) => normalizeMappedShipmentList(payload);
 
 const extractBoxes = (payload) =>
   extractList(payload, ['boxes', 'outboundBoxes', 'outbound_boxes', 'shipmentBoxes', 'shipment_boxes']);
@@ -724,8 +664,7 @@ const isShipmentEligibleForFbaLabels = (shipment = {}) => {
   return ELIGIBLE_STATUSES.has(status) || !INELIGIBLE_STATUS_VALUES.has(status);
 };
 
-const getLineItems = (shipment = {}) =>
-  extractList(shipment, ['items', 'lineItems', 'line_items', 'shipmentLineItems', 'shipment_line_items', 'products']);
+const getLineItems = (shipment = {}) => getMappedShipmentItems(shipment);
 
 const getLineItemSku = (item = {}) =>
   firstPresent(
@@ -743,6 +682,7 @@ const getLineItemSku = (item = {}) =>
 
 const getLineItemId = (item = {}) =>
   firstPresent(
+    getMappedLineItemId(item),
     item?.id,
     item?.uuid,
     item?.shipmentItemId,
@@ -802,24 +742,32 @@ const getLineItemQty = (item = {}) =>
     item?.units
   );
 
-const normalizeShipment = (shipment = {}) => ({
-  ...shipment,
-  id: getShipmentRecordId(shipment) || getShipmentId(shipment),
-  reference: getShipmentReference(shipment),
-  status: getShipmentStatus(shipment),
-  clientId: getShipmentClientId(shipment) || shipment?.clientId || shipment?.client_id,
-  client_id: getShipmentClientId(shipment) || shipment?.client_id || shipment?.clientId,
-  client: getShipmentClientName(shipment),
-  clientRecord:
-    shipment?.clientRecord ||
-    shipment?.client_record ||
-    shipment?.rawClient ||
-    shipment?.raw_client ||
-    (shipment?.client && typeof shipment.client === 'object' ? shipment.client : null) ||
-    (shipment?.clients && typeof shipment.clients === 'object' ? shipment.clients : null),
-  created: getShipmentCreatedDate(shipment),
-  lineItems: getLineItems(shipment),
-});
+const normalizeShipment = (shipment = {}) => {
+  const mappedShipment = normalizeMappedShipment(shipment);
+  const lineItems = getMappedShipmentItems(mappedShipment);
+
+  return {
+    ...mappedShipment,
+    id: getShipmentRecordId(mappedShipment) || getShipmentId(mappedShipment),
+    reference: getShipmentReference(mappedShipment),
+    status: getShipmentStatus(mappedShipment),
+    clientId: getShipmentClientId(mappedShipment) || mappedShipment?.clientId || mappedShipment?.client_id,
+    client_id: getShipmentClientId(mappedShipment) || mappedShipment?.client_id || mappedShipment?.clientId,
+    client: getShipmentClientName(mappedShipment),
+    clientRecord:
+      mappedShipment?.clientRecord ||
+      mappedShipment?.client_record ||
+      mappedShipment?.rawClient ||
+      mappedShipment?.raw_client ||
+      (mappedShipment?.client && typeof mappedShipment.client === 'object' ? mappedShipment.client : null) ||
+      (mappedShipment?.clients && typeof mappedShipment.clients === 'object' ? mappedShipment.clients : null),
+    created: getShipmentCreatedDate(mappedShipment),
+    lineItems,
+    line_items: lineItems,
+    shipment_line_items: lineItems,
+    items: lineItems,
+  };
+};
 
 const getBoxId = (box = {}) =>
   firstPresent(box?.id, box?.uuid, box?.boxId, box?.box_id);
@@ -1108,89 +1056,6 @@ const getBoxItemQuantity = (item = {}) =>
     item?.meta?.units
   );
 
-const getBoxAllocationCacheKeys = (box = {}, extraKeys = []) => [
-  ...new Set(
-    [
-      ...extraKeys,
-      getBoxRecordId(box),
-      getBoxId(box),
-      box?.boxId,
-      box?.box_id,
-      box?.recordId,
-      box?.record_id,
-      box?.reference,
-      box?.label,
-      box?.boxNumber,
-      box?.box_number,
-    ]
-      .map((value) => String(value || '').trim())
-      .filter(Boolean)
-  ),
-];
-
-const readBoxAllocationCache = () => {
-  if (typeof window === 'undefined') return {};
-
-  try {
-    const parsed = JSON.parse(localStorage.getItem(BOX_ALLOCATION_CACHE_KEY) || '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-};
-
-const normalizeBoxAllocationItems = (items = [], lineItems = []) =>
-  toArray(items)
-    .map((item) => (item && typeof item === 'object' ? item : { sku: String(item || '').trim() }))
-    .map((item) => {
-      const shipmentItemId = String(getBoxItemLineItemId(item) || '').trim();
-      const matchedLineItem = lineItems.find((lineItem) => {
-        const lineItemId = String(getLineItemId(lineItem) || '').trim();
-        const lineItemSku = String(getLineItemSku(lineItem) || '').trim().toLowerCase();
-        const itemSku = String(getBoxItemSku(item) || '').trim().toLowerCase();
-        return Boolean(
-          (shipmentItemId && lineItemId && shipmentItemId === lineItemId) ||
-            (itemSku && lineItemSku && itemSku === lineItemSku)
-        );
-      });
-      const sku = String(firstPresent(getBoxItemSku(item, lineItems), getLineItemSku(matchedLineItem || {})) || '').trim();
-      const quantity = getBoxItemQuantity(item);
-
-      return {
-        ...item,
-        ...(shipmentItemId
-          ? {
-              shipmentItemId,
-              shipment_item_id: shipmentItemId,
-              lineItemId: shipmentItemId,
-              line_item_id: shipmentItemId,
-            }
-          : {}),
-        ...(sku
-          ? {
-              sku,
-              sellerSku: sku,
-              seller_sku: sku,
-            }
-          : {}),
-        ...(quantity !== ''
-          ? {
-              quantity,
-              qty: quantity,
-              units: quantity,
-            }
-          : {}),
-      };
-    })
-    .filter((item) => getBoxItemSku(item, lineItems) && getBoxItemQuantity(item) !== '');
-
-const getCachedBoxAllocationItems = (box = {}, lineItems = []) => {
-  const cache = readBoxAllocationCache();
-  const keys = getBoxAllocationCacheKeys(box);
-  const cachedItems = keys.map((key) => cache[key]).find((items) => toArray(items).length);
-  return normalizeBoxAllocationItems(cachedItems || [], lineItems);
-};
-
 const getBoxDirectQuantity = (box = {}) =>
   firstPresent(
     box?.allocationQuantity,
@@ -1287,9 +1152,6 @@ const getBoxUnits = (box = {}) => {
   const itemUnits = sumBoxItemQuantities(getBoxItems(box));
   if (itemUnits !== '') return itemUnits;
 
-  const cachedItemUnits = sumBoxItemQuantities(getCachedBoxAllocationItems(box));
-  if (cachedItemUnits !== '') return cachedItemUnits;
-
   return getBoxDirectQuantity(box);
 };
 
@@ -1325,7 +1187,7 @@ const getBoxContentRows = (box = {}, shipment = {}, index = 0) => {
         (boxDirectSku && itemSku && String(boxDirectSku).toLowerCase() === itemSku)
     );
   });
-  const fallbackItem = fallbackItemByBoxReference || (lineItems.length === 1 ? lineItems[0] : null) || {};
+  const fallbackItem = fallbackItemByBoxReference || {};
   const buildRows = (items = []) => items
     .map((item, itemIndex) => {
       const shipmentItemId = getBoxItemLineItemId(item);
@@ -1350,12 +1212,10 @@ const getBoxContentRows = (box = {}, shipment = {}, index = 0) => {
 
   if (rows.some((item) => item.sku && item.quantity !== '')) return rows;
 
-  const cachedRows = buildRows(getCachedBoxAllocationItems(box, lineItems));
-  if (cachedRows.length) return cachedRows;
   if (rows.length) return rows;
 
   const fallbackSku = firstPresent(boxDirectSku, getLineItemSku(fallbackItem));
-  const fallbackQuantity = firstPresent(directBoxQuantity, getLineItemQty(fallbackItem));
+  const fallbackQuantity = directBoxQuantity;
 
   return fallbackSku || fallbackQuantity !== ''
     ? [{ key: 'fallback', sku: fallbackSku, quantity: fallbackQuantity }]
@@ -1834,6 +1694,7 @@ const fetchBoxItemsByBoxId = async (box = {}) => {
 };
 
 const enrichBoxesWithItems = async (boxes = [], lineItems = []) => {
+  void lineItems;
   let remainingFetches = BOX_ITEM_ENRICH_LIMIT;
   const results = await Promise.allSettled(
     boxes.map(async (box) => {
@@ -1842,15 +1703,14 @@ const enrichBoxesWithItems = async (boxes = [], lineItems = []) => {
         (getBoxItemLineItemId(item) || getBoxItemSku(item)) && getBoxItemQuantity(item) !== ''
       );
       if (hasUsableItems) return box;
-      const cachedItems = getCachedBoxAllocationItems(box, lineItems);
       if (remainingFetches <= 0) {
-        return cachedItems.length ? { ...box, items: cachedItems, boxItems: cachedItems, box_items: cachedItems, contents: cachedItems } : box;
+        return box;
       }
       remainingFetches -= 1;
       const boxItems = await fetchBoxItemsByBoxId(box);
       if (boxItems.length) return { ...box, items: boxItems, boxItems, box_items: boxItems, contents: boxItems };
 
-      return cachedItems.length ? { ...box, items: cachedItems, boxItems: cachedItems, box_items: cachedItems, contents: cachedItems } : box;
+      return box;
     })
   );
 
@@ -2061,11 +1921,10 @@ const formatStatus = (value = '') =>
   String(value || '-').replaceAll('_', ' ');
 
 const AwaitingFbaLabels = () => {
-  const [initialCachedView] = useState(() => readCachedView());
-  const [rows, setRows] = useState(() => initialCachedView?.rows || []);
-  const [filesByBox, setFilesByBox] = useState(() => initialCachedView?.filesByBox || {});
+  const [rows, setRows] = useState([]);
+  const [filesByBox, setFilesByBox] = useState({});
   const [isLoading, setIsLoading] = useState(false);
-  const [hasLoaded, setHasLoaded] = useState(() => Boolean(initialCachedView));
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [uploadingKey, setUploadingKey] = useState('');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -2232,15 +2091,10 @@ const AwaitingFbaLabels = () => {
 
   useEffect(() => {
     const loadTimer = window.setTimeout(() => {
-      loadAwaitingFbaLabels({ showLoader: !initialCachedView });
+      loadAwaitingFbaLabels({ showLoader: true });
     }, 0);
     return () => window.clearTimeout(loadTimer);
-  }, [initialCachedView, loadAwaitingFbaLabels]);
-
-  useEffect(() => {
-    if (!hasLoaded) return;
-    writeCachedView(rows, filesByBox);
-  }, [filesByBox, hasLoaded, rows]);
+  }, [loadAwaitingFbaLabels]);
 
   useEffect(() => {
     let refreshTimer = null;
@@ -2258,7 +2112,6 @@ const AwaitingFbaLabels = () => {
         return;
       }
 
-      clearCachedView();
       scheduleRefresh();
     };
 
