@@ -573,6 +573,7 @@ const applyBundleMetadataFromNotes = (items = [], shipment = {}) => {
   if (!bundleEntries.length) return items;
 
   return (Array.isArray(items) ? items : []).map((item) => {
+    if (!isItemBundlingEnabled(item)) return item;
     const currentBundleSize = Number(getItemBundleMetadataSize(item) || 0);
     if (Number.isFinite(currentBundleSize) && currentBundleSize > 0) return item;
     const bundleSize = getBundleSizeFromEntries(item, bundleEntries);
@@ -2588,8 +2589,18 @@ const isBundlingServiceValue = (value = '') =>
 const filterBundlingServiceLabels = (services = []) =>
   services.filter((service) => !isBundlingServiceValue(service));
 
-const getItemBundleMetadataSize = (item = {}) =>
-  firstPresent(
+const isTruthyFlag = (value) => {
+  if (value === true || value === 1 || value === '1') return true;
+  return ['true', 'yes', 'y'].includes(String(value || '').trim().toLowerCase());
+};
+
+const isItemBundlingEnabled = (item = {}) =>
+  isTruthyFlag(item?.needsBundling) || isTruthyFlag(item?.needs_bundling);
+
+const getItemBundleMetadataSize = (item = {}) => {
+  if (!isItemBundlingEnabled(item)) return '';
+
+  return firstPresent(
     item?.bundleSize,
     item?.bundle_size,
     item?.bundleQty,
@@ -2621,6 +2632,7 @@ const getItemBundleMetadataSize = (item = {}) =>
     item?.products?.case_pack,
     0
   );
+};
 
 const getItemSelectedServices = (item = {}) => [
   ...new Set([

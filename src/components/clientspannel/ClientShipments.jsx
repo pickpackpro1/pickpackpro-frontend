@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LayoutClient from './clientlayout/LayoutClient';
 import LoadingState from '../common/LoadingState';
+import ProductSkuCombobox from '../common/ProductSkuCombobox';
 import { Search, ChevronDown, Calendar, Plus, X, Eye, RefreshCw, Upload, FileUp, Trash2, ArrowLeft, Check, ClipboardCheck, Truck, FileText, Tags, Download, Pencil } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getSession } from '../../utils/auth';
@@ -15,6 +16,9 @@ import {
   normalizeShipment as normalizeMappedShipment,
   normalizeShipmentList as normalizeMappedShipmentList,
 } from '../../utils/shipmentMapper';
+import {
+  normalizeSkuProductOptions,
+} from '../../utils/productSkuOptions';
 
 const DRAFT_CACHE_KEY = 'pickpackpro-shipment-drafts';
 const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
@@ -832,8 +836,18 @@ const getDiscrepancyReceivedQty = (discrepancy = {}, matchedLineItem = {}) => {
   return firstPresent(receivedFromDiscrepancy, receivedFromLineItem, fallbackReceived, 0);
 };
 
-const getItemBundleSize = (item = {}) =>
-  firstPresent(
+const isTruthyFlag = (value) => {
+  if (value === true || value === 1 || value === '1') return true;
+  return ['true', 'yes', 'y'].includes(String(value || '').trim().toLowerCase());
+};
+
+const isItemBundlingEnabled = (item = {}) =>
+  isTruthyFlag(item?.needsBundling) || isTruthyFlag(item?.needs_bundling);
+
+const getItemBundleSize = (item = {}) => {
+  if (!isItemBundlingEnabled(item)) return '';
+
+  return firstPresent(
     item?.bundleSize,
     item?.bundle_size,
     item?.bundleQty,
@@ -846,6 +860,7 @@ const getItemBundleSize = (item = {}) =>
     item?.unitsPerBundle,
     item?.units_per_bundle
   );
+};
 
 const isPositiveBundleSize = (value) => {
   const bundleSize = Number(value || 0);
@@ -889,6 +904,7 @@ const applyBundleSizesFromNotes = (items = [], shipment = {}) => {
   if (!entries.length) return items;
 
   return toArray(items).map((item) => {
+    if (!isItemBundlingEnabled(item)) return item;
     if (isPositiveBundleSize(getItemBundleSize(item))) return item;
     const bundleSize = getBundleSizeForLineItem(item, entries);
     return isPositiveBundleSize(bundleSize)
@@ -1154,11 +1170,15 @@ const normalizeLineItemForDisplay = (item = {}, fallback = {}) => {
   const sku = getItemSku(item) || getItemSku(fallback);
   const fnsku = getItemFnsku(item) || getItemFnsku(fallback);
   const expectedQty = getItemExpectedQty(item) || getItemExpectedQty(fallback);
-  const itemBundleSize = getItemBundleSize(item);
-  const fallbackBundleSize = getItemBundleSize(fallback);
-  const bundleSize = Number(itemBundleSize || 0) > 0
-    ? itemBundleSize
-    : firstPresent(fallbackBundleSize, itemBundleSize, 0);
+  const itemHasBundlingFlag = item?.needsBundling !== undefined || item?.needs_bundling !== undefined;
+  const shouldUseBundleSize = isItemBundlingEnabled(item) || (!itemHasBundlingFlag && isItemBundlingEnabled(fallback));
+  const itemBundleSize = shouldUseBundleSize ? getItemBundleSize(item) : '';
+  const fallbackBundleSize = shouldUseBundleSize ? getItemBundleSize(fallback) : '';
+  const bundleSize = shouldUseBundleSize
+    ? (Number(itemBundleSize || 0) > 0
+        ? itemBundleSize
+        : firstPresent(fallbackBundleSize, itemBundleSize, 0))
+    : '';
   const services = getItemServices(item).length ? getItemServices(item) : getItemServices(fallback);
 
   return {
@@ -1294,18 +1314,23 @@ const sortLineItemsForDisplay = (items = [], fallbackItems = []) => {
 
 const mergeLineItemFallbacks = (fallbacks = []) =>
   fallbacks.filter(Boolean).reduce((merged, fallback) => {
+    const nextFallback = { ...merged, ...fallback };
     const mergedBundleSize = getItemBundleSize(merged);
     const fallbackBundleSize = getItemBundleSize(fallback);
-    const nextFallback = { ...merged, ...fallback };
-    const bundleSize = isPositiveBundleSize(fallbackBundleSize)
-      ? fallbackBundleSize
-      : isPositiveBundleSize(mergedBundleSize)
-        ? mergedBundleSize
-        : firstPresent(fallbackBundleSize, mergedBundleSize);
+    const bundleSize = isItemBundlingEnabled(nextFallback)
+      ? (isPositiveBundleSize(fallbackBundleSize)
+          ? fallbackBundleSize
+          : isPositiveBundleSize(mergedBundleSize)
+            ? mergedBundleSize
+            : firstPresent(fallbackBundleSize, mergedBundleSize))
+      : '';
 
     if (bundleSize !== '') {
       nextFallback.bundleSize = bundleSize;
       nextFallback.bundle_size = bundleSize;
+    } else {
+      delete nextFallback.bundleSize;
+      delete nextFallback.bundle_size;
     }
 
     return nextFallback;
@@ -4320,6 +4345,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     clientId: getClientIdFromSession(),
   }));
   const [productItems, setProductItems] = useState([createEmptyProductItem()]);
+  const [skuOptions, setSkuOptions] = useState([]);
+  const [isSkuOptionsLoading, setIsSkuOptionsLoading] = useState(false);
   const [editingShipmentId, setEditingShipmentId] = useState('');
   const [selectedShipment, setSelectedShipment] = useState(null);
   const [showViewModal, setShowViewModal] = useState(false);
@@ -4336,7 +4363,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   const [fbaLabelShipments, setFbaLabelShipments] = useState([]);
   const [fbaLabelBoxesMap, setFbaLabelBoxesMap] = useState({});
   const [fbaLabelFilesMap, setFbaLabelFilesMap] = useState({});
-  const [, setLoadingFbaSection] = useState(false);
+  const [loadingFbaSection, setLoadingFbaSection] = useState(false);
   const [uploadingFbaBoxKey, setUploadingFbaBoxKey] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshingDetails, setIsRefreshingDetails] = useState(false);
@@ -4399,6 +4426,52 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  const fetchSkuOptionsForClient = async (clientId) => {
+    const response = await fetch(`${API_BASE_URL}/api/products`, {
+      method: 'GET',
+      headers: buildHeaders(),
+      cache: 'no-store',
+    });
+    const payload = await parseResponse(response);
+    return normalizeSkuProductOptions(payload, clientId);
+  };
+
+  useEffect(() => {
+    const clientId = String(createForm.clientId || getClientIdFromSession() || '').trim();
+    let isCancelled = false;
+
+    if (!clientId) {
+      setSkuOptions([]);
+      setIsSkuOptionsLoading(false);
+      return undefined;
+    }
+
+    const loadSkuOptions = async () => {
+      try {
+        setIsSkuOptionsLoading(true);
+        const options = await fetchSkuOptionsForClient(clientId);
+        if (!isCancelled) {
+          setSkuOptions(options);
+        }
+      } catch (requestError) {
+        if (!isCancelled) {
+          setSkuOptions([]);
+          showToast('error', requestError.message || 'Failed to load your SKUs.');
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsSkuOptionsLoading(false);
+        }
+      }
+    };
+
+    loadSkuOptions();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [createForm.clientId]);
+
   const updateProductItem = (index, key, value) => {
     setProductItems((current) =>
       current.map((item, itemIndex) => {
@@ -4413,6 +4486,30 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         return { ...item, [key]: value };
       })
     );
+  };
+
+  const handleSkuChange = (index, value) => {
+    setProductItems((current) =>
+      current.map((item, itemIndex) => (itemIndex === index ? { ...item, sku: value } : item))
+    );
+  };
+
+  const handleSkuProductSelect = (index, product) => {
+    setProductItems((current) =>
+      current.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const needsBundling = Boolean(product?.needsBundling || product?.needs_bundling);
+        return {
+          ...item,
+          sku: product?.sku || item.sku,
+          productName: product?.productName || item.productName,
+          fnskuLabel: product?.fnskuLabel || '',
+          needsBundling,
+          bundleSize: needsBundling ? String(product?.bundleSize || product?.bundle_size || '') : '',
+        };
+      })
+    );
+    setError('');
   };
 
   const handleProductLabelFile = (index, file) => {
@@ -4725,6 +4822,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       setFbaLabelShipments([]);
       setFbaLabelBoxesMap({});
       setFbaLabelFilesMap({});
+      setLoadingFbaSection(false);
       return;
     }
 
@@ -5060,6 +5158,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       const items = productItems
         .map((item, index) => {
           const bundleSizeValue = Number(item.bundleSize || 0);
+          const needsBundling = Boolean(item.needsBundling);
           const services = [
             ...(item.services || []),
           ]
@@ -5070,8 +5169,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
             ...item,
             itemIndex: index,
             displayOrder: index,
-            needsBundling: Boolean(item.needsBundling),
-            bundleSize: isPositiveBundleSize(bundleSizeValue) ? bundleSizeValue : 0,
+            needsBundling,
+            ...(needsBundling ? { bundleSize: bundleSizeValue } : {}),
             services: [...new Set(services)],
           }, index);
         })
@@ -7375,7 +7474,11 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
   const renderAwaitingFbaLabelsSection = (showEmptyState = false) => (
     <>
-      {awaitingFbaRows.length > 0 ? (
+      {awaitingFbaOnly && (isLoading || loadingFbaSection) ? (
+        <div className="rounded-xl border border-[#e2e8f0] bg-white px-5 py-10 text-center text-sm text-[#6b7280] shadow-sm">
+          <LoadingState label="Loading awaiting FBA labels..." delay={0} />
+        </div>
+      ) : awaitingFbaRows.length > 0 ? (
         <div className={awaitingFbaOnly ? '' : 'mb-8'}>
           <div className="mb-4 flex items-center justify-between gap-4">
             <div>
@@ -7742,12 +7845,14 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                             <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.14em] text-[#6b7280]">
                               SKU
                             </label>
-                            <input
-                              type="text"
-                              placeholder="SG-LAMP-01"
+                            <ProductSkuCombobox
                               value={item.sku}
-                              onChange={(e) => updateProductItem(index, 'sku', e.target.value)}
-                              className="w-full rounded-lg border border-[#dbe3ef] px-4 py-3 text-sm text-[#132347] outline-none focus:ring-2 focus:ring-[#ff6900]"
+                              options={skuOptions}
+                              loading={isSkuOptionsLoading}
+                              placeholder={isSkuOptionsLoading ? 'Loading SKUs...' : 'Search or create SKU'}
+                              onChange={(value) => handleSkuChange(index, value)}
+                              onSelect={(product) => handleSkuProductSelect(index, product)}
+                              inputClassName="w-full rounded-lg border border-[#dbe3ef] py-3 pr-4 text-sm text-[#132347] outline-none focus:ring-2 focus:ring-[#ff6900]"
                             />
                           </div>
                           <div>
@@ -8378,7 +8483,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
       {selectedFbaBoxDetail ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-xl overflow-hidden rounded-2xl bg-white shadow-xl">
+          <div className="w-full max-w-[700px] overflow-hidden rounded-2xl bg-white shadow-xl">
             {(() => {
               const { shipment, box, boxIndex } = selectedFbaBoxDetail;
               const contentRows = getBoxContentRows(box, shipment, boxIndex);
@@ -8641,7 +8746,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                                   <p><span className="text-xs uppercase text-gray-500">SKU</span><br /><span className="font-medium text-gray-900">{getItemSku(item) || '-'}</span></p>
                                   <p><span className="text-xs uppercase text-gray-500">FNSKU</span><br /><span className="font-medium text-gray-900">{getItemFnsku(item) || '-'}</span></p>
                                   <p><span className="text-xs uppercase text-gray-500">Expected Qty</span><br /><span className="font-medium text-gray-900">{getItemExpectedQty(item) || 0}</span></p>
-                                  <p><span className="text-xs uppercase text-gray-500">Bundle Size</span><br /><span className="font-medium text-gray-900">{getItemBundleSize(item) || 0}</span></p>
+                                  <p><span className="text-xs uppercase text-gray-500">Bundle Size</span><br /><span className="font-medium text-gray-900">{getItemBundleSize(item) || '-'}</span></p>
                                   <p><span className="text-xs uppercase text-gray-500">Services</span><br /><span className="font-medium text-gray-900">{itemServices.length ? itemServices.join(', ') : '-'}</span></p>
                                   <p>
                                     <span className="text-xs uppercase text-gray-500">FNSKU Label PDF / CSV</span><br />

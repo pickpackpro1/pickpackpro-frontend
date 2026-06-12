@@ -14,6 +14,7 @@ const API_BASE_URL = '';
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app';
 const SAFE_FILE_UPLOAD_BYTES = 3 * 1024 * 1024;
 const IMAGE_UPLOAD_MAX_DIMENSION = 2400;
+const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
 const ELIGIBLE_STATUS_VALUES = ['submitted', 'pending_arrival', 'received', 'in_progress', 'prepped', 'dispatched'];
 const ELIGIBLE_STATUSES = new Set([...ELIGIBLE_STATUS_VALUES, 'pending arrival', 'in progress']);
 const INELIGIBLE_STATUS_VALUES = new Set(['draft', 'completed', 'cancelled', 'canceled', 'archived']);
@@ -86,23 +87,46 @@ const parseResponse = async (response) => {
 const extractList = (payload, keys = []) => {
   if (Array.isArray(payload)) return payload;
 
+  let firstEmptyList = null;
+
   for (const key of keys) {
-    if (Array.isArray(payload?.[key])) return payload[key];
-    if (Array.isArray(payload?.data?.[key])) return payload.data[key];
+    if (Array.isArray(payload?.[key])) {
+      if (payload[key].length) return payload[key];
+      if (!firstEmptyList) firstEmptyList = payload[key];
+    }
+    if (Array.isArray(payload?.data?.[key])) {
+      if (payload.data[key].length) return payload.data[key];
+      if (!firstEmptyList) firstEmptyList = payload.data[key];
+    }
   }
 
-  if (Array.isArray(payload?.rows)) return payload.rows;
-  if (Array.isArray(payload?.data?.rows)) return payload.data.rows;
-  if (Array.isArray(payload?.data)) return payload.data;
-  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(payload?.rows)) {
+    if (payload.rows.length) return payload.rows;
+    if (!firstEmptyList) firstEmptyList = payload.rows;
+  }
+  if (Array.isArray(payload?.data?.rows)) {
+    if (payload.data.rows.length) return payload.data.rows;
+    if (!firstEmptyList) firstEmptyList = payload.data.rows;
+  }
+  if (Array.isArray(payload?.data)) {
+    if (payload.data.length) return payload.data;
+    if (!firstEmptyList) firstEmptyList = payload.data;
+  }
+  if (Array.isArray(payload?.results)) {
+    if (payload.results.length) return payload.results;
+    if (!firstEmptyList) firstEmptyList = payload.results;
+  }
 
-  return [];
+  return firstEmptyList || [];
 };
 
 const extractShipments = (payload) => normalizeMappedShipmentList(payload);
 
 const extractBoxes = (payload) =>
-  extractList(payload, ['boxes', 'outboundBoxes', 'outbound_boxes', 'shipmentBoxes', 'shipment_boxes']);
+  extractList(payload, ['outbound_boxes', 'outboundBoxes', 'shipment_boxes', 'shipmentBoxes', 'boxes']);
+
+const extractBoxEndpointRows = (payload) =>
+  extractList(payload, ['boxes', 'outbound_boxes', 'outboundBoxes', 'shipment_boxes', 'shipmentBoxes']);
 
 const extractSubShipments = (payload) =>
   extractList(payload, ['subShipments', 'sub_shipments', 'subshipments']);
@@ -119,14 +143,45 @@ const getSubShipmentReference = (subShipment = {}) =>
     getSubShipmentId(subShipment)
   );
 
-const decorateSubShipmentBox = (box = {}, subShipment = {}) => ({
-  ...box,
-  subShipmentId: getSubShipmentId(subShipment),
-  sub_shipment_id: getSubShipmentId(subShipment),
-  subShipmentReference: getSubShipmentReference(subShipment),
-  sub_shipment_reference: getSubShipmentReference(subShipment),
-  __subShipmentReference: getSubShipmentReference(subShipment),
-});
+const getSubShipmentItems = (subShipment = {}) =>
+  extractList(subShipment, [
+    'sub_shipment_items',
+    'subShipmentItems',
+    'items',
+    'lineItems',
+    'line_items',
+    'shipmentItems',
+    'shipment_items',
+    'products',
+    'skus',
+  ]);
+
+const decorateSubShipmentBox = (box = {}, subShipment = {}, siblingBoxes = []) => {
+  const subShipmentItems = getSubShipmentItems(subShipment);
+  const canUseSubShipmentItems =
+    !getBoxItems(box).length &&
+    subShipmentItems.length &&
+    toArray(siblingBoxes).length <= 1;
+
+  return {
+    ...box,
+    ...(canUseSubShipmentItems
+      ? {
+          items: subShipmentItems,
+          boxItems: subShipmentItems,
+          box_items: subShipmentItems,
+          boxContents: subShipmentItems,
+          box_contents: subShipmentItems,
+          contents: subShipmentItems,
+        }
+      : {}),
+    subShipmentId: getSubShipmentId(subShipment),
+    sub_shipment_id: getSubShipmentId(subShipment),
+    subShipmentReference: getSubShipmentReference(subShipment),
+    sub_shipment_reference: getSubShipmentReference(subShipment),
+    __subShipmentReference: getSubShipmentReference(subShipment),
+  };
+};
 
 const extractClients = (payload) =>
   extractList(payload, ['clients', 'clientRows', 'client_rows']);
@@ -640,6 +695,8 @@ const getShipmentLookupCandidates = (...shipments) => [
         shipment?.uuid,
         shipment?.shipmentId,
         shipment?.shipment_id,
+        shipment?.recordId,
+        shipment?.record_id,
         shipment?.reference,
         shipment?.shipmentNumber,
         shipment?.shipment_number,
@@ -770,21 +827,43 @@ const normalizeShipment = (shipment = {}) => {
 };
 
 const getBoxId = (box = {}) =>
-  firstPresent(box?.id, box?.uuid, box?.boxId, box?.box_id);
+  firstPresent(box?.id, box?.uuid, box?.boxId, box?.box_id, box?.boxRecordId, box?.box_record_id);
 
 const getBoxRecordId = (box = {}) =>
-  firstUuidValue(box?.id, box?.uuid, box?.boxId, box?.box_id, box?.recordId, box?.record_id);
+  firstUuidValue(box?.id, box?.uuid, box?.boxId, box?.box_id, box?.boxRecordId, box?.box_record_id, box?.recordId, box?.record_id);
 
 const getBoxClientId = (box = {}) =>
   firstPresent(box?.clientId, box?.client_id, box?.client?.id, box?.client?.uuid);
 
 const getBoxLookupIds = (box = {}) => [
   ...new Set(
-    [box?.id, box?.uuid, box?.boxId, box?.box_id, box?.recordId, box?.record_id]
+    [
+      box?.id,
+      box?.uuid,
+      box?.boxId,
+      box?.box_id,
+      box?.boxRecordId,
+      box?.box_record_id,
+      box?.recordId,
+      box?.record_id,
+      box?.boxNumber,
+      box?.box_number,
+      box?.reference,
+      box?.label,
+    ]
       .map((value) => String(value || '').trim())
       .filter(Boolean)
   ),
 ];
+
+const getBoxItemsLookupId = (box = {}) =>
+  getBoxRecordId(box) || getBoxId(box) || getBoxLookupIds(box).find(Boolean);
+
+const normalizeBoxCompareValue = (value = '') =>
+  String(value || '').trim().toLowerCase().replace(/\s+/g, '');
+
+const getBoxNumberValue = (box = {}) =>
+  firstPresent(box?.boxNumber, box?.box_number, box?.number, box?.sequence, box?.sequence_no);
 
 const getBoxFbaLabelFileId = (box = {}) =>
   firstPresent(
@@ -859,7 +938,22 @@ const getBoxItems = (box = {}) => {
   const directItems = extractList(box, BOX_ITEM_KEYS);
   if (directItems.length) return directItems;
 
-  const rawContents = firstPresent(box?.contents, box?.box_contents);
+  const rawContents = firstPresent(
+    box?.contents,
+    box?.boxContents,
+    box?.box_contents,
+    box?.items,
+    box?.boxItems,
+    box?.box_items,
+    box?.boxLineItems,
+    box?.box_line_items,
+    box?.lineItems,
+    box?.line_items,
+    box?.shipmentItems,
+    box?.shipment_items,
+    box?.products,
+    box?.skus
+  );
   if (Array.isArray(rawContents)) return rawContents;
   if (rawContents && typeof rawContents === 'object') return [rawContents];
   if (typeof rawContents === 'string') {
@@ -936,14 +1030,27 @@ const getBoxItemLineItemId = (item = {}) =>
   firstPresent(
     item?.shipmentItemId,
     item?.shipment_item_id,
+    item?.shipmentLineItemId,
+    item?.shipment_line_item_id,
+    item?.shipmentLineItems?.id,
+    item?.shipmentLineItems?.uuid,
+    item?.shipment_line_items?.id,
+    item?.shipment_line_items?.uuid,
     item?.lineItemId,
     item?.line_item_id,
     item?.itemId,
     item?.item_id,
     item?.shipmentItem?.id,
     item?.shipment_item?.id,
+    item?.shipment_item?.uuid,
+    item?.shipmentLineItem?.id,
+    item?.shipmentLineItem?.uuid,
+    item?.shipment_line_item?.id,
+    item?.shipment_line_item?.uuid,
     item?.lineItem?.id,
+    item?.lineItem?.uuid,
     item?.line_item?.id,
+    item?.line_item?.uuid,
     item?.item?.id
   );
 
@@ -961,6 +1068,10 @@ const getBoxItemDirectSku = (item = {}) =>
     item?.product_sku,
     getLineItemSku(item?.shipmentItem || {}),
     getLineItemSku(item?.shipment_item || {}),
+    getLineItemSku(item?.shipmentLineItem || {}),
+    getLineItemSku(item?.shipment_line_item || {}),
+    getLineItemSku(item?.shipmentLineItems || {}),
+    getLineItemSku(item?.shipment_line_items || {}),
     getLineItemSku(item?.lineItem || {}),
     getLineItemSku(item?.line_item || {}),
     getLineItemSku(item?.item || {})
@@ -1023,6 +1134,10 @@ const getBoxItemQuantity = (item = {}) =>
     item?.content_quantity,
     item?.contentQty,
     item?.content_qty,
+    item?.plannedQty,
+    item?.planned_qty,
+    item?.plannedQuantity,
+    item?.planned_quantity,
     item?.unitCount,
     item?.unit_count,
     item?.totalQuantity,
@@ -1055,6 +1170,163 @@ const getBoxItemQuantity = (item = {}) =>
     item?.meta?.qty,
     item?.meta?.units
   );
+
+const normalizeSkuMatchValue = (value = '') =>
+  String(value || '').trim().toLowerCase();
+
+const getLineItemMatchIds = (lineItem = {}) => [
+  getLineItemId(lineItem),
+  lineItem?.id,
+  lineItem?.uuid,
+  lineItem?.shipmentItemId,
+  lineItem?.shipment_item_id,
+  lineItem?.shipmentLineItemId,
+  lineItem?.shipment_line_item_id,
+  lineItem?.lineItemId,
+  lineItem?.line_item_id,
+]
+  .map((value) => String(value || '').trim())
+  .filter(Boolean);
+
+const getBoxAllocationCacheKeys = (box = {}, extraKeys = []) => [
+  ...new Set(
+    [
+      ...extraKeys,
+      getBoxRecordId(box),
+      getBoxId(box),
+      box?.boxId,
+      box?.box_id,
+      box?.boxRecordId,
+      box?.box_record_id,
+      box?.recordId,
+      box?.record_id,
+      box?.reference,
+      box?.label,
+      box?.subShipmentId,
+      box?.sub_shipment_id,
+      box?.subShipmentReference,
+      box?.sub_shipment_reference,
+      box?.__subShipmentReference,
+      box?.boxNumber,
+      box?.box_number,
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  ),
+];
+
+const readBoxAllocationCache = () => {
+  if (typeof window === 'undefined') return {};
+
+  try {
+    const parsed = JSON.parse(localStorage.getItem(BOX_ALLOCATION_CACHE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const normalizeBoxAllocationItems = (items = []) =>
+  toArray(items)
+    .map((item) => (item && typeof item === 'object' ? item : { sku: String(item || '').trim() }))
+    .map((item) => {
+      const sku = getBoxItemSku(item);
+      const quantity = getBoxItemQuantity(item);
+      const shipmentItemId = String(getBoxItemLineItemId(item) || '').trim();
+
+      return {
+        ...item,
+        ...(shipmentItemId
+          ? {
+              shipmentItemId,
+              shipment_item_id: shipmentItemId,
+              lineItemId: shipmentItemId,
+              line_item_id: shipmentItemId,
+            }
+          : {}),
+        ...(sku
+          ? {
+              sku,
+              sellerSku: sku,
+              seller_sku: sku,
+            }
+          : {}),
+        ...(quantity !== ''
+          ? {
+              quantity,
+              qty: quantity,
+              units: quantity,
+            }
+          : {}),
+      };
+    })
+    .filter((item) => getBoxItemSku(item) && getBoxItemQuantity(item) !== '');
+
+const findLineItemForBoxItem = (boxItem = {}, lineItemList = []) => {
+  const boxItemId = String(getBoxItemLineItemId(boxItem) || '').trim();
+  const boxItemSku = normalizeSkuMatchValue(getBoxItemSku(boxItem));
+
+  return toArray(lineItemList).find((lineItem) => {
+    const lineItemIds = getLineItemMatchIds(lineItem);
+    const lineItemSku = normalizeSkuMatchValue(getLineItemSku(lineItem));
+
+    return Boolean(
+      (boxItemId && lineItemIds.includes(boxItemId)) ||
+        (boxItemSku && lineItemSku && boxItemSku === lineItemSku)
+    );
+  });
+};
+
+const hydrateBoxItemWithLineItem = (boxItem = {}, lineItemList = []) => {
+  const matchedLineItem = findLineItemForBoxItem(boxItem, lineItemList);
+  const matchedLineItemId = matchedLineItem ? getLineItemId(matchedLineItem) : '';
+  const sku = getBoxItemSku(boxItem) || getLineItemSku(matchedLineItem || {});
+  const quantity = getBoxItemQuantity(boxItem);
+
+  return {
+    ...boxItem,
+    ...(matchedLineItemId && !getBoxItemLineItemId(boxItem)
+      ? {
+          shipmentItemId: matchedLineItemId,
+          shipment_item_id: matchedLineItemId,
+          lineItemId: matchedLineItemId,
+          line_item_id: matchedLineItemId,
+        }
+      : {}),
+    ...(sku
+      ? {
+          sku,
+          sellerSku: sku,
+          seller_sku: sku,
+        }
+      : {}),
+    ...(quantity !== ''
+      ? {
+          quantity,
+          qty: quantity,
+          units: quantity,
+        }
+      : {}),
+  };
+};
+
+const hydrateBoxItemsWithLineItems = (boxItems = [], lineItemList = []) =>
+  toArray(boxItems).map((boxItem) => hydrateBoxItemWithLineItem(boxItem, lineItemList));
+
+const getShipmentScopedBoxItems = (boxItems = [], lineItemList = []) => {
+  const lineItems = toArray(lineItemList);
+  const hydratedItems = hydrateBoxItemsWithLineItems(boxItems, lineItems);
+
+  if (!lineItems.length) return hydratedItems;
+  return hydratedItems.filter((boxItem) => findLineItemForBoxItem(boxItem, lineItems));
+};
+
+const getCachedBoxAllocationItems = (box = {}, lineItemList = []) => {
+  const cache = readBoxAllocationCache();
+  const keys = getBoxAllocationCacheKeys(box);
+  const cachedItems = keys.map((key) => cache[key]).find((items) => toArray(items).length);
+  return getShipmentScopedBoxItems(normalizeBoxAllocationItems(cachedItems || []), lineItemList);
+};
 
 const getBoxDirectQuantity = (box = {}) =>
   firstPresent(
@@ -1173,52 +1445,88 @@ const getBoxSku = (box = {}) =>
     box?.meta?.sku
   );
 
+const parseBoxSkuQuantityText = (value = '') =>
+  String(value || '')
+    .split(/[,;\n]+/)
+    .map((part) => {
+      const normalizedPart = part.trim().replace(/^SKU:\s*/i, '');
+      if (!normalizedPart) return null;
+
+      const match = normalizedPart.match(/^(.+?)\s*(?:x|:|\*)\s*(\d+(?:\.\d+)?)\s*(?:units?)?$/i);
+      const sku = String(match ? match[1] : normalizedPart).trim();
+      return sku ? { sku, quantity: match ? match[2] : '' } : null;
+    })
+    .filter(Boolean);
+
 const getBoxContentRows = (box = {}, shipment = {}, index = 0) => {
   void index;
   const lineItems = getLineItems(shipment);
   const boxDirectSku = getBoxSku(box);
   const directBoxQuantity = getBoxDirectQuantity(box);
-  const boxLineItemId = firstPresent(box?.shipmentItemId, box?.shipment_item_id, box?.lineItemId, box?.line_item_id, box?.itemId, box?.item_id);
-  const fallbackItemByBoxReference = lineItems.find((item) => {
+  const boxLineItemId = firstPresent(
+    box?.shipmentItemId,
+    box?.shipment_item_id,
+    box?.shipmentLineItemId,
+    box?.shipment_line_item_id,
+    box?.lineItemId,
+    box?.line_item_id,
+    box?.itemId,
+    box?.item_id
+  );
+  const referencedLineItem = lineItems.find((item) => {
     const itemId = String(getLineItemId(item) || '').trim();
-    const itemSku = String(getLineItemSku(item) || '').trim().toLowerCase();
-    return Boolean(
-      (boxLineItemId && itemId && String(boxLineItemId) === itemId) ||
-        (boxDirectSku && itemSku && String(boxDirectSku).toLowerCase() === itemSku)
-    );
+    return Boolean(boxLineItemId && itemId && String(boxLineItemId) === itemId);
   });
-  const fallbackItem = fallbackItemByBoxReference || {};
-  const buildRows = (items = []) => items
-    .map((item, itemIndex) => {
+  const buildRows = (items = []) => {
+    const itemList = toArray(items);
+    const canUseBoxLevelQuantity = itemList.length <= 1;
+
+    return itemList.map((item, itemIndex) => {
+      const parsedTextRows = typeof item === 'string' ? parseBoxSkuQuantityText(item) : [];
+      if (parsedTextRows.length === 1) {
+        return {
+          key: `parsed-${itemIndex}`,
+          sku: parsedTextRows[0].sku,
+          quantity: firstPresent(parsedTextRows[0].quantity, canUseBoxLevelQuantity ? directBoxQuantity : '', ''),
+        };
+      }
+
       const shipmentItemId = getBoxItemLineItemId(item);
       const itemSku = getBoxItemSku(item, lineItems);
-      const matchedItem = lineItems.find((lineItem) => {
-        const lineItemId = String(getLineItemId(lineItem) || '').trim();
-        const lineItemSku = String(getLineItemSku(lineItem) || '').trim().toLowerCase();
-        return Boolean(
-          (shipmentItemId && lineItemId && String(shipmentItemId) === lineItemId) ||
-            (itemSku && lineItemSku && String(itemSku).toLowerCase() === lineItemSku)
-        );
-      });
 
       return {
         key: firstPresent(item?.id, item?.uuid, item?.boxItemId, item?.box_item_id, shipmentItemId, itemIndex),
-        sku: firstPresent(getLineItemSku(matchedItem || {}), itemSku, boxDirectSku, getLineItemSku(fallbackItem)),
-        quantity: firstPresent(getBoxItemQuantity(item), directBoxQuantity, getLineItemQty(matchedItem || {}), getLineItemQty(fallbackItem)),
+        sku: firstPresent(itemSku, boxDirectSku),
+        quantity: firstPresent(
+          getBoxItemQuantity(item),
+          canUseBoxLevelQuantity ? directBoxQuantity : '',
+          ''
+        ),
       };
     })
+    .flatMap((item) => {
+      const parsedSkuRows = parseBoxSkuQuantityText(item?.sku);
+      if (parsedSkuRows.length <= 1) return [item];
+      return parsedSkuRows.map((parsedRow, parsedIndex) => ({
+        ...item,
+        key: `${item.key || 'row'}-${parsedIndex}`,
+        sku: parsedRow.sku,
+        quantity: firstPresent(parsedRow.quantity, item.quantity, ''),
+      }));
+    })
     .filter((item) => item.sku || item.quantity !== '');
+  };
   const rows = buildRows(getBoxItems(box));
 
   if (rows.some((item) => item.sku && item.quantity !== '')) return rows;
 
   if (rows.length) return rows;
 
-  const fallbackSku = firstPresent(boxDirectSku, getLineItemSku(fallbackItem));
-  const fallbackQuantity = directBoxQuantity;
+  const directSku = firstPresent(boxDirectSku, getLineItemSku(referencedLineItem || {}));
+  const directQuantity = directBoxQuantity;
 
-  return fallbackSku || fallbackQuantity !== ''
-    ? [{ key: 'fallback', sku: fallbackSku, quantity: fallbackQuantity }]
+  return directSku || directQuantity !== ''
+    ? [{ key: 'direct-box', sku: directSku, quantity: directQuantity }]
     : [];
 };
 
@@ -1229,6 +1537,21 @@ const getBoxContentsSummary = (box = {}, shipment = {}, index = 0) => {
   return rows
     .map((row) => `${row.sku || 'SKU pending'}${row.quantity !== '' ? ` x ${row.quantity}` : ''}`)
     .join(', ');
+};
+
+const getBoxTotalQuantity = (box = {}, shipment = {}, index = 0) => {
+  const quantities = getBoxContentRows(box, shipment, index)
+    .map((row) => row?.quantity)
+    .filter((quantity) => quantity !== '' && quantity !== undefined && quantity !== null);
+
+  if (quantities.length) {
+    return quantities.reduce((sum, quantity) => {
+      const numericQuantity = Number(quantity);
+      return Number.isFinite(numericQuantity) ? sum + numericQuantity : sum;
+    }, 0);
+  }
+
+  return getBoxUnits(box);
 };
 
 const appendFormValue = (formData, key, value) => {
@@ -1479,13 +1802,82 @@ const openOrDownloadFile = (file = {}) => {
 };
 
 const getBoxDedupeKey = (box = {}, index = 0) =>
-  String(getBoxRecordId(box) || getBoxId(box) || box?.reference || box?.boxNumber || box?.box_number || index);
+  String(
+    getBoxRecordId(box) ||
+      getBoxId(box) ||
+      box?.boxRecordId ||
+      box?.box_record_id ||
+      box?.reference ||
+      box?.boxNumber ||
+      box?.box_number ||
+      index
+  );
+
+const boxHasReturnedContent = (box = {}) =>
+  getBoxItems(box).some((item) => getBoxItemSku(item) || getBoxItemQuantity(item) !== '');
+
+const mergeBoxRecords = (existing = {}, incoming = {}) => {
+  const existingHasContent = boxHasReturnedContent(existing);
+  const incomingHasContent = boxHasReturnedContent(incoming);
+  const merged = { ...existing, ...incoming };
+
+  if (existingHasContent && !incomingHasContent) {
+    return {
+      ...merged,
+      items: existing.items,
+      boxItems: existing.boxItems,
+      box_items: existing.box_items,
+      contents: existing.contents,
+      boxContents: existing.boxContents,
+      box_contents: existing.box_contents,
+      lineItems: existing.lineItems,
+      line_items: existing.line_items,
+    };
+  }
+
+  return merged;
+};
+
+const boxesReferToSamePhysicalBox = (left = {}, right = {}) => {
+  const leftIds = getBoxLookupIds(left);
+  const rightIds = new Set(getBoxLookupIds(right));
+  if (leftIds.some((id) => rightIds.has(id))) return true;
+
+  const leftNumber = normalizeBoxCompareValue(getBoxNumberValue(left));
+  const rightNumber = normalizeBoxCompareValue(getBoxNumberValue(right));
+  if (!leftNumber || !rightNumber || leftNumber !== rightNumber) return false;
+
+  const leftDimensions = normalizeBoxCompareValue(getBoxDimensions(left));
+  const rightDimensions = normalizeBoxCompareValue(getBoxDimensions(right));
+  const dimensionsMatch = leftDimensions && rightDimensions && leftDimensions === rightDimensions;
+
+  const leftWeight = normalizeBoxCompareValue(getBoxWeight(left));
+  const rightWeight = normalizeBoxCompareValue(getBoxWeight(right));
+  const weightMatch = leftWeight && rightWeight && leftWeight === rightWeight;
+
+  return dimensionsMatch || weightMatch;
+};
 
 const mergeBoxLists = (...boxLists) => {
   const merged = new Map();
   boxLists.flat().filter(Boolean).forEach((box, index) => {
     const key = getBoxDedupeKey(box, index);
-    merged.set(key, { ...(merged.get(key) || {}), ...box });
+    if (merged.has(key)) {
+      merged.set(key, mergeBoxRecords(merged.get(key), box));
+      return;
+    }
+
+    const matchingEntry = [...merged.entries()].find(([, existingBox]) =>
+      boxesReferToSamePhysicalBox(existingBox, box)
+    );
+
+    if (matchingEntry) {
+      const [existingKey, existingBox] = matchingEntry;
+      merged.set(existingKey, mergeBoxRecords(existingBox, box));
+      return;
+    }
+
+    merged.set(key, box);
   });
   return [...merged.values()];
 };
@@ -1571,7 +1963,7 @@ const fetchShipmentBoxesAllPages = async (shipmentId) => {
       cache: 'no-store',
     });
     const payload = await parseResponse(response);
-    const pageBoxes = extractBoxes(payload);
+    const pageBoxes = extractBoxEndpointRows(payload);
 
     if (!pageBoxes.length) break;
 
@@ -1598,12 +1990,7 @@ const fetchBoxesForShipment = async (lookupCandidates = []) => {
 
   for (const lookupId of boxLookupCandidates) {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(lookupId)}/boxes`, {
-        method: 'GET',
-        headers: buildHeaders(),
-        cache: 'no-store',
-      });
-      const boxes = extractBoxes(await parseResponse(response));
+      const boxes = await fetchShipmentBoxesAllPages(lookupId);
       if (boxes.length) return boxes;
     } catch {
       // Try the next UUID. Reference-based lookups are intentionally skipped because this route rejects them.
@@ -1631,7 +2018,8 @@ const fetchSubShipmentBoxesForShipment = async (lookupCandidates = []) => {
         subShipments.map(async (subShipment) => {
           const subShipmentId = getSubShipmentId(subShipment);
           if (!subShipmentId) {
-            return extractBoxes(subShipment).map((box) => decorateSubShipmentBox(box, subShipment));
+            const boxes = extractBoxes(subShipment);
+            return boxes.map((box) => decorateSubShipmentBox(box, subShipment, boxes));
           }
 
           try {
@@ -1641,10 +2029,12 @@ const fetchSubShipmentBoxesForShipment = async (lookupCandidates = []) => {
               cache: 'no-store',
             });
             const boxesPayload = await parseResponse(boxesResponse);
-            const boxes = extractBoxes(boxesPayload);
-            return (boxes.length ? boxes : extractBoxes(subShipment)).map((box) => decorateSubShipmentBox(box, subShipment));
+            const boxes = extractBoxEndpointRows(boxesPayload);
+            const selectedBoxes = boxes.length ? boxes : extractBoxes(subShipment);
+            return selectedBoxes.map((box) => decorateSubShipmentBox(box, subShipment, selectedBoxes));
           } catch {
-            return extractBoxes(subShipment).map((box) => decorateSubShipmentBox(box, subShipment));
+            const boxes = extractBoxes(subShipment);
+            return boxes.map((box) => decorateSubShipmentBox(box, subShipment, boxes));
           }
         })
       );
@@ -1678,7 +2068,7 @@ const fetchShipmentDetail = async (lookupCandidates = []) => {
 const fetchBoxItemsByBoxId = async (box = {}) => {
   if (BOX_ITEM_ENRICH_LIMIT <= 0) return [];
 
-  const boxId = String(getBoxRecordId(box) || getBoxId(box) || '').trim();
+  const boxId = String(getBoxItemsLookupId(box) || '').trim();
   if (!boxId) return [];
 
   try {
@@ -1694,7 +2084,6 @@ const fetchBoxItemsByBoxId = async (box = {}) => {
 };
 
 const enrichBoxesWithItems = async (boxes = [], lineItems = []) => {
-  void lineItems;
   let remainingFetches = BOX_ITEM_ENRICH_LIMIT;
   const results = await Promise.allSettled(
     boxes.map(async (box) => {
@@ -1702,13 +2091,55 @@ const enrichBoxesWithItems = async (boxes = [], lineItems = []) => {
       const hasUsableItems = existingItems.some((item) =>
         (getBoxItemLineItemId(item) || getBoxItemSku(item)) && getBoxItemQuantity(item) !== ''
       );
-      if (hasUsableItems) return box;
       if (remainingFetches <= 0) {
+        const cachedItems = getCachedBoxAllocationItems(box, lineItems);
+        if (cachedItems.length) {
+          return { ...box, items: cachedItems, boxItems: cachedItems, box_items: cachedItems, boxContents: cachedItems, box_contents: cachedItems, contents: cachedItems };
+        }
         return box;
       }
       remainingFetches -= 1;
       const boxItems = await fetchBoxItemsByBoxId(box);
-      if (boxItems.length) return { ...box, items: boxItems, boxItems, box_items: boxItems, contents: boxItems };
+      const hydratedBoxItems = getShipmentScopedBoxItems(boxItems, lineItems);
+      if (hydratedBoxItems.length) {
+        return {
+          ...box,
+          items: hydratedBoxItems,
+          boxItems: hydratedBoxItems,
+          box_items: hydratedBoxItems,
+          boxContents: hydratedBoxItems,
+          box_contents: hydratedBoxItems,
+          contents: hydratedBoxItems,
+        };
+      }
+
+      const cachedItems = getCachedBoxAllocationItems(box, lineItems);
+      if (cachedItems.length) {
+        return {
+          ...box,
+          items: cachedItems,
+          boxItems: cachedItems,
+          box_items: cachedItems,
+          boxContents: cachedItems,
+          box_contents: cachedItems,
+          contents: cachedItems,
+        };
+      }
+
+      if (hasUsableItems) {
+        const hydratedExistingItems = getShipmentScopedBoxItems(existingItems, lineItems);
+        if (hydratedExistingItems.length) {
+          return {
+            ...box,
+            items: hydratedExistingItems,
+            boxItems: hydratedExistingItems,
+            box_items: hydratedExistingItems,
+            boxContents: hydratedExistingItems,
+            box_contents: hydratedExistingItems,
+            contents: hydratedExistingItems,
+          };
+        }
+      }
 
       return box;
     })
@@ -2001,13 +2432,7 @@ const AwaitingFbaLabels = () => {
       const shipmentResults = await Promise.allSettled(
         candidateShipments.map(async (shipment) => {
           const lookupCandidates = getShipmentLookupCandidates(shipment);
-          const initialRecordId = getShipmentRecordId(shipment);
-          const [detailResult, initialBoxesResult, subShipmentBoxesResult] = await Promise.allSettled([
-            fetchShipmentDetail(lookupCandidates),
-            initialRecordId ? fetchBoxesForShipment([initialRecordId]) : Promise.resolve([]),
-            fetchSubShipmentBoxesForShipment(lookupCandidates),
-          ]);
-          const detail = detailResult.status === 'fulfilled' ? detailResult.value : {};
+          const detail = await fetchShipmentDetail(lookupCandidates).catch(() => ({}));
           const mergedShipment = withClientDetails(
             normalizeShipment({
               ...shipment,
@@ -2035,13 +2460,16 @@ const AwaitingFbaLabels = () => {
             clientRows
           );
 
-          const nextLookupCandidates = getShipmentLookupCandidates(mergedShipment, detail, shipment);
-          const boxesResult = initialBoxesResult.status === 'fulfilled' ? initialBoxesResult.value : [];
+          const resolvedLookupCandidates = getShipmentLookupCandidates(mergedShipment, detail, shipment);
+          const [boxesResult, subShipmentBoxesResult] = await Promise.allSettled([
+            fetchBoxesForShipment(resolvedLookupCandidates),
+            fetchSubShipmentBoxesForShipment(resolvedLookupCandidates),
+          ]);
+
+          const boxesResultRows = boxesResult.status === 'fulfilled' ? boxesResult.value : [];
           const subShipmentBoxes = subShipmentBoxesResult.status === 'fulfilled' ? subShipmentBoxesResult.value : [];
           const loadedBoxes = mergeBoxLists(
-            boxesResult.length
-              ? boxesResult
-              : await fetchBoxesForShipment(nextLookupCandidates),
+            boxesResultRows,
             subShipmentBoxes,
             extractBoxes(detail),
             extractBoxes(shipment)
@@ -2589,7 +3017,7 @@ const AwaitingFbaLabels = () => {
                             const uploadKey = `${shipmentId}-${boxId}`;
                             const isUploading = uploadingKey === uploadKey;
                             const contentSummary = getBoxContentsSummary(box, shipment, originalIndex);
-                            const boxUnits = getBoxUnits(box);
+                            const boxUnits = getBoxTotalQuantity(box, shipment, originalIndex);
                             const boxSize = getBoxSize(box);
                             const boxType = String(box?.box_type || box?.boxType || '').toLowerCase() === 'pallet' ? 'Pallet' : 'Box';
 
@@ -2745,7 +3173,7 @@ const AwaitingFbaLabels = () => {
                     <div className="max-h-72 overflow-y-auto rounded-xl border border-[#e2e8f0]">
                       {batchFbaUploadOptions.map(({ box, boxId, index }) => {
                         const contentSummary = getBoxContentsSummary(box, batchFbaUpload.shipment, index);
-                        const boxUnits = getBoxUnits(box);
+                        const boxUnits = getBoxTotalQuantity(box, batchFbaUpload.shipment, index);
                         const boxNumber = firstPresent(box?.box_number, box?.boxNumber, index + 1);
                         const boxType = getBoxType(box) === 'pallet' ? 'Pallet' : 'Box';
 
@@ -2801,13 +3229,13 @@ const AwaitingFbaLabels = () => {
 
       {selectedFbaBoxDetail ? (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-xl overflow-hidden rounded-2xl bg-white shadow-xl">
+          <div className="w-full max-w-[700px] overflow-hidden rounded-2xl bg-white shadow-xl">
             {(() => {
               const { shipment, box, boxIndex } = selectedFbaBoxDetail;
               const contentRows = getBoxContentRows(box, shipment, boxIndex);
               const primarySku = getPrimaryBoxSku(box, shipment, boxIndex);
               const contentSummary = getBoxContentsSummary(box, shipment, boxIndex);
-              const totalQuantity = getBoxUnits(box);
+              const totalQuantity = getBoxTotalQuantity(box, shipment, boxIndex);
               const labelReady = isBoxLabelReady(box, filesByBox);
               const dimensions = getBoxDimensions(box);
               const weight = getBoxWeight(box);

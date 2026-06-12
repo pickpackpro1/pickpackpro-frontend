@@ -74,6 +74,11 @@ const toBooleanFlag = (value) => {
   return false;
 };
 
+const isPositiveNumber = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0;
+};
+
 const getShipmentRecordId = (shipment = {}) =>
   firstPresent(shipment?.id, shipment?.uuid, shipment?.shipmentId, shipment?.shipment_id);
 
@@ -331,7 +336,7 @@ export const normalizeLineItem = (item = {}, index = 0) => {
   const fnskuLabelFile = getLineItemLabelFile(item);
   const displayOrder = firstPresent(item?.displayOrder, item?.display_order, item?.itemIndex, item?.item_index, item?.lineItemIndex, item?.line_item_index, index);
   const itemIndex = firstPresent(item?.itemIndex, item?.item_index, item?.lineItemIndex, item?.line_item_index, displayOrder, index);
-  const bundleSize = Number(firstPresent(item?.bundleSize, item?.bundle_size, 0) || 0);
+  const rawBundleSize = Number(firstPresent(item?.bundleSize, item?.bundle_size, 0) || 0);
   const rawServices = normalizeServices(
     item?.services,
     item?.servicesSelected,
@@ -344,6 +349,7 @@ export const normalizeLineItem = (item = {}, index = 0) => {
         ? toBooleanFlag(item.needs_bundling)
         : false;
   const needsBundling = explicitNeedsBundling;
+  const bundleSize = needsBundling ? rawBundleSize : 0;
   const services = normalizeServices(rawServices);
 
   return {
@@ -481,17 +487,45 @@ export const buildShipmentItemPayload = (item = {}, index = 0) => {
   const normalized = normalizeLineItem(item, index);
   const bundleSize = Number(normalized.bundleSize || 0);
   const needsBundling = Boolean(normalized.needsBundling);
-  return {
-    sku: String(normalized.sku || '').trim(),
-    productName: String(normalized.productName || normalized.product_name || '').trim(),
-    expectedQty: Number(normalized.expectedQty || 0),
-    fnskuLabel: String(normalized.fnskuLabel || normalized.fnsku_label || '').trim(),
+  const sku = String(normalized.sku || '').trim();
+  const productName = String(normalized.productName || normalized.product_name || '').trim();
+  const expectedQty = Number(normalized.expectedQty || 0);
+  const fnskuLabel = String(normalized.fnskuLabel || normalized.fnsku_label || '').trim();
+  const displayOrder = Number(firstPresent(normalized.displayOrder, index) || 0);
+  const itemIndex = Number(firstPresent(normalized.itemIndex, index) || 0);
+
+  if (needsBundling && !isPositiveNumber(bundleSize)) {
+    throw new Error('Bundle size is required when bundling is enabled.');
+  }
+
+  const payload = {
+    sku,
+    productName,
+    product_name: productName,
+    expectedQty,
+    expected_qty: expectedQty,
+    qtyExpected: expectedQty,
+    qty_expected: expectedQty,
+    fnskuLabel,
+    fnsku_label: fnskuLabel,
+    fnsku: fnskuLabel,
     services: normalizeServices(normalized.services, item?.services),
     needsBundling,
-    bundleSize: needsBundling ? bundleSize : 0,
-    displayOrder: Number(firstPresent(normalized.displayOrder, index) || 0),
-    itemIndex: Number(firstPresent(normalized.itemIndex, index) || 0),
+    needs_bundling: needsBundling,
+    displayOrder,
+    display_order: displayOrder,
+    itemIndex,
+    item_index: itemIndex,
+    lineItemIndex: itemIndex,
+    line_item_index: itemIndex,
   };
+
+  if (needsBundling) {
+    payload.bundleSize = Number(bundleSize);
+    payload.bundle_size = Number(bundleSize);
+  }
+
+  return payload;
 };
 
 const getUploadMatchKey = (item = {}, index = 0) =>

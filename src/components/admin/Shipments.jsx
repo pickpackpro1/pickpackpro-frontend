@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
+import ProductSkuCombobox from '../common/ProductSkuCombobox';
 import { getSession } from '../../utils/auth';
 import {
   Search,
@@ -29,6 +30,9 @@ import {
   normalizeShipment as normalizeMappedShipment,
   normalizeShipmentList as normalizeMappedShipmentList,
 } from '../../utils/shipmentMapper';
+import {
+  normalizeSkuProductOptions,
+} from '../../utils/productSkuOptions';
 
 const API_BASE_URL = '';
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app';
@@ -510,8 +514,18 @@ const getLineItemFnsku = (item = {}) => {
   );
 };
 
-const getLineItemBundleSize = (item = {}) =>
-  firstPresent(
+const isTruthyFlag = (value) => {
+  if (value === true || value === 1 || value === '1') return true;
+  return ['true', 'yes', 'y'].includes(String(value || '').trim().toLowerCase());
+};
+
+const isLineItemBundlingEnabled = (item = {}) =>
+  isTruthyFlag(item?.needsBundling) || isTruthyFlag(item?.needs_bundling);
+
+const getLineItemBundleSize = (item = {}) => {
+  if (!isLineItemBundlingEnabled(item)) return '';
+
+  return firstPresent(
     item?.bundleSize,
     item?.bundle_size,
     item?.bundleQty,
@@ -524,6 +538,7 @@ const getLineItemBundleSize = (item = {}) =>
     item?.unitsPerBundle,
     item?.units_per_bundle
   );
+};
 
 const isPositiveBundleSize = (value) => {
   const bundleSize = Number(value || 0);
@@ -614,7 +629,7 @@ const getBundleSizeEntriesFromDraftCache = (shipment = {}, items = []) => {
         sku: getLineItemSku(item),
         fnsku: getLineItemFnsku(item),
         bundleSize: Number(getLineItemBundleSize(item) || 0),
-        hasBundling: Boolean(item?.needsBundling || item?.needs_bundling || toArray(item?.services).some(isBundlingServiceValue)),
+        hasBundling: isLineItemBundlingEnabled(item),
       }))
       .filter((entry) =>
         entry.hasBundling &&
@@ -631,6 +646,7 @@ const applyBundleSizesFromNotes = (items = [], shipment = {}) => {
   if (!resolvedEntries.length) return items;
 
   return (Array.isArray(items) ? items : []).map((item) => {
+    if (!isLineItemBundlingEnabled(item)) return item;
     if (isPositiveBundleSize(getLineItemBundleSize(item))) return item;
     const bundleSize = getBundleSizeForLineItem(item, resolvedEntries);
     return isPositiveBundleSize(bundleSize)
@@ -3172,7 +3188,7 @@ const buildShipmentItems = (items) => {
       sku: String(item.sku || '').trim(),
       productName: String(item.productName || '').trim(),
       expectedQty: Number(item.expectedQty || 0),
-      bundleSize: item.needsBundling ? Number(item.bundleSize || 0) : 0,
+      ...(item.needsBundling ? { bundleSize: Number(item.bundleSize || 0) } : {}),
       fnskuLabel: String(item.fnskuLabel || '').trim(),
       fileName: String(item.fileName || item.fnskuLabelFileName || item.fnsku_label_file_name || '').trim(),
     }))
@@ -3356,6 +3372,8 @@ const Shipments = () => {
   const quickViewRequestIdRef = useRef(0);
   const [createForm, setCreateForm] = useState(initialCreateForm);
   const [createItems, setCreateItems] = useState([createEmptyProductItem()]);
+  const [skuOptions, setSkuOptions] = useState([]);
+  const [isSkuOptionsLoading, setIsSkuOptionsLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isClientsLoading, setIsClientsLoading] = useState(false);
   const [isStaffLoading, setIsStaffLoading] = useState(false);
@@ -3433,6 +3451,53 @@ const Shipments = () => {
   const showToast = (type, message) => {
     setToast({ type, message: formatToastMessage(message) });
   };
+
+  const fetchSkuOptionsForClient = async (clientId) => {
+    const query = new URLSearchParams({ clientId });
+    const response = await fetch(`${API_BASE_URL}/api/products?${query.toString()}`, {
+      method: 'GET',
+      headers: buildHeaders(),
+      cache: 'no-store',
+    });
+    const payload = await parseResponse(response);
+    return normalizeSkuProductOptions(payload, clientId);
+  };
+
+  useEffect(() => {
+    const clientId = String(createForm.clientId || '').trim();
+    let isCancelled = false;
+
+    if (!clientId) {
+      setSkuOptions([]);
+      setIsSkuOptionsLoading(false);
+      return undefined;
+    }
+
+    const loadSkuOptions = async () => {
+      try {
+        setIsSkuOptionsLoading(true);
+        const options = await fetchSkuOptionsForClient(clientId);
+        if (!isCancelled) {
+          setSkuOptions(options);
+        }
+      } catch (requestError) {
+        if (!isCancelled) {
+          setSkuOptions([]);
+          showToast('error', requestError.message || 'Failed to load client SKUs.');
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsSkuOptionsLoading(false);
+        }
+      }
+    };
+
+    loadSkuOptions();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [createForm.clientId]);
 
   const loadClients = async () => {
     try {
@@ -3953,6 +4018,30 @@ const Shipments = () => {
         return { ...item, [field]: value };
       })
     );
+  };
+
+  const handleSkuChange = (index, value) => {
+    setCreateItems((current) =>
+      current.map((item, itemIndex) => (itemIndex === index ? { ...item, sku: value } : item))
+    );
+  };
+
+  const handleSkuProductSelect = (index, product) => {
+    setCreateItems((current) =>
+      current.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const needsBundling = Boolean(product?.needsBundling || product?.needs_bundling);
+        return {
+          ...item,
+          sku: product?.sku || item.sku,
+          productName: product?.productName || item.productName,
+          fnskuLabel: product?.fnskuLabel || '',
+          needsBundling,
+          bundleSize: needsBundling ? String(product?.bundleSize || product?.bundle_size || '') : '',
+        };
+      })
+    );
+    setError('');
   };
 
   const handleProductLabelFile = (index, file) => {
@@ -4536,7 +4625,10 @@ const Shipments = () => {
                       <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-gray-400">Client Selection</label>
                       <select
                         value={createForm.clientId}
-                        onChange={(e) => setCreateForm((prev) => ({ ...prev, clientId: e.target.value }))}
+                        onChange={(e) => {
+                          setCreateForm((prev) => ({ ...prev, clientId: e.target.value }));
+                          setCreateItems([createEmptyProductItem()]);
+                        }}
                         disabled={isClientsLoading || !clientOptions.length}
                         className={`w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm ${
                           createForm.clientId ? 'text-gray-900' : 'text-gray-400'
@@ -4618,12 +4710,19 @@ const Shipments = () => {
                             <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.14em] text-[#6b7280]">
                               SKU
                             </label>
-                            <input
-                              type="text"
-                              placeholder="SG-LAMP-01"
+                            <ProductSkuCombobox
                               value={item.sku}
-                              onChange={(e) => handleItemChange(index, 'sku', e.target.value)}
-                              className="w-full rounded-lg border border-[#dbe3ef] px-4 py-3 text-sm text-[#132347] outline-none focus:ring-2 focus:ring-[#ff6900]"
+                              options={skuOptions}
+                              loading={isSkuOptionsLoading}
+                              disabled={!createForm.clientId}
+                              placeholder={
+                                createForm.clientId
+                                  ? 'Search or create SKU'
+                                  : 'Select client first'
+                              }
+                              onChange={(value) => handleSkuChange(index, value)}
+                              onSelect={(product) => handleSkuProductSelect(index, product)}
+                              inputClassName="w-full rounded-lg border border-[#dbe3ef] py-3 pr-4 text-sm text-[#132347] outline-none focus:ring-2 focus:ring-[#ff6900] disabled:cursor-not-allowed disabled:bg-[#f8fafc] disabled:text-[#94a3b8] disabled:focus:ring-0"
                             />
                           </div>
                           <div>
@@ -5082,7 +5181,7 @@ const Shipments = () => {
                                       <p><span className="text-xs uppercase text-gray-500">SKU</span><br /><span className="font-medium text-gray-900">{getLineItemSku(item) || '-'}</span></p>
                                       <p><span className="text-xs uppercase text-gray-500">FNSKU</span><br /><span className="font-medium text-gray-900">{getLineItemFnsku(item) || '-'}</span></p>
                                       <p><span className="text-xs uppercase text-gray-500">Expected Qty</span><br /><span className="font-medium text-gray-900">{getLineItemExpectedQty(item) || 0}</span></p>
-                                      <p><span className="text-xs uppercase text-gray-500">Bundle Size</span><br /><span className="font-medium text-gray-900">{getLineItemBundleSize(item) || 0}</span></p>
+                                      <p><span className="text-xs uppercase text-gray-500">Bundle Size</span><br /><span className="font-medium text-gray-900">{getLineItemBundleSize(item) || '-'}</span></p>
                                       <p><span className="text-xs uppercase text-gray-500">Services</span><br /><span className="font-medium text-gray-900">{itemServices.length ? itemServices.join(', ') : '-'}</span></p>
                                       <div>
                                         <span className="text-xs uppercase text-gray-500">FNSKU Label PDF / CSV</span><br />
