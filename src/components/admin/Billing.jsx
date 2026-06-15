@@ -695,9 +695,12 @@ const getInvoiceLineSource = (item = {}) =>
 
 const isManualInvoiceLine = (item = {}) => getInvoiceLineSource(item) === 'manual';
 
-const isDraftInvoice = (invoice = {}) => String(invoice?.status || '').trim().toLowerCase() === 'draft';
+const getInvoiceStatusValue = (invoice = {}) => String(invoice?.status || '').trim().toLowerCase();
 
-const canEditInvoiceLines = (invoice = {}) => isDraftInvoice(invoice) && getInvoiceTypeValue(invoice) !== 'monthly';
+const isDraftInvoice = (invoice = {}) => getInvoiceStatusValue(invoice) === 'draft';
+
+const canEditManualInvoiceLines = (invoice = {}) =>
+  ['draft', 'sent'].includes(getInvoiceStatusValue(invoice)) && getInvoiceTypeValue(invoice) !== 'monthly';
 
 const getInvoiceLineQty = (item = {}) => firstPresent(item?.qty, item?.quantity, item?.units, 0);
 
@@ -1227,7 +1230,7 @@ const Billing = () => {
       setError('');
       setMessage('');
       if (!invoiceId) throw new Error('Invoice identifier is missing.');
-      if (!canEditInvoiceLines(selectedInvoiceView)) throw new Error('Only draft dispatch invoices can be edited.');
+      if (!canEditManualInvoiceLines(selectedInvoiceView)) throw new Error('Manual invoice lines can only be edited while the invoice is draft or sent.');
 
       const payload = buildManualLinePayload();
       const isEditing = Boolean(editingLineItemId);
@@ -1261,8 +1264,8 @@ const Billing = () => {
       setError('');
       setMessage('');
       if (!invoiceId || !lineItemId) throw new Error('Invoice line identifier is missing.');
-      if (!canEditInvoiceLines(selectedInvoiceView) || !isManualInvoiceLine(lineItem)) {
-        throw new Error('Only manual lines on draft dispatch invoices can be deleted.');
+      if (!canEditManualInvoiceLines(selectedInvoiceView) || !isManualInvoiceLine(lineItem)) {
+        throw new Error('Only manual lines on draft or sent invoices can be deleted.');
       }
       if (!window.confirm('Delete this manual invoice line?')) return;
 
@@ -1374,7 +1377,7 @@ const Billing = () => {
                   const routeId = getInvoiceRouteId(invoice);
                   const status = String(invoice.status || '').toLowerCase();
                   const isActionPending = invoiceActionKey.startsWith(`${routeId}:`);
-                  const canSend = canEditInvoiceLines(invoice);
+                  const canSend = isDraftInvoice(invoice) && getInvoiceTypeValue(invoice) !== 'monthly';
                   const canMarkPaid = ['sent', 'overdue'].includes(status);
                   const sourceId = invoice.source;
                   const canLinkSource = invoice.invoiceType === 'shipment' && sourceId && sourceId !== '-';
@@ -1464,7 +1467,7 @@ const Billing = () => {
                   <p className="mt-1 text-sm text-gray-500">{selectedInvoiceView.invoiceTypeLabel}</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  {canEditInvoiceLines(selectedInvoiceView) ? (
+                  {isDraftInvoice(selectedInvoiceView) && getInvoiceTypeValue(selectedInvoiceView) !== 'monthly' ? (
                     <button
                       type="button"
                       onClick={() => handleSendInvoice(selectedInvoiceView)}
@@ -1518,7 +1521,7 @@ const Billing = () => {
                   ))}
                 </div>
 
-                {canEditInvoiceLines(selectedInvoiceView) ? (
+                {canEditManualInvoiceLines(selectedInvoiceView) ? (
                   <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
                     <div className="mb-3 flex items-center justify-between gap-3">
                       <h4 className="text-sm font-semibold text-gray-900">Manual Custom Services</h4>
@@ -1607,7 +1610,7 @@ const Billing = () => {
                         selectedInvoiceView.lineItems.map((item, index) => {
                           const lineSource = getInvoiceLineSource(item);
                           const isManual = isManualInvoiceLine(item);
-                          const canEditLine = canEditInvoiceLines(selectedInvoiceView) && isManual;
+                          const canEditLine = canEditManualInvoiceLines(selectedInvoiceView) && isManual;
                           const lineId = getInvoiceLineId(item);
 
                           return (
