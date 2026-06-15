@@ -23,6 +23,16 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { formatToastMessage } from '../../utils/toast';
 import {
+  SERVICE_SELECT_OPTIONS,
+  STANDARD_SERVICE_KEYS as STANDARD_CATALOG_SERVICE_KEYS,
+  getServiceDisplayName,
+  getServiceKey,
+  isBundlingService,
+  isOtherServiceCode,
+  normalizeServiceCode,
+  normalizeServiceList,
+} from '../../utils/serviceCatalog';
+import {
   buildShipmentItemPayload as mapShipmentItemPayload,
   findLineItemLabelFile as findMappedLineItemLabelFile,
   getItemLabelFileAssignments as getMappedItemLabelFileAssignments,
@@ -94,63 +104,12 @@ const createEmptyProductItem = () => ({
   file: null,
 });
 
-const serviceRequiredOptions = [
-  { value: 'FNSKU_LABEL', label: 'FNSKU Labeling' },
-  { value: 'BUNDLING', label: 'Bundling' },
-  { value: 'POLY_BAG', label: 'Poly Bag' },
-  { value: 'BUBBLE_WRAP', label: 'Bubble Wrap' },
-  { value: 'LEAFLET_INSERTION', label: 'Leaflet Insertion' },
-  { value: 'OVERSIZE_SURCHARGE', label: 'Oversize Surcharge' },
-  { value: 'RETURN_PROCESSING', label: 'Return Processing' },
-  { value: 'OTHER', label: 'Other' },
-];
-
-const SERVICE_VALUE_BY_LABEL = serviceRequiredOptions.reduce((acc, option) => {
-  acc[option.label.toLowerCase()] = option.value;
-  acc[option.value.toLowerCase()] = option.value;
-  return acc;
-}, {});
-
-const SERVICE_LABEL_BY_VALUE = serviceRequiredOptions.reduce((acc, option) => {
-  acc[option.value] = option.label;
-  return acc;
-}, {});
-
-const isOtherServiceValue = (value = '') => String(value || '').trim().toLowerCase() === 'other';
-
-const normalizeServiceType = (value = '') => {
-  const rawValue = String(value || '').trim();
-  if (!rawValue) return '';
-  const normalized = SERVICE_VALUE_BY_LABEL[rawValue.toLowerCase()] || rawValue.toUpperCase().replaceAll(' ', '_');
-  return normalized === 'FNSKU_LABELING' ? 'FNSKU_LABEL' : normalized;
-};
-
-const formatServiceLabel = (value = '') => {
-  const rawValue = String(value || '').trim();
-  if (!rawValue) return '';
-  const normalized = normalizeServiceType(rawValue);
-
-  if (SERVICE_LABEL_BY_VALUE[normalized]) return SERVICE_LABEL_BY_VALUE[normalized];
-
-  return rawValue
-    .replaceAll('_', ' ')
-    .toLowerCase()
-    .split(' ')
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
-};
-
-const normalizeServiceKey = (value = '') =>
-  String(formatServiceLabel(value || ''))
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '');
-
-const STANDARD_SERVICE_KEYS = new Set(
-  serviceRequiredOptions
-    .filter((option) => option.value !== 'OTHER')
-    .flatMap((option) => [option.label, option.value])
-    .map(normalizeServiceKey)
-);
+const serviceRequiredOptions = SERVICE_SELECT_OPTIONS;
+const isOtherServiceValue = isOtherServiceCode;
+const normalizeServiceType = normalizeServiceCode;
+const formatServiceLabel = getServiceDisplayName;
+const normalizeServiceKey = getServiceKey;
+const STANDARD_SERVICE_KEYS = STANDARD_CATALOG_SERVICE_KEYS;
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();
@@ -551,7 +510,7 @@ const isBundlingServiceValue = (value = '') => {
   const rawValue = typeof value === 'object'
     ? firstPresent(value?.serviceType, value?.service_type, value?.name, value?.serviceName, value?.service_name, value?.label, value?.type)
     : value;
-  return normalizeServiceType(String(rawValue || '').split('/')[0]) === 'BUNDLING';
+  return isBundlingService(String(rawValue || '').split('/')[0]);
 };
 
 const filterBundlingServiceLabels = (services = []) =>
@@ -3263,13 +3222,11 @@ const buildShipmentItems = (items) => {
       throw new Error('Each product line item needs product, SKU, and qty expected.');
     }
 
-    const services = (Array.isArray(item.services) ? item.services : [])
-      .map((service) => normalizeServiceType(String(service).split('/')[0]))
-      .filter(Boolean);
+    const services = normalizeServiceList(item.services);
 
     return {
       ...mapShipmentItemPayload({ ...item, services }, index),
-      services: [...new Set(services)],
+      services,
     };
   });
 };
@@ -4215,13 +4172,13 @@ const Shipments = () => {
       return;
     }
 
-    const serviceLabel = formatServiceLabel(value);
-    if (!serviceLabel) return;
+    const serviceCode = normalizeServiceType(value);
+    if (!serviceCode) return;
 
     setCreateItems((current) =>
       current.map((item, itemIndex) => {
         if (itemIndex !== index) return item;
-        const nextServices = [...new Set([...(item.services || []).map(formatServiceLabel).filter(Boolean), serviceLabel])];
+        const nextServices = normalizeServiceList(item.services, serviceCode);
         return { ...item, services: nextServices, serviceType: '', serviceQty: '', customServiceName: '' };
       })
     );
@@ -4243,7 +4200,7 @@ const Shipments = () => {
 
   const addCustomServiceToItem = (index) => {
     const customService = createItems[index]?.customServiceName?.trim();
-    const serviceLabel = formatServiceLabel(customService);
+    const serviceLabel = normalizeServiceType(customService);
 
     if (!serviceLabel) {
       setError('Please type a custom service name.');
@@ -4253,7 +4210,7 @@ const Shipments = () => {
     setCreateItems((current) =>
       current.map((item, itemIndex) => {
         if (itemIndex !== index) return item;
-        const nextServices = [...new Set([...(item.services || []).map(formatServiceLabel).filter(Boolean), serviceLabel])];
+        const nextServices = normalizeServiceList(item.services, serviceLabel);
         return { ...item, services: nextServices, serviceType: '', serviceQty: '', customServiceName: '' };
       })
     );
@@ -4975,7 +4932,7 @@ const Shipments = () => {
                             <div className="mt-4 flex flex-wrap gap-3">
                               {item.services.map((service, serviceIndex) => (
                                 <div key={`${service}-${serviceIndex}`} className="flex items-center gap-3 rounded-lg border border-[#e2e8f0] bg-white px-4 py-3 text-sm text-[#132347]">
-                                  <span>{service}</span>
+                                  <span>{formatServiceLabel(service)}</span>
                                   <button
                                     type="button"
                                     onClick={() => handleRemoveService(index, serviceIndex)}

@@ -4,6 +4,7 @@ import LayoutClient from './clientlayout/LayoutClient';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import { getSession } from '../../utils/auth';
+import { getServiceDisplayName, getServiceKey, normalizeServiceList } from '../../utils/serviceCatalog';
 
 const API_BASE_URL = '';
 
@@ -136,9 +137,9 @@ const getShipmentServices = (shipment) => {
   const itemServices = getLineItems(shipment).flatMap(
     (item) => item?.services || item?.services_selected || item?.serviceTypes || []
   );
-  const uniqueServices = [...new Set([...directServices, ...itemServices].filter(Boolean))];
+  const uniqueServices = normalizeServiceList(directServices, itemServices);
 
-  return uniqueServices.map((service) => String(service).replaceAll('_', ' ')).join(', ') || '--';
+  return uniqueServices.map(getServiceDisplayName).join(', ') || '--';
 };
 
 const getServiceBreakdownFromShipments = (shipments = []) => {
@@ -158,14 +159,15 @@ const getServiceBreakdownFromShipments = (shipments = []) => {
       );
       const services = item?.services || item?.services_selected || item?.serviceTypes || [];
 
-      services.forEach((service) => {
-        const label = String(service || '').replaceAll('_', ' ');
-        totals.set(label, (totals.get(label) || 0) + units);
+      normalizeServiceList(services).forEach((service) => {
+        const key = getServiceKey(service);
+        const current = totals.get(key) || { name: getServiceDisplayName(service), value: 0 };
+        totals.set(key, { ...current, value: current.value + units });
       });
     });
   });
 
-  return [...totals.entries()].map(([name, value]) => ({ name, value }));
+  return [...totals.values()];
 };
 
 const extractDashboardPayload = (payload) => payload?.data || payload?.dashboard || payload || {};
@@ -249,13 +251,26 @@ const ClientDashboard = () => {
 
   const servicesData = useMemo(
     () =>
-      firstNonEmptyRows(
-        extractRows(dashboard, ['serviceBreakdown', 'servicesBreakdown', 'services']),
-        getServiceBreakdownFromShipments(dashboard?.shipments || [])
-      ).map((service) => ({
-        name: service?.name || service?.serviceType || service?.label || 'Service',
-        value: Number(service?.value || service?.units || service?.count || 0),
-      })),
+      Array.from(
+        firstNonEmptyRows(
+          extractRows(dashboard, ['serviceBreakdown', 'servicesBreakdown', 'services']),
+          getServiceBreakdownFromShipments(dashboard?.shipments || [])
+        )
+          .reduce((totals, service) => {
+            const rawService =
+              typeof service === 'string'
+                ? service
+                : service?.name || service?.serviceType || service?.service_type || service?.label || 'Service';
+            const key = getServiceKey(rawService) || rawService;
+            const current = totals.get(key) || { name: getServiceDisplayName(rawService), value: 0 };
+            totals.set(key, {
+              ...current,
+              value: current.value + Number(service?.value || service?.units || service?.count || 0),
+            });
+            return totals;
+          }, new Map())
+          .values()
+      ),
     [dashboard]
   );
 

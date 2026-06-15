@@ -19,6 +19,12 @@ import {
   Check,
   ChevronDown,
 } from 'lucide-react';
+import {
+  SERVICE_SELECT_OPTIONS,
+  getServiceDisplayName,
+  getServiceKey,
+  normalizeServiceCode,
+} from '../../utils/serviceCatalog';
 
 const SETTINGS_ACTIVE_TAB_KEY = 'pickpackpro-settings-active-tab';
 const PENDING_USER_EDIT_KEY = 'pending-settings-user-edit';
@@ -115,13 +121,7 @@ const initialPricingTiers = {
   platinum: { minUnits: '0', invoiceMin: '' },
 };
 
-const defaultServiceTypeOptions = [
-  { value: 'FNSKU_LABEL', label: 'FNSKU Label' },
-  { value: 'POLY_BAG', label: 'Poly Bag' },
-  { value: 'BUBBLE_WRAP', label: 'Bubble Wrap' },
-  { value: 'BUNDLING', label: 'Bundling' },
-  { value: 'CUSTOM_SERVICE', label: 'Custom Service' },
-];
+const defaultServiceTypeOptions = SERVICE_SELECT_OPTIONS.filter((option) => option.value !== 'OTHER');
 
 const initialWorkingDays = {
   monday: true,
@@ -301,25 +301,23 @@ const getClientDisplayLabel = (client = {}) => {
 };
 
 const getServiceTypeValue = (service) =>
-  typeof service === 'string'
-    ? service.trim()
-    : String(
-        service?.serviceType ||
-          service?.service_type ||
-          service?.type ||
-          service?.code ||
-          service?.value ||
-          service?.id ||
-          service?.name ||
-          service?.label ||
-          ''
-      ).trim();
+  normalizeServiceCode(
+    typeof service === 'string'
+      ? service.trim()
+      : String(
+          service?.serviceType ||
+            service?.service_type ||
+            service?.type ||
+            service?.code ||
+            service?.value ||
+            service?.id ||
+            service?.name ||
+            service?.label ||
+            ''
+        ).trim()
+  );
 
-const formatServiceTypeLabel = (value) =>
-  String(value || '')
-    .replace(/_/g, ' ')
-    .toLowerCase()
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+const formatServiceTypeLabel = (value) => getServiceDisplayName(value);
 
 const formatPricePerUnit = (value) => {
   const amount = Number(value);
@@ -345,6 +343,11 @@ const parseJsonValue = (value, fallback) => {
   } catch {
     return fallback;
   }
+};
+
+const firstFilledValue = (...values) => {
+  const value = values.find((item) => item !== undefined && item !== null && item !== '');
+  return value === undefined || value === null ? '' : value;
 };
 
 const toObjectValue = (value) => {
@@ -376,28 +379,31 @@ const extractPricingCatalog = (payload) => {
   }
 
   return Object.entries(source).map(([key, value]) => {
+    const serviceType = normalizeServiceCode(
+      value?.serviceType ||
+        value?.service_type ||
+        value?.type ||
+        value?.code ||
+        value?.value ||
+        key
+    );
+
     if (value && typeof value === 'object') {
       return {
         ...value,
-        serviceType:
-          value.serviceType ||
-          value.service_type ||
-          value.type ||
-          value.code ||
-          value.value ||
-          key,
+        serviceType,
         label:
           value.label ||
           value.name ||
           value.serviceName ||
           value.service_name ||
-          formatServiceTypeLabel(key),
+          formatServiceTypeLabel(serviceType),
       };
     }
 
     return {
-      serviceType: key,
-      label: typeof value === 'string' ? value : formatServiceTypeLabel(key),
+      serviceType,
+      label: typeof value === 'string' ? value : formatServiceTypeLabel(serviceType),
     };
   });
 };
@@ -418,18 +424,20 @@ const extractPricingClientPrices = (payload) => {
 };
 
 const getPricingServiceValue = (price = {}) =>
-  String(
-    price?.serviceType ||
-      price?.service_type ||
-      price?.serviceCode ||
-      price?.service_code ||
-      price?.service?.code ||
-      price?.service?.serviceType ||
-      price?.service?.service_type ||
-      price?.code ||
-      price?.type ||
-      ''
-  ).trim();
+  normalizeServiceCode(
+    String(
+      price?.serviceType ||
+        price?.service_type ||
+        price?.serviceCode ||
+        price?.service_code ||
+        price?.service?.code ||
+        price?.service?.serviceType ||
+        price?.service?.service_type ||
+        price?.code ||
+        price?.type ||
+        ''
+    ).trim()
+  );
 
 const getPricingTierValue = (price = {}) =>
   String(price?.tier || price?.pricingTier || price?.pricing_tier || '').trim();
@@ -585,7 +593,7 @@ const Settings = () => {
   const [pricingMessage, setPricingMessage] = useState('');
   const [pricingForm, setPricingForm] = useState({
     clientId: '',
-    serviceType: 'FNSKU_LABEL',
+    serviceType: 'fnsku_label',
     pricePerUnit: '',
     tier: 'silver',
     effectiveFrom: '',
@@ -636,7 +644,7 @@ const Settings = () => {
       ...defaultServiceTypeOptions,
       pricingForm.serviceType
         ? {
-            value: pricingForm.serviceType,
+            value: normalizeServiceCode(pricingForm.serviceType),
             label: formatServiceTypeLabel(pricingForm.serviceType),
           }
         : null,
@@ -644,7 +652,7 @@ const Settings = () => {
     const seenValues = new Set();
 
     return mergedOptions.filter((option) => {
-      const normalizedValue = String(option.value).toLowerCase();
+      const normalizedValue = getServiceKey(option.value);
 
       if (seenValues.has(normalizedValue)) {
         return false;
@@ -697,14 +705,29 @@ const Settings = () => {
       pricingClientOptions.map((client) => [String(client.value), client.label])
     );
 
-    const globalRows = pricingCatalog.flatMap((service) => {
+    const normalizedGlobalCatalog = [];
+    const seenGlobalServiceKeys = new Set();
+
+    pricingCatalog.forEach((service) => {
+      const serviceType = getServiceTypeValue(service);
+      const serviceKey = getServiceKey(serviceType || service?.label || service?.name);
+
+      if (!serviceKey || seenGlobalServiceKeys.has(serviceKey)) {
+        return;
+      }
+
+      seenGlobalServiceKeys.add(serviceKey);
+      normalizedGlobalCatalog.push(service);
+    });
+
+    const globalRows = normalizedGlobalCatalog.flatMap((service) => {
       const serviceType = getServiceTypeValue(service);
       const serviceLabel =
+        formatServiceTypeLabel(serviceType) ||
         service?.label ||
         service?.name ||
         service?.serviceName ||
-        service?.service_name ||
-        formatServiceTypeLabel(serviceType);
+        service?.service_name;
       const tierPricing = toObjectValue(
         service?.default_tier_pricing ||
           service?.defaultTierPricing ||
@@ -714,21 +737,21 @@ const Settings = () => {
           service?.tier_prices ||
           service?.tiers
       );
-      const tierRows = Object.entries(tierPricing)
-        .filter(([, price]) => price !== undefined && price !== null && price !== '')
-        .map(([tier, price]) => ({
+      const tierRows = ['silver', 'gold', 'platinum']
+        .filter((tier) => tierPricing[tier] !== undefined && tierPricing[tier] !== null && tierPricing[tier] !== '')
+        .map((tier) => ({
           key: `global-${serviceType || serviceLabel}-${tier}`,
           scope: 'Global default',
           client: 'All clients',
           service: serviceLabel || formatServiceTypeLabel(serviceType),
           tier: formatServiceTypeLabel(tier),
-          price,
+          price: tierPricing[tier],
           notes: getPricingNotes(service),
         }));
 
       if (tierRows.length) return tierRows;
 
-      const directPrice = getPricingAmountValue(service);
+      const directPrice = firstFilledValue(tierPricing.rate, getPricingAmountValue(service));
       if (directPrice === '') return [];
 
       return [
@@ -744,7 +767,8 @@ const Settings = () => {
       ];
     });
 
-    const clientRows = pricingClientPrices.map((price, index) => {
+    const seenClientPriceKeys = new Set();
+    const clientRows = pricingClientPrices.flatMap((price, index) => {
       const clientId = String(getPricingClientId(price) || '').trim();
       const clientLabel =
         price?.clientName ||
@@ -761,13 +785,21 @@ const Settings = () => {
         clientId ||
         'Selected client';
       const serviceType = getPricingServiceValue(price);
+      const tier = getPricingTierValue(price) || 'default';
+      const rowKey = `${clientId || 'global'}:${getServiceKey(serviceType)}:${String(tier).toLowerCase()}`;
+
+      if (seenClientPriceKeys.has(rowKey)) {
+        return [];
+      }
+
+      seenClientPriceKeys.add(rowKey);
 
       return {
         key: price?.id || price?.uuid || `client-${clientId}-${serviceType}-${getPricingTierValue(price)}-${index}`,
         scope: 'Client special',
         client: clientLabel,
         service: formatServiceTypeLabel(serviceType),
-        tier: formatServiceTypeLabel(getPricingTierValue(price) || 'default'),
+        tier: formatServiceTypeLabel(tier),
         price: getPricingAmountValue(price),
         notes: getPricingNotes(price),
       };
@@ -1275,7 +1307,7 @@ const Settings = () => {
 
       const pricingPayload = {
         clientId: pricingForm.clientId.trim() || undefined,
-        serviceType: pricingForm.serviceType.trim(),
+        serviceType: normalizeServiceCode(pricingForm.serviceType.trim()),
         tier: pricingForm.tier,
         pricePerUnit: Number(pricingForm.pricePerUnit || 0),
         notes: pricingForm.notes.trim() || undefined,
@@ -2511,7 +2543,7 @@ const Settings = () => {
                       </div>
                       <select
                         value={pricingForm.serviceType}
-                        onChange={(e) => setPricingForm({ ...pricingForm, serviceType: e.target.value })}
+                        onChange={(e) => setPricingForm({ ...pricingForm, serviceType: normalizeServiceCode(e.target.value) })}
                         className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm focus:border-[#ff9900] focus:outline-none focus:ring-2 focus:ring-orange-100"
                         aria-label="Service Type"
                       >

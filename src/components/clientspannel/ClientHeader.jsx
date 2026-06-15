@@ -9,6 +9,7 @@ import {
 } from "../../utils/notifications";
 import { getSession } from "../../utils/auth";
 import { getClientIdFromSources, getClientTierFromSources } from "../../utils/clientTier";
+import { normalizeServiceList } from "../../utils/serviceCatalog";
 
 const API_BASE_URL = '';
 
@@ -26,7 +27,7 @@ const initialShipmentForm = {
   notes: "",
   expectedArrivalDate: "",
   itemsJson:
-    '[\n  {\n    "sku": "WGT-001",\n    "productName": "Widget A",\n    "expectedQty": 100,\n    "bundleSize": 1,\n    "fnskuLabel": "X001234567",\n    "services": ["FNSKU_LABEL", "POLY_BAG"]\n  },\n  {\n    "sku": "WGT-002",\n    "productName": "Widget B",\n    "expectedQty": 50,\n    "bundleSize": 1,\n    "fnskuLabel": "X002345678",\n    "services": ["FNSKU_LABEL", "BUBBLE_WRAP", "BUNDLING"]\n  }\n]',
+    '[\n  {\n    "sku": "WGT-001",\n    "productName": "Widget A",\n    "expectedQty": 100,\n    "bundleSize": 1,\n    "fnskuLabel": "X001234567",\n    "services": ["fnsku_label", "polybag"]\n  },\n  {\n    "sku": "WGT-002",\n    "productName": "Widget B",\n    "expectedQty": 50,\n    "bundleSize": 1,\n    "fnskuLabel": "X002345678",\n    "services": ["fnsku_label", "bubble_wrap", "bundling"]\n  }\n]',
 };
 
 const buildHeaders = (includeJson = false) => {
@@ -94,7 +95,10 @@ const parseShipmentItems = (itemsJson) => {
     throw new Error("Items must be a non-empty JSON array.");
   }
 
-  return parsedItems;
+  return parsedItems.map((item) => ({
+    ...item,
+    services: normalizeServiceList(item?.services || item?.services_selected || item?.serviceTypes || item?.service_types),
+  }));
 };
 
 const ClientHeader = ({ onMenuClick }) => {

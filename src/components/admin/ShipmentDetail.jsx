@@ -16,6 +16,13 @@ import {
   lineItemFileMatches as mappedFileMatchesLineItem,
   normalizeShipment as normalizeMappedShipment,
 } from '../../utils/shipmentMapper';
+import {
+  STANDARD_SERVICE_KEYS as STANDARD_CATALOG_SERVICE_KEYS,
+  getServiceDisplayName,
+  getServiceKey,
+  isBundlingService,
+  normalizeServiceCode,
+} from '../../utils/serviceCatalog';
 
 const API_BASE_URL = '';
 const BUNDLE_SIZE_NOTE_PREFIX = 'Bundle Sizes:';
@@ -1917,12 +1924,7 @@ const getBoxSubtitle = (box) => {
 
 const statusSteps = ['draft', 'submitted', 'pending_arrival', 'received', 'in_progress', 'prepped', 'dispatched', 'completed'];
 
-const formatServiceLabel = (value = '') =>
-  String(value)
-  .toLowerCase()
-  .split('_')
-  .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-  .join(' ');
+const formatServiceLabel = getServiceDisplayName;
 
 const extractSubShipments = (payload) =>
   extractList(payload, ['subShipments', 'sub_shipments', 'subshipments']);
@@ -1952,6 +1954,48 @@ const getSubShipmentReference = (subShipment = {}) =>
 
 const getSubShipmentStatus = (subShipment = {}) =>
   String(firstPresent(subShipment?.status, 'draft')).trim().toLowerCase();
+
+const isDispatchInvoiceEligibleStatus = (status = '') =>
+  ['dispatched', 'completed', 'complete'].includes(String(status || '').trim().toLowerCase());
+
+const getInvoiceId = (invoice = {}) =>
+  firstPresent(invoice?.id, invoice?.uuid, invoice?.invoiceId, invoice?.invoice_id);
+
+const getInvoiceReference = (invoice = {}) =>
+  firstPresent(invoice?.invoiceNumber, invoice?.invoice_number, invoice?.number, invoice?.reference, getInvoiceId(invoice), 'Invoice');
+
+const getInvoiceStatusLabel = (invoice = {}) =>
+  formatServiceLabel(firstPresent(invoice?.status, 'draft'));
+
+const getInvoiceTotal = (invoice = {}) =>
+  firstPresent(invoice?.total, invoice?.totalAmount, invoice?.total_amount, invoice?.grandTotal, invoice?.grand_total, invoice?.amountDue, invoice?.amount_due, '');
+
+const getInvoiceDate = (invoice = {}) =>
+  firstPresent(invoice?.invoiceDate, invoice?.invoice_date, invoice?.date, invoice?.createdAt, invoice?.created_at);
+
+const getInvoiceType = (invoice = {}) =>
+  String(firstPresent(invoice?.invoiceType, invoice?.invoice_type, invoice?.type, '')).trim().toLowerCase();
+
+const findInvoiceByType = (owner = {}, type = '') => {
+  const directInvoice =
+    owner?.invoice ||
+    owner?.shipmentInvoice ||
+    owner?.shipment_invoice ||
+    owner?.subShipmentInvoice ||
+    owner?.sub_shipment_invoice ||
+    owner?.draftInvoice ||
+    owner?.draft_invoice;
+  if (directInvoice && typeof directInvoice === 'object') return directInvoice;
+
+  const invoices = extractList(owner, ['invoices', 'invoiceRows', 'invoice_rows']);
+  return invoices.find((invoice) => {
+    const invoiceType = getInvoiceType(invoice);
+    return !type || invoiceType === type || (!invoiceType && type === 'shipment');
+  }) || null;
+};
+
+const extractGeneratedInvoice = (payload = {}) =>
+  payload?.invoice || payload?.data?.invoice || payload?.data?.row || payload?.data?.record || payload?.data || payload;
 
 const getSubShipmentStatusLabel = (status = '') => {
   const normalizedStatus = String(status || '').trim().toLowerCase();
@@ -2578,15 +2622,10 @@ const isOtherServiceTask = (service = {}) => {
   return rawType === 'other' || rawType === 'other_service' || label === 'other' || label.includes('other service');
 };
 
-const normalizeServiceKey = (value = '') =>
-  String(formatServiceLabel(value || ''))
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '');
-
-const BUNDLING_SERVICE_KEY = normalizeServiceKey('Bundling');
+const normalizeServiceKey = getServiceKey;
 
 const isBundlingServiceValue = (value = '') =>
-  normalizeServiceKey(typeof value === 'object' ? getServiceTaskLabel(value) : value) === BUNDLING_SERVICE_KEY;
+  isBundlingService(typeof value === 'object' ? getServiceTaskLabel(value) : value);
 
 const filterBundlingServiceLabels = (services = []) =>
   services.filter((service) => !isBundlingServiceValue(service));
@@ -2648,24 +2687,7 @@ const hasSelectedBundlingService = (item = {}) =>
 const shouldDisplayServiceTaskForItem = (service, item = {}) =>
   !isBundlingServiceValue(service) || hasSelectedBundlingService(item);
 
-const STANDARD_SERVICE_KEYS = new Set(
-  [
-    'FNSKU Labeling',
-    'FNSKU_LABEL',
-    'Bundling',
-    'BUNDLING',
-    'Poly Bag',
-    'POLY_BAG',
-    'Bubble Wrap',
-    'BUBBLE_WRAP',
-    'Leaflet Insertion',
-    'LEAFLET_INSERTION',
-    'Oversize Surcharge',
-    'OVERSIZE_SURCHARGE',
-    'Return Processing',
-    'RETURN_PROCESSING',
-  ].map(normalizeServiceKey)
-);
+const STANDARD_SERVICE_KEYS = STANDARD_CATALOG_SERVICE_KEYS;
 
 const isCustomServiceTask = (service = {}) => {
   const label = getServiceTaskLabel(service);
@@ -3841,7 +3863,7 @@ const ShipmentDetail = () => {
   const [staffId, setStaffId] = useState('');
   const [staffMembers, setStaffMembers] = useState([]);
   const [isStaffLoading, setIsStaffLoading] = useState(false);
-  const [bulkServiceType, setBulkServiceType] = useState('FNSKU_LABEL');
+  const [bulkServiceType, setBulkServiceType] = useState('fnsku_label');
   const [bulkStatus, setBulkStatus] = useState('IN_PROGRESS');
   const [customServiceLineItemId, setCustomServiceLineItemId] = useState('');
   const [customServiceName, setCustomServiceName] = useState('');
@@ -3892,6 +3914,7 @@ const ShipmentDetail = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isCreatingBox, setIsCreatingBox] = useState(false);
   const [updatingTaskId, setUpdatingTaskId] = useState('');
+  const [invoiceActionKey, setInvoiceActionKey] = useState('');
 
   useEffect(() => {
     if (message) showToast('success', message);
@@ -4733,7 +4756,7 @@ const ShipmentDetail = () => {
       const response = await fetch(`${API_BASE_URL}/api/shipments/${id}/services/bulk`, {
         method: 'POST',
         headers: buildHeaders(true),
-        body: JSON.stringify({ serviceType: bulkServiceType, status: bulkStatus }),
+        body: JSON.stringify({ serviceType: normalizeServiceCode(bulkServiceType), status: bulkStatus }),
       });
       await parseResponse(response);
       setMessage('Bulk service status updated.');
@@ -4841,6 +4864,57 @@ const ShipmentDetail = () => {
       setError(requestError.message);
     } finally {
       setIsResolvingDiscrepancy(false);
+    }
+  };
+
+  const handleGenerateShipmentInvoice = async () => {
+    try {
+      setError('');
+      setMessage('');
+      setInvoiceActionKey(`shipment:${id}`);
+      const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(id)}/invoice`, {
+        method: 'POST',
+        headers: buildHeaders(true),
+      });
+      const payload = await parseResponse(response);
+      const invoice = extractGeneratedInvoice(payload);
+      if (invoice && typeof invoice === 'object') {
+        setShipment((currentShipment) => ({ ...(currentShipment || {}), invoice }));
+      }
+      setMessage('Shipment invoice ready.');
+      await loadShipmentData({ showLoader: false });
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setInvoiceActionKey('');
+    }
+  };
+
+  const handleGenerateSubShipmentInvoice = async (subShipmentId = '') => {
+    try {
+      setError('');
+      setMessage('');
+      if (!subShipmentId) throw new Error('Sub-shipment identifier is missing.');
+      setInvoiceActionKey(`sub-shipment:${subShipmentId}`);
+      const response = await fetch(`${API_BASE_URL}/api/sub-shipments/${encodeURIComponent(subShipmentId)}/invoice`, {
+        method: 'POST',
+        headers: buildHeaders(true),
+      });
+      const payload = await parseResponse(response);
+      const invoice = extractGeneratedInvoice(payload);
+      if (invoice && typeof invoice === 'object') {
+        setSubShipments((currentSubShipments) =>
+          currentSubShipments.map((subShipment) =>
+            getSubShipmentId(subShipment) === subShipmentId ? { ...subShipment, invoice } : subShipment
+          )
+        );
+      }
+      setMessage('Sub-shipment invoice ready.');
+      await loadShipmentData({ showLoader: false });
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setInvoiceActionKey('');
     }
   };
 
@@ -5519,6 +5593,8 @@ const ShipmentDetail = () => {
   const canCreateSubShipment =
     ['admin', 'staff'].includes(sessionRole) &&
     (SUB_SHIPMENT_CREATION_STATUSES.has(currentStatus) || hasPreparedSubShipmentAvailability);
+  const shipmentInvoice = findInvoiceByType(shipment, 'shipment');
+  const canShowShipmentInvoiceSection = isDispatchInvoiceEligibleStatus(currentStatus);
   const nextStatusIndex = currentStepIndex >= 0 ? currentStepIndex + 1 : 1;
   const nextStatus = statusSteps[nextStatusIndex] || '';
   const primaryStatusAction = (() => {
@@ -5633,6 +5709,45 @@ const ShipmentDetail = () => {
           </div>
         </div>
 
+        {canShowShipmentInvoiceSection ? (
+          <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-gray-500">Invoice</h3>
+                {shipmentInvoice ? (
+                  <p className="mt-2 text-sm text-gray-600">
+                    {getInvoiceReference(shipmentInvoice)} - {getInvoiceStatusLabel(shipmentInvoice)}
+                    {getInvoiceTotal(shipmentInvoice) !== '' ? ` - ${getInvoiceTotal(shipmentInvoice)}` : ''}
+                  </p>
+                ) : (
+                  <p className="mt-2 text-sm text-gray-600">No shipment invoice is attached yet.</p>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {shipmentInvoice ? (
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/billing?invoice=${encodeURIComponent(getInvoiceId(shipmentInvoice) || getInvoiceReference(shipmentInvoice))}`)}
+                    className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                  >
+                    View Invoice
+                  </button>
+                ) : null}
+                {!shipmentInvoice ? (
+                  <button
+                    type="button"
+                    onClick={handleGenerateShipmentInvoice}
+                    disabled={invoiceActionKey === `shipment:${id}`}
+                    className="rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {invoiceActionKey === `shipment:${id}` ? 'Generating...' : 'Generate Invoice'}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {isLoading ? (
           <div className="rounded-xl border border-gray-200 bg-white p-10 text-center text-sm text-gray-500">
             <LoadingState label="Loading shipment..." size="lg" />
@@ -5746,6 +5861,8 @@ const ShipmentDetail = () => {
                       const canDispatchBoxes = status !== 'cancelled';
                       const canAddSubShipmentBox =
                         Boolean(subShipmentId) && status !== 'cancelled' && getSubShipmentBoxableQuantity(subShipment, boxData) > 0;
+                      const subShipmentInvoice = findInvoiceByType(subShipment, 'sub_shipment');
+                      const canShowSubShipmentInvoiceSection = isDispatchInvoiceEligibleStatus(status);
 
                       return (
                         <div key={subShipmentId || subShipmentIndex} className="overflow-hidden rounded-lg border border-[#dbe5f3] bg-[#f8fbff]">
@@ -5782,8 +5899,39 @@ const ShipmentDetail = () => {
                                 >
                                   View / Manage Boxes
                                 </button>
+                                {canShowSubShipmentInvoiceSection ? (
+                                  subShipmentInvoice ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => navigate(`/billing?invoice=${encodeURIComponent(getInvoiceId(subShipmentInvoice) || getInvoiceReference(subShipmentInvoice))}`)}
+                                      className="rounded-lg border border-[#d6dfef] bg-white px-3 py-2 text-xs font-semibold text-[#5f6d85] hover:bg-[#f8fafc]"
+                                    >
+                                      View Invoice
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleGenerateSubShipmentInvoice(subShipmentId)}
+                                      disabled={!subShipmentId || invoiceActionKey === `sub-shipment:${subShipmentId}`}
+                                      className="rounded-lg bg-[#ff6900] px-3 py-2 text-xs font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-60"
+                                    >
+                                      {invoiceActionKey === `sub-shipment:${subShipmentId}` ? 'Generating...' : 'Generate Invoice'}
+                                    </button>
+                                  )
+                                ) : null}
                               </div>
                             </div>
+                            {canShowSubShipmentInvoiceSection ? (
+                              <div className="rounded-md border border-[#e2e8f0] bg-white px-3 py-2 text-xs text-[#60708b]">
+                                {subShipmentInvoice ? (
+                                  <>
+                                    Invoice {getInvoiceReference(subShipmentInvoice)} - {getInvoiceStatusLabel(subShipmentInvoice)}
+                                  </>
+                                ) : (
+                                  'No sub-shipment invoice is attached yet.'
+                                )}
+                              </div>
+                            ) : null}
                           </div>
 
                           <div className="space-y-4 p-4">
@@ -6310,7 +6458,7 @@ const ShipmentDetail = () => {
                 ) : null}
                 {/* <pre className="overflow-auto rounded-lg bg-gray-50 p-4 text-xs">{JSON.stringify(services, null, 2)}</pre> */}
                 <div className="mt-4 space-y-3">
-                  <input type="text" placeholder="taskId e.g. LINE_ITEM_UUID:FNSKU_LABEL" value={taskId} onChange={(e) => setTaskId(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
+                  <input type="text" placeholder="taskId e.g. LINE_ITEM_UUID:fnsku_label" value={taskId} onChange={(e) => setTaskId(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
                   <input type="text" placeholder="Status" value={taskStatus} onChange={(e) => setTaskStatus(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
                   <input type="number" placeholder="Units Done" value={taskUnitsDone} onChange={(e) => setTaskUnitsDone(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
                   <input type="text" placeholder="Notes" value={taskNotes} onChange={(e) => setTaskNotes(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
@@ -6323,7 +6471,7 @@ const ShipmentDetail = () => {
               <div className="rounded-xl border border-gray-200 bg-white p-6">
                 <h3 className="mb-4 text-sm font-semibold uppercase tracking-wider text-gray-500">Bulk Service Status</h3>
                 <div className="space-y-3">
-                  <input type="text" placeholder="Service Type e.g. FNSKU_LABEL" value={bulkServiceType} onChange={(e) => setBulkServiceType(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
+                  <input type="text" placeholder="Service Type e.g. fnsku_label" value={bulkServiceType} onChange={(e) => setBulkServiceType(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
                   <input type="text" placeholder="Status e.g. IN_PROGRESS" value={bulkStatus} onChange={(e) => setBulkStatus(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
                   <button onClick={handleBulkServiceUpdate} className="rounded-lg bg-[#ff6900] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#e55d00]">Update All</button>
                 </div>

@@ -4,6 +4,7 @@ import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import { Eye, EyeOff, Shield, X } from 'lucide-react';
 import { getSession } from '../../utils/auth';
+import { getServiceDisplayName, getServiceKey, normalizeServiceCode } from '../../utils/serviceCatalog';
 
 const API_BASE_URL = '';
 
@@ -60,7 +61,7 @@ const formatServiceType = (value = '') => {
     return 'Service';
   }
 
-  return toTitleCase(String(value).replaceAll('-', ' '));
+  return getServiceDisplayName(value);
 };
 
 const formatPricePerUnit = (value) => {
@@ -171,12 +172,38 @@ const extractPricingCatalog = (payload) => {
   const source =
     payload?.service_catalog ||
     payload?.serviceCatalog ||
+    payload?.services ||
+    payload?.catalog ||
+    payload?.rows ||
     payload?.data?.service_catalog ||
     payload?.data?.serviceCatalog ||
+    payload?.data?.services ||
+    payload?.data?.catalog ||
+    payload?.data?.rows ||
     payload?.data ||
     payload;
 
-  return Array.isArray(source) ? source : [];
+  if (Array.isArray(source)) return source;
+  if (!source || typeof source !== 'object') return [];
+
+  return Object.entries(source).map(([key, value]) =>
+    value && typeof value === 'object'
+      ? {
+          ...value,
+          serviceType: normalizeServiceCode(
+            value?.serviceType ||
+              value?.service_type ||
+              value?.type ||
+              value?.code ||
+              value?.value ||
+              key
+          ),
+        }
+      : {
+          serviceType: normalizeServiceCode(key),
+          label: typeof value === 'string' ? value : formatServiceType(key),
+        }
+  );
 };
 
 const findMatchingPrice = (collection, matcher) => {
@@ -187,11 +214,42 @@ const findMatchingPrice = (collection, matcher) => {
   return collection.find(matcher) || null;
 };
 
+const parseJsonValue = (value, fallback) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (Array.isArray(value) || typeof value === 'object') return value;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+
+const toObjectValue = (value) => {
+  const parsed = parseJsonValue(value, {});
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+};
+
 const resolvePricingRow = (entry, clientId, clientTier) => {
   const tierKey = String(clientTier || '').trim().toLowerCase();
   const clientPrices =
     entry?.clientPrices || entry?.client_prices || entry?.overrides || entry?.priceOverrides || [];
-  const tierPrices = entry?.tierPrices || entry?.tier_prices || entry?.tiers || {};
+  const tierPrices = toObjectValue(
+    entry?.default_tier_pricing ||
+    entry?.defaultTierPricing ||
+    entry?.tierPrices ||
+    entry?.tier_prices ||
+    entry?.tiers ||
+    {}
+  );
+  const serviceCode = normalizeServiceCode(
+    entry?.serviceType ||
+      entry?.service_type ||
+      entry?.service ||
+      entry?.code ||
+      entry?.name ||
+      entry?.label
+  );
 
   const matchedClientPrice = findMatchingPrice(
     clientPrices,
@@ -217,7 +275,9 @@ const resolvePricingRow = (entry, clientId, clientTier) => {
     resolvedSource?.price_per_unit ??
     resolvedSource?.unitPrice ??
     resolvedSource?.unit_price ??
+    resolvedSource?.rate ??
     resolvedSource?.price ??
+    tierPrices?.rate ??
     entry?.pricePerUnit ??
     entry?.price_per_unit ??
     entry?.unitPrice ??
@@ -225,14 +285,8 @@ const resolvePricingRow = (entry, clientId, clientTier) => {
     entry?.price;
 
   return {
-    service: formatServiceType(
-      entry?.serviceType ||
-        entry?.service_type ||
-        entry?.service ||
-        entry?.code ||
-        entry?.name ||
-        entry?.label
-    ),
+    serviceKey: getServiceKey(serviceCode),
+    service: formatServiceType(serviceCode),
     tier:
       toTitleCase(
         matchedClientPrice?.tier ||
@@ -258,10 +312,18 @@ const resolvePricingRow = (entry, clientId, clientTier) => {
   };
 };
 
-const normalizePricingRows = (payload, clientId, clientTier) =>
-  extractPricingCatalog(payload)
+const normalizePricingRows = (payload, clientId, clientTier) => {
+  const seenServices = new Set();
+
+  return extractPricingCatalog(payload)
     .map((entry) => resolvePricingRow(entry, clientId, clientTier))
-    .filter((row) => row.service && row.pricePerUnit !== '-');
+    .filter((row) => {
+      if (!row.service || row.pricePerUnit === '-') return false;
+      if (seenServices.has(row.serviceKey)) return false;
+      seenServices.add(row.serviceKey);
+      return true;
+    });
+};
 
 const Account = () => {
   const [session] = useState(() => getSession());

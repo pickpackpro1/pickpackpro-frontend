@@ -19,6 +19,16 @@ import {
 import {
   normalizeSkuProductOptions,
 } from '../../utils/productSkuOptions';
+import {
+  SERVICE_SELECT_OPTIONS,
+  STANDARD_SERVICE_KEYS as STANDARD_CATALOG_SERVICE_KEYS,
+  getServiceDisplayName,
+  getServiceKey,
+  isBundlingService,
+  isOtherServiceCode,
+  normalizeServiceCode,
+  normalizeServiceList,
+} from '../../utils/serviceCatalog';
 
 const DRAFT_CACHE_KEY = 'pickpackpro-shipment-drafts';
 const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
@@ -101,62 +111,12 @@ const toastStyles = {
   error: 'border-red-200 bg-red-50 text-red-700',
 };
 
-const SERVICE_OPTIONS = [
-  { label: 'FNSKU Labeling', value: 'FNSKU_LABEL' },
-  { label: 'Bundling', value: 'BUNDLING' },
-  { label: 'Poly Bag', value: 'POLY_BAG' },
-  { label: 'Bubble Wrap', value: 'BUBBLE_WRAP' },
-  { label: 'Leaflet Insertion', value: 'LEAFLET_INSERTION' },
-  { label: 'Oversize Surcharge', value: 'OVERSIZE_SURCHARGE' },
-  { label: 'Return Processing', value: 'RETURN_PROCESSING' },
-  { label: 'Other', value: 'OTHER' },
-];
-
-const SERVICE_VALUE_BY_LABEL = SERVICE_OPTIONS.reduce((acc, option) => {
-  acc[option.label.toLowerCase()] = option.value;
-  acc[option.value.toLowerCase()] = option.value;
-  return acc;
-}, {});
-
-const SERVICE_LABEL_BY_VALUE = SERVICE_OPTIONS.reduce((acc, option) => {
-  acc[option.value] = option.label;
-  return acc;
-}, {});
-
-const SELECTABLE_SERVICE_OPTIONS = SERVICE_OPTIONS.filter((option) => option.value !== 'BUNDLING');
-
-const isOtherServiceValue = (value = '') => {
-  const normalized = String(value || '').trim().toLowerCase();
-  return normalized === 'other';
-};
-
-const formatServiceLabel = (value = '') => {
-  const rawValue = String(value || '').trim();
-  if (!rawValue) return '';
-  const normalized = SERVICE_VALUE_BY_LABEL[rawValue.toLowerCase()] || rawValue.toUpperCase().replaceAll(' ', '_');
-
-  if (normalized === 'FNSKU_LABELING') return 'FNSKU Labeling';
-  if (SERVICE_LABEL_BY_VALUE[normalized]) return SERVICE_LABEL_BY_VALUE[normalized];
-
-  return rawValue
-    .replaceAll('_', ' ')
-    .toLowerCase()
-    .split(' ')
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
-};
-
-const normalizeServiceKey = (value = '') =>
-  String(formatServiceLabel(value || ''))
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '');
-
-const STANDARD_SERVICE_KEYS = new Set(
-  SERVICE_OPTIONS
-    .filter((option) => option.value !== 'OTHER')
-    .flatMap((option) => [option.label, option.value])
-    .map(normalizeServiceKey)
-);
+const SERVICE_OPTIONS = SERVICE_SELECT_OPTIONS;
+const SELECTABLE_SERVICE_OPTIONS = SERVICE_OPTIONS.filter((option) => !isBundlingService(option.value));
+const isOtherServiceValue = isOtherServiceCode;
+const formatServiceLabel = getServiceDisplayName;
+const normalizeServiceKey = getServiceKey;
+const STANDARD_SERVICE_KEYS = STANDARD_CATALOG_SERVICE_KEYS;
 
 const getClientIdFromSession = () => {
   const session = getSession();
@@ -257,15 +217,10 @@ const parseResponse = async (response) => {
   return payload;
 };
 
-const normalizeServiceType = (value) => {
-  const rawValue = String(value || '').trim();
-  if (!rawValue) return '';
-  const normalized = SERVICE_VALUE_BY_LABEL[rawValue.toLowerCase()] || rawValue.toUpperCase().replaceAll(' ', '_');
-  return normalized === 'FNSKU_LABELING' ? 'FNSKU_LABEL' : normalized;
-};
+const normalizeServiceType = normalizeServiceCode;
 
 const isBundlingServiceValue = (value = '') =>
-  normalizeServiceType(String(value || '').split('/')[0]) === 'BUNDLING';
+  isBundlingService(String(value || '').split('/')[0]);
 
 const extractShipments = (payload) => normalizeMappedShipmentList(payload);
 
@@ -3923,13 +3878,13 @@ const parseServiceList = (servicesValue = '', serviceType = '', serviceQty = '')
     .map((service) => service.trim())
     .filter(Boolean);
 
-  if (services.length) return services;
+  if (services.length) return normalizeServiceList(services);
 
   const type = String(serviceType || '').trim();
   const qty = String(serviceQty || '').trim();
   if (!type) return [];
 
-  return [qty ? `${type} /${qty}qty` : type];
+  return normalizeServiceList(qty ? `${type} /${qty}qty` : type);
 };
 
 const mapCsvRowsToProductItems = (rows) => {
@@ -4555,13 +4510,13 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       return;
     }
 
-    const serviceLabel = formatServiceLabel(serviceValue);
-    if (!serviceLabel) return;
+    const serviceCode = normalizeServiceType(serviceValue);
+    if (!serviceCode) return;
 
     setProductItems((current) =>
       current.map((item, itemIndex) => {
         if (itemIndex !== index) return item;
-        const nextServices = [...new Set([...(item.services || []).map(formatServiceLabel).filter(Boolean), serviceLabel])];
+        const nextServices = normalizeServiceList(item.services, serviceCode);
         return { ...item, services: nextServices, serviceType: '', serviceQty: '', customServiceName: '' };
       })
     );
@@ -4570,8 +4525,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
   const addCustomServiceToItem = (index) => {
     const customService = productItems[index]?.customServiceName?.trim();
-    const serviceLabel = formatServiceLabel(customService);
-    if (!serviceLabel) {
+    const serviceCode = normalizeServiceType(customService);
+    if (!serviceCode) {
       setError('Please type a custom service name.');
       return;
     }
@@ -4579,7 +4534,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     setProductItems((current) =>
       current.map((item, itemIndex) => {
         if (itemIndex !== index) return item;
-        const nextServices = [...new Set([...(item.services || []).map(formatServiceLabel).filter(Boolean), serviceLabel])];
+        const nextServices = normalizeServiceList(item.services, serviceCode);
         return { ...item, services: nextServices, serviceType: '', serviceQty: '', customServiceName: '' };
       })
     );
@@ -5159,11 +5114,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         .map((item, index) => {
           const bundleSizeValue = Number(item.bundleSize || 0);
           const needsBundling = Boolean(item.needsBundling);
-          const services = [
-            ...(item.services || []),
-          ]
-            .map((service) => normalizeServiceType(String(service).split('/')[0]))
-            .filter(Boolean);
+          const services = normalizeServiceList(item.services);
 
           return mapShipmentItemPayload({
             ...item,
@@ -5171,7 +5122,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
             displayOrder: index,
             needsBundling,
             ...(needsBundling ? { bundleSize: bundleSizeValue } : {}),
-            services: [...new Set(services)],
+            services,
           }, index);
         })
         .filter((item) => item.sku && item.productName && item.expectedQty > 0);
@@ -7971,7 +7922,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                                 .map((service, serviceIndex) => ({ service, serviceIndex }))
                                 .map(({ service, serviceIndex }) => (
                                   <div key={`${service}-${serviceIndex}`} className="flex items-center gap-3 rounded-lg border border-[#e2e8f0] bg-white px-4 py-3 text-sm text-[#132347]">
-                                    <span>{service}</span>
+                                    <span>{formatServiceLabel(service)}</span>
                                     <button
                                       type="button"
                                       onClick={() => handleRemoveService(index, serviceIndex)}

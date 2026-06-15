@@ -5,6 +5,7 @@ import FullPageLoader from '../common/FullPageLoader';
 import { AlertCircle, Crown, Download, FileText, RefreshCw, TrendingUp, X } from 'lucide-react';
 import { getSession } from '../../utils/auth';
 import { getClientIdFromSources, getClientTierFromSources } from '../../utils/clientTier';
+import { getServiceDisplayName, getServiceKey, isKnownServiceCode } from '../../utils/serviceCatalog';
 
 const API_BASE_URL = '';
 const BACKEND_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app').replace(/\/+$/, '');
@@ -78,14 +79,37 @@ const extractInvoices = (payload) => {
   return [];
 };
 
-const extractInvoiceDetail = (payload) =>
-  payload?.invoice ||
-  payload?.data?.invoice ||
-  payload?.data?.row ||
-  payload?.data?.record ||
-  payload?.data ||
-  payload?.record ||
-  payload;
+const extractDetailLineItems = (source = {}) =>
+  source?.invoice_line_items ||
+  source?.invoiceLineItems ||
+  source?.line_items ||
+  source?.lineItems ||
+  source?.items ||
+  [];
+
+const extractInvoiceDetail = (payload) => {
+  const invoice =
+    payload?.invoice ||
+    payload?.data?.invoice ||
+    payload?.data?.row ||
+    payload?.data?.record ||
+    payload?.data ||
+    payload?.record ||
+    payload;
+
+  if (!invoice || typeof invoice !== 'object') return invoice;
+
+  const clients = invoice?.clients || invoice?.client || payload?.clients || payload?.data?.clients || payload?.data?.client || null;
+  const topLevelLineItems = extractDetailLineItems(payload).length
+    ? extractDetailLineItems(payload)
+    : extractDetailLineItems(payload?.data);
+
+  return {
+    ...invoice,
+    clients,
+    invoice_line_items: extractDetailLineItems(invoice).length ? extractDetailLineItems(invoice) : topLevelLineItems,
+  };
+};
 
 const extractInvoiceLineItems = (invoice = {}) =>
   invoice?.lineItems ||
@@ -118,22 +142,27 @@ const getInvoiceLineItemQuantity = (item = {}) => {
   return Number.isFinite(quantity) ? quantity : 0;
 };
 
-const getInvoiceUnits = (invoice = {}, lineItems = extractInvoiceLineItems(invoice)) => {
-  const directUnits = Number(
-    firstPresent(
-      invoice?.units,
-      invoice?.totalUnits,
-      invoice?.total_units,
-      invoice?.unitCount,
-      invoice?.unit_count,
-      invoice?.qty,
-      0
-    )
+const getInvoiceLineDescription = (item = {}, index = 0) => {
+  const serviceCode = firstPresent(
+    item?.serviceType,
+    item?.service_type,
+    item?.serviceCode,
+    item?.service_code,
+    item?.code,
+    item?.type
   );
+  const description = firstPresent(item?.description, item?.name, item?.label);
+  const serviceLabel = getServiceDisplayName(serviceCode || description);
 
-  if (Number.isFinite(directUnits) && directUnits > 0) return directUnits;
+  if (serviceCode && (!description || getServiceKey(description) === getServiceKey(serviceCode))) {
+    return serviceLabel || `Line ${index + 1}`;
+  }
 
-  return lineItems.reduce((sum, item) => sum + getInvoiceLineItemQuantity(item), 0);
+  if (!serviceCode && description && isKnownServiceCode(description)) {
+    return serviceLabel;
+  }
+
+  return description || serviceLabel || `Line ${index + 1}`;
 };
 
 const resolveInvoiceFileUrl = (url = '') => {
@@ -188,6 +217,46 @@ const formatDate = (value) => {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString('en-GB');
 };
 
+const getInvoiceStatusValue = (invoice = {}) =>
+  String(invoice?.status || invoice?.paymentStatus || invoice?.payment_status || '').trim().toLowerCase();
+
+const CLIENT_VISIBLE_INVOICE_STATUSES = new Set(['sent', 'paid', 'overdue', 'unpaid', 'partially_paid']);
+
+const isClientVisibleInvoice = (invoice = {}) =>
+  CLIENT_VISIBLE_INVOICE_STATUSES.has(getInvoiceStatusValue(invoice));
+
+const formatStatusLabel = (status = '') =>
+  String(status || '')
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || 'Pending';
+
+const getInvoiceTypeValue = (invoice = {}) =>
+  String(invoice?.invoiceType || invoice?.invoice_type || invoice?.type || '').trim().toLowerCase();
+
+const getInvoiceTypeLabel = (invoiceType = '') => {
+  const type = String(invoiceType || '').trim().toLowerCase();
+  if (type === 'shipment') return 'Shipment Invoice';
+  if (type === 'sub_shipment' || type === 'sub-shipment') return 'Sub-shipment Invoice';
+  if (type === 'ad_hoc' || type === 'ad-hoc') return 'Ad-hoc Invoice';
+  if (type === 'monthly') return 'Legacy Invoice';
+  return 'Invoice';
+};
+
+const getInvoiceShipmentId = (invoice = {}) =>
+  firstPresent(invoice?.shipmentId, invoice?.shipment_id, invoice?.raw?.shipmentId, invoice?.raw?.shipment_id);
+
+const getInvoiceSubShipmentId = (invoice = {}) =>
+  firstPresent(invoice?.subShipmentId, invoice?.sub_shipment_id, invoice?.raw?.subShipmentId, invoice?.raw?.sub_shipment_id);
+
+const getInvoiceSourceDisplay = (invoice = {}) => {
+  const invoiceType = getInvoiceTypeValue(invoice);
+  if (invoiceType === 'shipment') return firstPresent(getInvoiceShipmentId(invoice), '-');
+  if (invoiceType === 'sub_shipment' || invoiceType === 'sub-shipment') return firstPresent(getInvoiceSubShipmentId(invoice), '-');
+  return '--';
+};
+
 const getTierTextClass = (tier) => {
   const normalizedTier = String(tier || '').toLowerCase();
 
@@ -198,26 +267,9 @@ const getTierTextClass = (tier) => {
   return 'text-[#132347]';
 };
 
-const buildPeriodLabel = (invoice) => {
-  const directLabel =
-    invoice?.periodLabel ||
-    invoice?.period_label ||
-    invoice?.billingPeriod ||
-    invoice?.billing_period ||
-    invoice?.period;
-
-  if (directLabel) return directLabel;
-
-  const periodStart = invoice?.periodStart || invoice?.period_start || invoice?.billingPeriodStart || invoice?.billing_period_start;
-  const periodEnd = invoice?.periodEnd || invoice?.period_end || invoice?.billingPeriodEnd || invoice?.billing_period_end;
-
-  if (periodStart || periodEnd) return `${formatDate(periodStart)} - ${formatDate(periodEnd)}`;
-
-  return '--';
-};
-
 const normalizeInvoice = (invoice, index = 0) => {
   const invoiceId = firstPresent(invoice?.id, invoice?.uuid, invoice?.invoiceId, invoice?.invoice_id, invoice?.reference, invoice?.invoice);
+  const invoiceType = getInvoiceTypeValue(invoice);
   const invoiceRef =
     invoice?.reference ||
     invoice?.invoice ||
@@ -233,15 +285,19 @@ const normalizeInvoice = (invoice, index = 0) => {
   return {
     id: invoiceId || `invoice-${index}`,
     invoice: invoiceRef,
-    period: buildPeriodLabel(invoice),
-    units: getInvoiceUnits(invoice, lineItems),
+    invoiceType,
+    invoiceTypeLabel: getInvoiceTypeLabel(invoiceType),
+    source: getInvoiceSourceDisplay(invoice),
+    shipmentId: getInvoiceShipmentId(invoice),
+    subShipmentId: getInvoiceSubShipmentId(invoice),
     subtotal: Number(invoice?.subtotal || invoice?.subTotal || invoice?.sub_total || invoice?.netTotal || invoice?.net_total || 0),
     vat: Number(invoice?.vat || invoice?.vatAmount || invoice?.vat_amount || invoice?.tax || invoice?.taxAmount || invoice?.tax_amount || 0),
     total: Number(invoice?.total || invoice?.grandTotal || invoice?.grand_total || invoice?.amount || 0),
     due: invoice?.dueDate || invoice?.due_date || invoice?.dueAt || invoice?.due_at || '',
     date: invoice?.invoiceDate || invoice?.invoice_date || invoice?.date || invoice?.createdAt || invoice?.created_at || '',
-    status: invoice?.status || invoice?.paymentStatus || invoice?.payment_status || 'Pending',
-    client: invoice?.client?.companyName || invoice?.client?.company_name || invoice?.clientName || invoice?.client_name || invoice?.client || '',
+    status: formatStatusLabel(invoice?.status || invoice?.paymentStatus || invoice?.payment_status || 'Pending'),
+    statusValue: getInvoiceStatusValue(invoice),
+    client: invoice?.clients?.companyName || invoice?.clients?.company_name || invoice?.client?.companyName || invoice?.client?.company_name || invoice?.clientName || invoice?.client_name || invoice?.client || '',
     lineItems,
     pdfUrl: invoice?.pdfUrl || invoice?.pdf_url || invoice?.downloadUrl || invoice?.download_url || invoice?.fileUrl || invoice?.file_url || '',
     raw: invoice,
@@ -428,7 +484,11 @@ const InvoicesClient = () => {
         cache: 'no-store',
       });
       const payload = await parseResponse(response);
-      setInvoices(extractInvoices(payload).map((invoice, index) => normalizeInvoice(invoice, index)));
+      setInvoices(
+        extractInvoices(payload)
+          .filter(isClientVisibleInvoice)
+          .map((invoice, index) => normalizeInvoice(invoice, index))
+      );
     } catch (requestError) {
       setError(requestError.message);
       setInvoices([]);
@@ -475,17 +535,17 @@ const InvoicesClient = () => {
   }, []);
 
   const stats = useMemo(() => {
-    const outstandingInvoices = invoices.filter((invoice) => String(invoice.status).toLowerCase() !== 'paid');
+    const outstandingInvoices = invoices.filter((invoice) => invoice.statusValue !== 'paid');
     const outstanding = outstandingInvoices.reduce((sum, invoice) => sum + invoice.total, 0);
     const paidToDate = invoices
-      .filter((invoice) => String(invoice.status).toLowerCase() === 'paid')
+      .filter((invoice) => invoice.statusValue === 'paid')
       .reduce((sum, invoice) => sum + invoice.total, 0);
-    const overdue = outstandingInvoices.filter((invoice) => String(invoice.status).toLowerCase() === 'overdue').length;
+    const overdue = outstandingInvoices.filter((invoice) => invoice.statusValue === 'overdue').length;
     return { outstanding, paidToDate, overdue };
   }, [invoices]);
 
   const payableInvoice = useMemo(
-    () => invoices.find((invoice) => String(invoice.status).toLowerCase() !== 'paid' && invoice.total > 0),
+    () => invoices.find((invoice) => invoice.statusValue !== 'paid' && invoice.total > 0),
     [invoices]
   );
   const invoiceSummaryText = invoices.length
@@ -545,7 +605,7 @@ const InvoicesClient = () => {
       : [
           {
             description: 'Invoice total',
-            quantity: invoice.units || 1,
+            quantity: 1,
             total: invoice.total,
           },
         ];
@@ -553,14 +613,15 @@ const InvoicesClient = () => {
     return [
       `Invoice ${invoice.invoice}`,
       invoice.client ? `Client: ${invoice.client}` : '',
-      `Period: ${invoice.period}`,
+      `Type: ${invoice.invoiceTypeLabel}`,
+      `Source: ${invoice.source}`,
       `Invoice Date: ${formatDate(invoice.date)}`,
       `Due Date: ${formatDate(invoice.due)}`,
       `Status: ${invoice.status}`,
       '',
       'Charges',
       ...rows.map((item, index) => {
-        const description = firstPresent(item?.description, item?.serviceType, item?.service_type, item?.name, `Line ${index + 1}`);
+        const description = getInvoiceLineDescription(item, index);
         const quantity = firstPresent(item?.quantity, item?.qty, item?.units, '');
         const rate = firstPresent(item?.rate, item?.unitRate, item?.unit_rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, '');
         const total = firstPresent(item?.total, item?.amount, item?.lineTotal, item?.line_total, 0);
@@ -610,11 +671,12 @@ const InvoicesClient = () => {
     }
 
     const rows = [
-      ['Invoice', 'Period', 'Units', 'Subtotal', 'VAT', 'Total', 'Due', 'Status'],
+      ['Invoice', 'Type', 'Source', 'Invoice Date', 'Subtotal', 'VAT', 'Total', 'Due', 'Status'],
       ...invoices.map((invoice) => [
         invoice.invoice,
-        invoice.period,
-        invoice.units,
+        invoice.invoiceTypeLabel,
+        invoice.source,
+        formatDate(invoice.date),
         invoice.subtotal,
         invoice.vat,
         invoice.total,
@@ -752,8 +814,9 @@ const InvoicesClient = () => {
                 <thead>
                   <tr className="border-b border-[#e8eef7] bg-[#f8fbff]">
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">INVOICE#</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">PERIOD</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">UNITS</th>
+                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">TYPE</th>
+                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">SOURCE</th>
+                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">DATE</th>
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">SUBTOTAL</th>
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">VAT</th>
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">TOTAL</th>
@@ -765,13 +828,13 @@ const InvoicesClient = () => {
                 <tbody>
                   {isLoading ? (
                     <tr>
-                      <td colSpan="9" className="px-6 py-10 text-center text-sm text-gray-500">
+                      <td colSpan="10" className="px-6 py-10 text-center text-sm text-gray-500">
                         <LoadingState label="Loading invoices..." />
                       </td>
                     </tr>
                   ) : invoices.length === 0 ? (
                     <tr>
-                      <td colSpan="9" className="px-6 py-12 text-center">
+                      <td colSpan="10" className="px-6 py-12 text-center">
                         <div className="mx-auto flex max-w-sm flex-col items-center">
                           <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-[#f1f5f9]">
                             <FileText size={20} className="text-[#64748b]" />
@@ -786,15 +849,16 @@ const InvoicesClient = () => {
                   ) : invoices.map((invoice) => (
                     <tr key={invoice.id} className="border-b border-gray-50 transition-colors hover:bg-gray-50/30 last:border-b-0">
                       <td className="px-6 py-4 text-sm font-semibold text-[#132347]">{invoice.invoice}</td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{invoice.period}</td>
-                      <td className="px-6 py-4 text-sm font-medium text-gray-900">{invoice.units}</td>
+                      <td className="px-6 py-4 text-sm text-gray-700">{invoice.invoiceTypeLabel}</td>
+                      <td className="px-6 py-4 text-sm font-medium text-gray-900">{invoice.source}</td>
+                      <td className="px-6 py-4 text-sm text-gray-700">{formatDate(invoice.date)}</td>
                       <td className="px-6 py-4 text-sm text-gray-700">{formatCurrency(invoice.subtotal)}</td>
                       <td className="px-6 py-4 text-sm text-gray-700">{formatCurrency(invoice.vat)}</td>
                       <td className="px-6 py-4 text-sm font-semibold text-gray-900">{formatCurrency(invoice.total)}</td>
                       <td className="px-6 py-4 text-sm text-gray-700">{formatDate(invoice.due)}</td>
                       <td className="px-6 py-4">
                         <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${
-                          String(invoice.status).toLowerCase() === 'overdue' || String(invoice.status).toLowerCase() === 'unpaid'
+                          invoice.statusValue === 'overdue' || invoice.statusValue === 'unpaid'
                             ? 'border-red-200 bg-red-50 text-red-700'
                             : 'border-green-200 bg-[#e6fffb] text-[#16a394]'
                         }`}>
@@ -867,10 +931,11 @@ const InvoicesClient = () => {
                 ) : null}
 
                 <div className="space-y-5 px-6 py-5">
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
                     {[
-                      { label: 'Period', value: selectedInvoice.period },
-                      { label: 'Units', value: selectedInvoice.units },
+                      { label: 'Type', value: selectedInvoice.invoiceTypeLabel },
+                      { label: 'Source', value: selectedInvoice.source },
+                      { label: 'Invoice Date', value: formatDate(selectedInvoice.date) },
                       { label: 'Due', value: formatDate(selectedInvoice.due) },
                       { label: 'Status', value: selectedInvoice.status },
                     ].map((item) => (
@@ -896,7 +961,7 @@ const InvoicesClient = () => {
                           selectedInvoice.lineItems.map((item, index) => (
                             <tr key={item?.id || item?.uuid || index}>
                               <td className="px-4 py-3 font-medium text-[#132347]">
-                                {firstPresent(item?.description, item?.serviceType, item?.service_type, item?.name, `Line ${index + 1}`)}
+                                {getInvoiceLineDescription(item, index)}
                               </td>
                               <td className="px-4 py-3 text-right text-[#64748b]">{firstPresent(getInvoiceLineItemQuantity(item), '-')}</td>
                               <td className="px-4 py-3 text-right text-[#64748b]">{formatCurrency(firstPresent(item?.rate, item?.unitRate, item?.unit_rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, 0))}</td>

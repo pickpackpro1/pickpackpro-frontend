@@ -1,3 +1,5 @@
+import { normalizeServiceList } from './serviceCatalog';
+
 const LINE_ITEM_KEYS = [
   'shipment_line_items',
   'shipmentLineItems',
@@ -47,18 +49,7 @@ const isLineItemEntityType = (value = '') => {
   return !entityType || ['item', 'line_item', 'lineitem', 'shipment_line_item', 'shipmentlineitem'].includes(entityType);
 };
 
-const normalizeServices = (...values) => [
-  ...new Set(
-    values
-      .flatMap((value) => {
-        if (Array.isArray(value)) return value;
-        if (typeof value === 'string') return value.split(/[;,]/);
-        return [];
-      })
-      .map((service) => String(service || '').trim())
-      .filter(Boolean)
-  ),
-];
+const normalizeServices = (...values) => normalizeServiceList(...values);
 
 const hasExplicitBoolean = (value) => {
   if (value === true || value === false || value === 1 || value === 0 || value === '1' || value === '0') return true;

@@ -34,6 +34,13 @@ import {
   normalizeShipment as normalizeMappedShipment,
   normalizeShipmentList as normalizeMappedShipmentList,
 } from "../../utils/shipmentMapper";
+import {
+  STANDARD_SERVICE_KEYS as STANDARD_CATALOG_SERVICE_KEYS,
+  getServiceDisplayName,
+  getServiceKey,
+  isBundlingService,
+  normalizeServiceCode,
+} from "../../utils/serviceCatalog";
 
 const API_BASE_URL = '';
 const SUPABASE_STORAGE_PUBLIC_BASE_URL = import.meta.env.VITE_SUPABASE_URL
@@ -783,7 +790,7 @@ const formatStatusLabel = (value = "") =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
 
-const formatServiceLabel = (value = "") => formatStatusLabel(value);
+const formatServiceLabel = getServiceDisplayName;
 
 const getShipmentClientName = (shipment) =>
   shipment?.client?.companyName ||
@@ -1325,34 +1332,12 @@ const isDisplayServiceLabel = (value = "") => {
   return Boolean(normalizedValue && normalizedValue !== "-" && normalizedValue !== "none" && normalizedValue !== "n/a");
 };
 
-const normalizeServiceKey = (value = "") =>
-  String(formatServiceLabel(value || ""))
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "");
-
-const BUNDLING_SERVICE_KEY = normalizeServiceKey("Bundling");
+const normalizeServiceKey = getServiceKey;
 
 const isBundlingServiceValue = (value = "") =>
-  normalizeServiceKey(typeof value === "object" ? getServiceTaskLabel(value) : value) === BUNDLING_SERVICE_KEY;
+  isBundlingService(typeof value === "object" ? getServiceTaskLabel(value) : value);
 
-const STANDARD_SERVICE_KEYS = new Set(
-  [
-    "FNSKU Labeling",
-    "FNSKU_LABEL",
-    "Bundling",
-    "BUNDLING",
-    "Poly Bag",
-    "POLY_BAG",
-    "Bubble Wrap",
-    "BUBBLE_WRAP",
-    "Leaflet Insertion",
-    "LEAFLET_INSERTION",
-    "Oversize Surcharge",
-    "OVERSIZE_SURCHARGE",
-    "Return Processing",
-    "RETURN_PROCESSING",
-  ].map(normalizeServiceKey)
-);
+const STANDARD_SERVICE_KEYS = STANDARD_CATALOG_SERVICE_KEYS;
 
 const isOtherServiceTask = (service = {}) => {
   const rawType = String(service?.serviceType || service?.service_type || service?.type || "").trim().toLowerCase();
@@ -4139,7 +4124,7 @@ const ShipmentsStaff = () => {
   const [activeSubShipmentIdForBox, setActiveSubShipmentIdForBox] = useState("");
   const [files, setFiles] = useState([]);
   const [statusValue, setStatusValue] = useState("in_progress");
-  const [bulkServiceType, setBulkServiceType] = useState("FNSKU_LABEL");
+  const [bulkServiceType, setBulkServiceType] = useState("fnsku_label");
   const [bulkStatus, setBulkStatus] = useState("IN_PROGRESS");
   const [discrepancyResolveTarget, setDiscrepancyResolveTarget] = useState(null);
   const [discrepancyResolveError, setDiscrepancyResolveError] = useState("");
@@ -5053,7 +5038,7 @@ const ShipmentsStaff = () => {
           method: "POST",
           headers: buildHeaders(true),
           body: JSON.stringify({
-            serviceType: bulkServiceType,
+            serviceType: normalizeServiceCode(bulkServiceType),
             status: bulkStatus,
           }),
         }
@@ -6821,7 +6806,7 @@ const ShipmentsStaff = () => {
                     value={bulkServiceType}
                     onChange={(e) => setBulkServiceType(e.target.value)}
                     className="mb-3 w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm"
-                    placeholder="Service Type"
+                    placeholder="Service Type e.g. fnsku_label"
                   />
                   <input
                     type="text"
@@ -6904,7 +6889,7 @@ const ShipmentsStaff = () => {
                         <div key={service.displayId} className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
                           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <div>
-                              <p className="font-semibold text-gray-900">{service?.serviceType || service?.name || "Service Task"}</p>
+                              <p className="font-semibold text-gray-900">{formatServiceLabel(service?.serviceType || service?.service_type || service?.name) || "Service Task"}</p>
                               <p className="text-xs text-gray-500">
                                 Task {serviceId || "-"} • Line Item {service?.lineItemId || service?.shipmentItemId || service?.itemId || "-"}
                               </p>
