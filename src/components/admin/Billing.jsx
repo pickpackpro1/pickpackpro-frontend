@@ -4,7 +4,7 @@ import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import { getSession } from '../../utils/auth';
-import { FileText, CheckCircle, AlertCircle, Download, Eye, RefreshCw, X, Send, Plus, Pencil, Trash2 } from 'lucide-react';
+import { FileText, CheckCircle, AlertCircle, Download, Eye, RefreshCw, X, Send, Plus, Pencil, Trash2, Search } from 'lucide-react';
 import { getServiceDisplayName, getServiceKey, isKnownServiceCode } from '../../utils/serviceCatalog';
 
 const API_BASE_URL = '';
@@ -1089,6 +1089,8 @@ const Billing = () => {
   const [invoiceActionKey, setInvoiceActionKey] = useState('');
   const [lineActionKey, setLineActionKey] = useState('');
   const [openedInvoiceQuery, setOpenedInvoiceQuery] = useState('');
+  const [invoiceSearchTerm, setInvoiceSearchTerm] = useState('');
+  const [sendInvoiceTarget, setSendInvoiceTarget] = useState(null);
 
   const clientLookup = useMemo(() => {
     const lookup = new Map();
@@ -1182,21 +1184,45 @@ const Billing = () => {
       })),
     [invoices, clientLookup]
   );
-  const invoiceTotalPages = Math.max(1, Math.ceil(displayInvoices.length / BILLING_PAGE_SIZE));
+  const filteredInvoices = useMemo(() => {
+    const term = String(invoiceSearchTerm || '').trim().toLowerCase();
+    if (!term) return displayInvoices;
+
+    return displayInvoices.filter((invoice) =>
+      [
+        invoice.ref,
+        invoice.client,
+        invoice.invoiceTypeLabel,
+        invoice.invoiceType,
+        invoice.source,
+        invoice.sourceReference,
+        invoice.sourceId,
+        invoice.shipmentId,
+        invoice.subShipmentId,
+      ]
+        .map((value) => String(value || '').toLowerCase())
+        .some((value) => value.includes(term))
+    );
+  }, [displayInvoices, invoiceSearchTerm]);
+  const invoiceTotalPages = Math.max(1, Math.ceil(filteredInvoices.length / BILLING_PAGE_SIZE));
   const invoicePaginationPages = useMemo(
     () => getPaginationPages(invoicePage, invoiceTotalPages),
     [invoicePage, invoiceTotalPages]
   );
   const paginatedInvoices = useMemo(() => {
     const startIndex = (invoicePage - 1) * BILLING_PAGE_SIZE;
-    return displayInvoices.slice(startIndex, startIndex + BILLING_PAGE_SIZE);
-  }, [displayInvoices, invoicePage]);
-  const invoicePaginationStart = displayInvoices.length ? (invoicePage - 1) * BILLING_PAGE_SIZE + 1 : 0;
-  const invoicePaginationEnd = Math.min(invoicePage * BILLING_PAGE_SIZE, displayInvoices.length);
+    return filteredInvoices.slice(startIndex, startIndex + BILLING_PAGE_SIZE);
+  }, [filteredInvoices, invoicePage]);
+  const invoicePaginationStart = filteredInvoices.length ? (invoicePage - 1) * BILLING_PAGE_SIZE + 1 : 0;
+  const invoicePaginationEnd = Math.min(invoicePage * BILLING_PAGE_SIZE, filteredInvoices.length);
 
   useEffect(() => {
     setInvoicePage((page) => Math.min(Math.max(page, 1), invoiceTotalPages));
   }, [invoiceTotalPages]);
+
+  useEffect(() => {
+    setInvoicePage(1);
+  }, [invoiceSearchTerm]);
 
 
   const selectedInvoiceView = selectedInvoice
@@ -1350,7 +1376,6 @@ const Billing = () => {
       setError('');
       setMessage('');
       if (!invoiceId) throw new Error('Invoice identifier is missing.');
-      if (isDraftInvoice(invoice) && !window.confirm('Send and finalize this invoice?')) return;
       setInvoiceActionKey(`${invoiceId}:send`);
 
       const response = await fetch(`${API_BASE_URL}/api/invoices/${encodeURIComponent(invoiceId)}/send`, {
@@ -1364,6 +1389,7 @@ const Billing = () => {
       if (shouldRefreshSelectedInvoice) {
         setSelectedInvoice(await fetchInvoiceDetail(invoicePayload || invoice));
       }
+      setSendInvoiceTarget(null);
       setMessage('Invoice sent.');
     } catch (requestError) {
       setError(requestError.message);
@@ -1518,7 +1544,7 @@ const Billing = () => {
   const handleExport = () => {
     const rows = [
       ['Invoice Ref', 'Client', 'Type', 'Source', 'Date', 'Due', 'Subtotal', 'VAT', 'Total', 'Status'],
-      ...displayInvoices.map((invoice) => [
+      ...filteredInvoices.map((invoice) => [
         invoice.ref,
         invoice.client,
         invoice.invoiceTypeLabel,
@@ -1581,7 +1607,19 @@ const Billing = () => {
               <h2 className="text-sm font-semibold text-gray-900">Dispatch Invoices</h2>
               <p className="mt-1 text-xs text-gray-500">Shipment and sub-shipment invoices are created from dispatch events.</p>
             </div>
-            <button onClick={handleExport} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"><Download size={16} />Export</button>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <label className="relative block">
+                <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="search"
+                  value={invoiceSearchTerm}
+                  onChange={(event) => setInvoiceSearchTerm(event.target.value)}
+                  placeholder="Search client, invoice, source, type"
+                  className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-9 pr-3 text-sm text-gray-700 outline-none transition-colors placeholder:text-gray-400 focus:border-[#ff6900] sm:w-80"
+                />
+              </label>
+              <button onClick={handleExport} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"><Download size={16} />Export</button>
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -1646,7 +1684,7 @@ const Billing = () => {
                           <button type="button" onClick={() => handleViewInvoice(invoice)} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900]" title="View invoice" aria-label={`View ${invoice.ref}`}><Eye size={16} /></button>
                           <button type="button" onClick={() => handleDownloadPdf(invoice)} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900]" title="Download invoice PDF" aria-label={`Download ${invoice.ref} invoice PDF`}><Download size={16} /></button>
                           {canSend ? (
-                            <button type="button" onClick={() => handleSendInvoice(invoice)} disabled={isActionPending} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900] disabled:cursor-not-allowed disabled:opacity-50" title="Send invoice" aria-label={`Send ${invoice.ref}`}><Send size={16} /></button>
+                            <button type="button" onClick={() => setSendInvoiceTarget(invoice)} disabled={isActionPending} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900] disabled:cursor-not-allowed disabled:opacity-50" title="Send invoice" aria-label={`Send ${invoice.ref}`}><Send size={16} /></button>
                           ) : null}
                           {canMarkPaid ? (
                             <button type="button" onClick={() => handleUpdateInvoiceStatus(invoice, 'paid')} disabled={isActionPending} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-green-600 disabled:cursor-not-allowed disabled:opacity-50" title="Mark paid" aria-label={`Mark ${invoice.ref} paid`}><CheckCircle size={16} /></button>
@@ -1665,17 +1703,20 @@ const Billing = () => {
                 ) : null}
                 {!isLoading && !paginatedInvoices.length ? (
                   <tr>
-                    <td colSpan="11" className="px-6 py-10 text-center text-sm text-gray-500">No invoices found.</td>
+                    <td colSpan="11" className="px-6 py-10 text-center text-sm text-gray-500">
+                      {invoiceSearchTerm.trim() ? 'No invoices match your search.' : 'No invoices found.'}
+                    </td>
                   </tr>
                 ) : null}
               </tbody>
             </table>
           </div>
-          {displayInvoices.length ? (
+          {filteredInvoices.length ? (
             <div className="flex flex-col gap-3 border-t border-gray-200 bg-gray-50 px-6 py-3 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-gray-500">
                 Showing <span className="font-medium text-gray-900">{invoicePaginationStart}-{invoicePaginationEnd}</span> of{' '}
-                <span className="font-medium text-gray-900">{displayInvoices.length}</span> invoices
+                <span className="font-medium text-gray-900">{filteredInvoices.length}</span> invoices
+                {invoiceSearchTerm.trim() ? <span> matching "{invoiceSearchTerm.trim()}"</span> : null}
               </p>
               <div className="flex items-center gap-2 text-sm">
                 <button type="button" onClick={() => setInvoicePage((page) => Math.max(1, page - 1))} disabled={invoicePage === 1} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50">Previous</button>
@@ -1687,6 +1728,64 @@ const Billing = () => {
             </div>
           ) : null}
         </div>
+
+        {sendInvoiceTarget ? (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4 py-8">
+            <div className="w-full max-w-md rounded-xl bg-white shadow-2xl">
+              <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-5 py-4">
+                <div>
+                  <h3 className="text-base font-semibold text-gray-900">Send Invoice</h3>
+                  <p className="mt-1 text-sm text-gray-500">Finalize and send this invoice to the client.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSendInvoiceTarget(null)}
+                  className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                  aria-label="Close send invoice confirmation"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="space-y-3 px-5 py-4 text-sm">
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Invoice</p>
+                  <p className="mt-1 font-semibold text-gray-900">{sendInvoiceTarget.ref || sendInvoiceTarget.invoiceNumber || sendInvoiceTarget.id}</p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Client</p>
+                    <p className="mt-1 break-words font-semibold text-gray-900">{resolveInvoiceClientDisplay(sendInvoiceTarget)}</p>
+                  </div>
+                  <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Total</p>
+                    <p className="mt-1 font-semibold text-gray-900">{formatCurrency(sendInvoiceTarget.total)}</p>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500">
+                  The backend will set the invoice date, due date, sent timestamp, and notify the client.
+                </p>
+              </div>
+              <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-4">
+                <button
+                  type="button"
+                  onClick={() => setSendInvoiceTarget(null)}
+                  className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSendInvoice(sendInvoiceTarget)}
+                  disabled={invoiceActionKey.startsWith(`${getInvoiceRouteId(sendInvoiceTarget)}:`)}
+                  className="inline-flex items-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Send size={16} />
+                  {invoiceActionKey.startsWith(`${getInvoiceRouteId(sendInvoiceTarget)}:`) ? 'Sending...' : 'Send Invoice'}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {selectedInvoiceView ? (
           <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-8">
@@ -1700,7 +1799,7 @@ const Billing = () => {
                   {isDraftInvoice(selectedInvoiceView) && getInvoiceTypeValue(selectedInvoiceView) !== 'monthly' ? (
                     <button
                       type="button"
-                      onClick={() => handleSendInvoice(selectedInvoiceView)}
+                      onClick={() => setSendInvoiceTarget(selectedInvoiceView)}
                       disabled={invoiceActionKey.startsWith(`${getInvoiceRouteId(selectedInvoiceView)}:`)}
                       className="inline-flex items-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-50"
                     >

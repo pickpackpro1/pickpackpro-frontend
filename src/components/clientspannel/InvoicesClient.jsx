@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import LayoutClient from './clientlayout/LayoutClient';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
-import { AlertCircle, Crown, Download, FileText, RefreshCw, TrendingUp, X } from 'lucide-react';
+import { AlertCircle, Crown, Download, FileText, RefreshCw, Search, TrendingUp, X } from 'lucide-react';
 import { getSession } from '../../utils/auth';
 import { getClientIdFromSources, getClientTierFromSources } from '../../utils/clientTier';
 import { getServiceDisplayName, getServiceKey, isKnownServiceCode } from '../../utils/serviceCatalog';
@@ -698,6 +698,7 @@ const InvoicesClient = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isInvoiceDetailLoading, setIsInvoiceDetailLoading] = useState(false);
   const [downloadingInvoiceId, setDownloadingInvoiceId] = useState('');
+  const [invoiceSearchTerm, setInvoiceSearchTerm] = useState('');
   const [clientTier, setClientTier] = useState(() => {
     const session = getSession();
     return getClientTierFromSources(session, session?.rawUser);
@@ -776,8 +777,33 @@ const InvoicesClient = () => {
     () => invoices.find((invoice) => invoice.statusValue !== 'paid' && invoice.total > 0),
     [invoices]
   );
-  const invoiceSummaryText = invoices.length
-    ? `Showing ${invoices.length} of ${invoices.length} invoices`
+  const filteredInvoices = useMemo(() => {
+    const term = String(invoiceSearchTerm || '').trim().toLowerCase();
+    if (!term) return invoices;
+
+    return invoices.filter((invoice) =>
+      [
+        invoice.invoice,
+        invoice.invoiceTypeLabel,
+        invoice.invoiceType,
+        invoice.source,
+        invoice.sourceReference,
+        invoice.sourceId,
+        invoice.shipmentId,
+        invoice.subShipmentId,
+        invoice.status,
+        formatDate(invoice.date),
+        formatDate(invoice.due),
+        invoice.subtotal,
+        invoice.vat,
+        invoice.total,
+      ]
+        .map((value) => String(value || '').toLowerCase())
+        .some((value) => value.includes(term))
+    );
+  }, [invoices, invoiceSearchTerm]);
+  const invoiceSummaryText = filteredInvoices.length
+    ? `Showing ${filteredInvoices.length} of ${invoices.length} invoices${invoiceSearchTerm.trim() ? ` matching "${invoiceSearchTerm.trim()}"` : ''}`
     : 'No invoices found';
   const tierLabel = clientTier || 'Tier unavailable';
   const tierBadgeLabel = clientTier ? `${clientTier} tier` : tierLabel;
@@ -893,14 +919,14 @@ const InvoicesClient = () => {
   };
 
   const handleExport = () => {
-    if (!invoices.length) {
+    if (!filteredInvoices.length) {
       setMessage('No invoice data available to export.');
       return;
     }
 
     const rows = [
       ['Invoice', 'Type', 'Source', 'Invoice Date', 'Subtotal', 'VAT', 'Total', 'Due', 'Status'],
-      ...invoices.map((invoice) => [
+      ...filteredInvoices.map((invoice) => [
         invoice.invoice,
         invoice.invoiceTypeLabel,
         invoice.source,
@@ -1031,9 +1057,21 @@ const InvoicesClient = () => {
 
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-gray-900">Invoice History</h2>
-            <button type="button" onClick={handleExport} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
-              <Download size={16} />
-            </button>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <label className="relative block">
+                <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#94a3b8]" />
+                <input
+                  type="search"
+                  value={invoiceSearchTerm}
+                  onChange={(event) => setInvoiceSearchTerm(event.target.value)}
+                  placeholder="Search invoice, source, type"
+                  className="w-full rounded-lg border border-[#dce5f1] bg-white py-2 pl-9 pr-3 text-sm text-[#132347] outline-none transition-colors placeholder:text-[#94a3b8] focus:border-[#ff6900] sm:w-72"
+                />
+              </label>
+              <button type="button" onClick={handleExport} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+                <Download size={16} />
+              </button>
+            </div>
           </div>
 
           <div className="overflow-hidden rounded-2xl border border-[#dce5f1] bg-white shadow-sm">
@@ -1060,21 +1098,25 @@ const InvoicesClient = () => {
                         <LoadingState label="Loading invoices..." />
                       </td>
                     </tr>
-                  ) : invoices.length === 0 ? (
+                  ) : filteredInvoices.length === 0 ? (
                     <tr>
                       <td colSpan="10" className="px-6 py-12 text-center">
                         <div className="mx-auto flex max-w-sm flex-col items-center">
                           <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-[#f1f5f9]">
                             <FileText size={20} className="text-[#64748b]" />
                           </div>
-                          <p className="text-sm font-semibold text-[#132347]">No invoice data found.</p>
+                          <p className="text-sm font-semibold text-[#132347]">
+                            {invoiceSearchTerm.trim() ? 'No invoices match your search.' : 'No invoice data found.'}
+                          </p>
                           <p className="mt-1 text-sm text-[#64748b]">
-                            When invoices are generated for this client, they will appear here.
+                            {invoiceSearchTerm.trim()
+                              ? 'Try searching by invoice number, source reference, type, status, or date.'
+                              : 'When invoices are generated for this client, they will appear here.'}
                           </p>
                         </div>
                       </td>
                     </tr>
-                  ) : invoices.map((invoice) => (
+                  ) : filteredInvoices.map((invoice) => (
                     <tr key={invoice.id} className="border-b border-gray-50 transition-colors hover:bg-gray-50/30 last:border-b-0">
                       <td className="px-6 py-4 text-sm font-semibold text-[#132347]">{invoice.invoice}</td>
                       <td className="px-6 py-4 text-sm text-gray-700">{invoice.invoiceTypeLabel}</td>
