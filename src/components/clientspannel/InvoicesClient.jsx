@@ -250,11 +250,104 @@ const getInvoiceShipmentId = (invoice = {}) =>
 const getInvoiceSubShipmentId = (invoice = {}) =>
   firstPresent(invoice?.subShipmentId, invoice?.sub_shipment_id, invoice?.raw?.subShipmentId, invoice?.raw?.sub_shipment_id);
 
-const getInvoiceSourceDisplay = (invoice = {}) => {
+const firstObject = (...values) =>
+  values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};
+
+const getInvoiceShipmentRecord = (invoice = {}) =>
+  firstObject(
+    invoice?.shipment,
+    invoice?.shipments,
+    invoice?.shipmentRecord,
+    invoice?.shipment_record,
+    invoice?.raw?.shipment,
+    invoice?.raw?.shipments,
+    invoice?.raw?.shipmentRecord,
+    invoice?.raw?.shipment_record
+  );
+
+const getInvoiceSubShipmentRecord = (invoice = {}) =>
+  firstObject(
+    invoice?.subShipment,
+    invoice?.sub_shipment,
+    invoice?.subShipments,
+    invoice?.sub_shipments,
+    invoice?.subShipmentRecord,
+    invoice?.sub_shipment_record,
+    invoice?.raw?.subShipment,
+    invoice?.raw?.sub_shipment,
+    invoice?.raw?.subShipments,
+    invoice?.raw?.sub_shipments,
+    invoice?.raw?.subShipmentRecord,
+    invoice?.raw?.sub_shipment_record
+  );
+
+const getShipmentReferenceValue = (shipment = {}) =>
+  firstPresent(
+    shipment?.reference,
+    shipment?.shipmentReference,
+    shipment?.shipment_reference,
+    shipment?.shipmentNumber,
+    shipment?.shipment_number,
+    shipment?.ref,
+    shipment?.number
+  );
+
+const getSubShipmentReferenceValue = (subShipment = {}) =>
+  firstPresent(
+    subShipment?.reference,
+    subShipment?.subShipmentReference,
+    subShipment?.sub_shipment_reference,
+    subShipment?.ref,
+    subShipment?.number,
+    subShipment?.sequence_no ? `Sub-shipment ${subShipment.sequence_no}` : ''
+  );
+
+const getInvoiceShipmentReference = (invoice = {}) => {
+  const shipment = getInvoiceShipmentRecord(invoice);
+  return firstPresent(
+    invoice?.shipmentReference,
+    invoice?.shipment_reference,
+    invoice?.sourceReference,
+    invoice?.source_reference,
+    invoice?.raw?.shipmentReference,
+    invoice?.raw?.shipment_reference,
+    invoice?.raw?.sourceReference,
+    invoice?.raw?.source_reference,
+    getShipmentReferenceValue(shipment)
+  );
+};
+
+const getInvoiceSubShipmentReference = (invoice = {}) => {
+  const subShipment = getInvoiceSubShipmentRecord(invoice);
+  return firstPresent(
+    invoice?.subShipmentReference,
+    invoice?.sub_shipment_reference,
+    invoice?.sourceReference,
+    invoice?.source_reference,
+    invoice?.raw?.subShipmentReference,
+    invoice?.raw?.sub_shipment_reference,
+    invoice?.raw?.sourceReference,
+    invoice?.raw?.source_reference,
+    getSubShipmentReferenceValue(subShipment)
+  );
+};
+
+const getInvoiceSourceId = (invoice = {}) => {
   const invoiceType = getInvoiceTypeValue(invoice);
-  if (invoiceType === 'shipment') return firstPresent(getInvoiceShipmentId(invoice), '-');
-  if (invoiceType === 'sub_shipment' || invoiceType === 'sub-shipment') return firstPresent(getInvoiceSubShipmentId(invoice), '-');
-  return '--';
+  if (invoiceType === 'shipment') return getInvoiceShipmentId(invoice);
+  if (invoiceType === 'sub_shipment' || invoiceType === 'sub-shipment') return getInvoiceSubShipmentId(invoice);
+  return '';
+};
+
+const getInvoiceSourceReference = (invoice = {}) => {
+  const invoiceType = getInvoiceTypeValue(invoice);
+  if (invoiceType === 'shipment') return getInvoiceShipmentReference(invoice);
+  if (invoiceType === 'sub_shipment' || invoiceType === 'sub-shipment') return getInvoiceSubShipmentReference(invoice);
+  return '';
+};
+
+const getInvoiceSourceDisplay = (invoice = {}) => {
+  return firstPresent(getInvoiceSourceReference(invoice), getInvoiceSourceId(invoice), '--');
 };
 
 const getTierTextClass = (tier) => {
@@ -288,6 +381,8 @@ const normalizeInvoice = (invoice, index = 0) => {
     invoiceType,
     invoiceTypeLabel: getInvoiceTypeLabel(invoiceType),
     source: getInvoiceSourceDisplay(invoice),
+    sourceId: getInvoiceSourceId(invoice),
+    sourceReference: getInvoiceSourceReference(invoice),
     shipmentId: getInvoiceShipmentId(invoice),
     subShipmentId: getInvoiceSubShipmentId(invoice),
     subtotal: Number(invoice?.subtotal || invoice?.subTotal || invoice?.sub_total || invoice?.netTotal || invoice?.net_total || 0),
@@ -334,6 +429,12 @@ const getInvoiceLookupCandidates = (invoice = {}) => [
       invoice?.invoice_number,
       invoice?.raw?.invoiceNumber,
       invoice?.raw?.invoice_number,
+      invoice?.source,
+      invoice?.sourceReference,
+      invoice?.source_reference,
+      invoice?.raw?.sourceReference,
+      invoice?.raw?.source_reference,
+      getInvoiceSourceReference(invoice),
     ]
       .map((value) => String(value || '').trim())
       .filter(Boolean)
@@ -461,6 +562,134 @@ const downloadPdfFile = (fileName, lines) => {
   URL.revokeObjectURL(url);
 };
 
+const extractSourceRecord = (payload = {}, recordKeys = []) => {
+  const candidates = [payload, payload?.data, payload?.result, payload?.payload, payload?.data?.data].filter(Boolean);
+
+  for (const candidate of candidates) {
+    for (const key of recordKeys) {
+      if (candidate?.[key] && typeof candidate[key] === 'object' && !Array.isArray(candidate[key])) {
+        return candidate[key];
+      }
+    }
+
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate) && (candidate.id || candidate.uuid || candidate.reference)) {
+      return candidate;
+    }
+  }
+
+  return {};
+};
+
+const extractSourceRows = (payload = {}, rowKeys = []) => {
+  const candidates = [payload, payload?.data, payload?.result, payload?.payload, payload?.data?.data].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+
+    for (const key of rowKeys) {
+      if (Array.isArray(candidate?.[key])) return candidate[key];
+    }
+  }
+
+  return [];
+};
+
+const sourceRecordMatchesId = (record = {}, sourceId = '') => {
+  const normalizedSourceId = String(sourceId || '').trim();
+  if (!normalizedSourceId) return false;
+
+  return [
+    record?.id,
+    record?.uuid,
+    record?.shipmentId,
+    record?.shipment_id,
+    record?.subShipmentId,
+    record?.sub_shipment_id,
+  ].some((value) => String(value || '').trim() === normalizedSourceId);
+};
+
+const fetchSourcePayload = async (endpoint = '', cache = new Map()) => {
+  if (!endpoint) return null;
+  if (cache.has(endpoint)) return cache.get(endpoint);
+
+  const request = fetch(endpoint, {
+    method: 'GET',
+    headers: buildHeaders(),
+    cache: 'no-store',
+  })
+    .then(parseResponse)
+    .catch(() => null);
+
+  cache.set(endpoint, request);
+  return request;
+};
+
+const fetchShipmentReference = async (shipmentId = '', cache) => {
+  if (!shipmentId) return '';
+
+  const payload = await fetchSourcePayload(`${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentId)}`, cache);
+  const shipment = extractSourceRecord(payload, ['shipment', 'record', 'row']);
+  return getShipmentReferenceValue(shipment);
+};
+
+const fetchSubShipmentReference = async (subShipmentId = '', shipmentId = '', cache) => {
+  if (!subShipmentId) return '';
+
+  const directPayload = await fetchSourcePayload(`${API_BASE_URL}/api/sub-shipments/${encodeURIComponent(subShipmentId)}`, cache);
+  const directSubShipment = extractSourceRecord(directPayload, ['subShipment', 'sub_shipment', 'record', 'row']);
+  const directReference = getSubShipmentReferenceValue(directSubShipment);
+  if (directReference) return directReference;
+
+  if (!shipmentId) return '';
+
+  const listPayload = await fetchSourcePayload(`${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentId)}/sub-shipments`, cache);
+  const subShipments = extractSourceRows(listPayload, ['subShipments', 'sub_shipments', 'subshipments', 'rows', 'items', 'records', 'results']);
+  const matchedSubShipment = subShipments.find((subShipment) => sourceRecordMatchesId(subShipment, subShipmentId));
+  return getSubShipmentReferenceValue(matchedSubShipment);
+};
+
+const fetchInvoiceDetailSourceReference = async (invoice = {}, cache) => {
+  const lookupId = getInvoiceLookupCandidates(invoice)[0];
+  if (!lookupId) return '';
+
+  const payload = await fetchSourcePayload(`${API_BASE_URL}/api/invoices/${encodeURIComponent(lookupId)}`, cache);
+  const detailPayload = extractInvoiceDetail(payload);
+  return getInvoiceSourceReference({
+    ...(invoice.raw || {}),
+    ...invoice,
+    ...(detailPayload || {}),
+  });
+};
+
+const enrichInvoiceSourceReference = async (invoice = {}, cache = new Map()) => {
+  if (!invoice?.sourceId) return invoice;
+  if (invoice.sourceReference && invoice.source === invoice.sourceReference) return invoice;
+
+  const invoiceType = getInvoiceTypeValue(invoice);
+  let sourceReference =
+    invoiceType === 'shipment'
+      ? await fetchShipmentReference(invoice.shipmentId || invoice.sourceId, cache)
+      : invoiceType === 'sub_shipment' || invoiceType === 'sub-shipment'
+        ? await fetchSubShipmentReference(invoice.subShipmentId || invoice.sourceId, invoice.shipmentId, cache)
+        : '';
+
+  if (!sourceReference) {
+    sourceReference = await fetchInvoiceDetailSourceReference(invoice, cache);
+  }
+
+  if (!sourceReference) return invoice;
+  return {
+    ...invoice,
+    sourceReference,
+    source: sourceReference,
+  };
+};
+
+const enrichInvoicesWithSourceReferences = async (invoiceRows = []) => {
+  const cache = new Map();
+  return Promise.all(invoiceRows.map((invoice) => enrichInvoiceSourceReference(invoice, cache)));
+};
+
 const InvoicesClient = () => {
   const [invoices, setInvoices] = useState([]);
   const [selectedInvoice, setSelectedInvoice] = useState(null);
@@ -484,11 +713,10 @@ const InvoicesClient = () => {
         cache: 'no-store',
       });
       const payload = await parseResponse(response);
-      setInvoices(
-        extractInvoices(payload)
-          .filter(isClientVisibleInvoice)
-          .map((invoice, index) => normalizeInvoice(invoice, index))
-      );
+      const normalizedInvoices = extractInvoices(payload)
+        .filter(isClientVisibleInvoice)
+        .map((invoice, index) => normalizeInvoice(invoice, index));
+      setInvoices(await enrichInvoicesWithSourceReferences(normalizedInvoices));
     } catch (requestError) {
       setError(requestError.message);
       setInvoices([]);
