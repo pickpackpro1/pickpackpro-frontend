@@ -21,7 +21,9 @@ import { useLocation, useNavigate } from "react-router-dom";
 import LayoutStaff from "./stafflayout/LayoutStaff";
 import LoadingState from "../common/LoadingState";
 import FullPageLoader from "../common/FullPageLoader";
+import DiscrepancyResolutionModal from "../common/DiscrepancyResolutionModal";
 import { getSession } from "../../utils/auth";
+import { getDiscrepancyResolveData, resolveDiscrepancy as resolveDiscrepancyRequest } from "../../utils/discrepancies";
 import { formatToastMessage, showToast } from "../../utils/toast";
 import {
   findLineItemLabelFile as findMappedLineItemLabelFile,
@@ -449,6 +451,296 @@ const getDiscrepancyId = (discrepancy) =>
   discrepancy?.discrepancyId ||
   discrepancy?.discrepancy_id ||
   "";
+
+const getDiscrepancyLineItem = (discrepancy = {}) =>
+  discrepancy?.lineItem ||
+  discrepancy?.line_item ||
+  discrepancy?.shipmentItem ||
+  discrepancy?.shipment_item ||
+  discrepancy?.shipmentLineItem ||
+  discrepancy?.shipment_line_item ||
+  discrepancy?.item ||
+  {};
+
+const getDiscrepancyLineItemId = (discrepancy = {}) =>
+  firstPresent(
+    discrepancy?.lineItemId,
+    discrepancy?.line_item_id,
+    discrepancy?.shipmentItemId,
+    discrepancy?.shipment_item_id,
+    discrepancy?.shipmentLineItemId,
+    discrepancy?.shipment_line_item_id,
+    discrepancy?.itemId,
+    discrepancy?.item_id,
+    discrepancy?.lineItemUuid,
+    discrepancy?.line_item_uuid,
+    discrepancy?.shipmentItemUuid,
+    discrepancy?.shipment_item_uuid,
+    discrepancy?.shipmentLineItemUuid,
+    discrepancy?.shipment_line_item_uuid,
+    discrepancy?.lineItem?.id,
+    discrepancy?.lineItem?.uuid,
+    discrepancy?.line_item?.id,
+    discrepancy?.line_item?.uuid,
+    discrepancy?.shipmentItem?.id,
+    discrepancy?.shipmentItem?.uuid,
+    discrepancy?.shipment_item?.id,
+    discrepancy?.shipment_item?.uuid,
+    discrepancy?.shipmentLineItem?.id,
+    discrepancy?.shipmentLineItem?.uuid,
+    discrepancy?.shipment_line_item?.id,
+    discrepancy?.shipment_line_item?.uuid,
+    discrepancy?.item?.id,
+    discrepancy?.item?.uuid,
+    getLineItemId(getDiscrepancyLineItem(discrepancy))
+  );
+
+const getDiscrepancySku = (discrepancy = {}) =>
+  firstPresent(
+    getItemSku(getDiscrepancyLineItem(discrepancy)),
+    getItemSku(discrepancy),
+    discrepancy?.sku,
+    discrepancy?.sellerSku,
+    discrepancy?.seller_sku,
+    discrepancy?.lineItemSku,
+    discrepancy?.line_item_sku,
+    discrepancy?.shipmentItemSku,
+    discrepancy?.shipment_item_sku,
+    discrepancy?.shipmentLineItemSku,
+    discrepancy?.shipment_line_item_sku,
+    discrepancy?.productSku,
+    discrepancy?.product_sku
+  );
+
+const sameLineItem = (left = {}, right = {}) => {
+  const leftId = String(getLineItemId(left) || "").trim();
+  const rightId = String(getLineItemId(right) || "").trim();
+  const leftSku = String(getItemSku(left) || "").trim().toLowerCase();
+  const rightSku = String(getItemSku(right) || "").trim().toLowerCase();
+  const leftFnsku = String(getItemFnsku(left) || "").trim().toLowerCase();
+  const rightFnsku = String(getItemFnsku(right) || "").trim().toLowerCase();
+
+  return Boolean(
+    (leftId && rightId && leftId === rightId) ||
+      (leftSku && rightSku && leftSku === rightSku) ||
+      (leftFnsku && rightFnsku && leftFnsku === rightFnsku)
+  );
+};
+
+const findLineItemForDiscrepancy = (discrepancy = {}, lineItems = [], fallbackIndex = -1) => {
+  const discrepancyLineItem = getDiscrepancyLineItem(discrepancy);
+  const discrepancyLineItemId = String(getDiscrepancyLineItemId(discrepancy) || getLineItemId(discrepancyLineItem) || "").trim();
+  const discrepancySku = String(getDiscrepancySku(discrepancy) || "").trim().toLowerCase();
+
+  return (
+    lineItems.find((item) => {
+      const itemId = String(getLineItemId(item) || "").trim();
+      const itemSku = String(getItemSku(item) || "").trim().toLowerCase();
+      return (
+        (discrepancyLineItemId && itemId && discrepancyLineItemId === itemId) ||
+        (discrepancySku && itemSku && discrepancySku === itemSku)
+      );
+    }) ||
+    (fallbackIndex >= 0 ? lineItems[fallbackIndex] : null) ||
+    (lineItems.length === 1 ? lineItems[0] : null) ||
+    discrepancyLineItem ||
+    {}
+  );
+};
+
+const isDiscrepancyForItem = (discrepancy = {}, item = {}, lineItems = [], discrepancyIndex = -1) => {
+  const lineItemId = getDiscrepancyLineItemId(discrepancy);
+  const sku = getDiscrepancySku(discrepancy);
+
+  if (lineItemId || sku) {
+    const itemId = String(getLineItemId(item) || "").trim();
+    const itemSku = String(getItemSku(item) || "").trim().toLowerCase();
+    const referenceLineItemId = String(lineItemId || "").trim();
+    const referenceSku = String(sku || "").trim().toLowerCase();
+
+    return Boolean(
+      (itemId && referenceLineItemId && itemId === referenceLineItemId) ||
+        (itemSku && referenceSku && itemSku === referenceSku)
+    );
+  }
+
+  if (lineItems.length === 1) return sameLineItem(item, lineItems[0]);
+
+  const matchedLineItem = findLineItemForDiscrepancy(discrepancy, lineItems, discrepancyIndex);
+  return sameLineItem(item, matchedLineItem);
+};
+
+const hasQuantityValue = (value) =>
+  value !== undefined && value !== null && String(value).trim() !== "" && !Number.isNaN(Number(value));
+
+const firstQuantity = (...values) => {
+  const value = values.find(hasQuantityValue);
+  return value === undefined || value === null ? "" : value;
+};
+
+const firstNonZeroQuantity = (...values) => {
+  const value = values.find((candidate) => hasQuantityValue(candidate) && Number(candidate) !== 0);
+  return value === undefined || value === null ? "" : value;
+};
+
+const getDiscrepancyExpectedQty = (discrepancy = {}, matchedLineItem = {}) => {
+  const discrepancyLineItem = getDiscrepancyLineItem(discrepancy);
+  const expectedFromDiscrepancy = firstNonZeroQuantity(
+    discrepancy?.expectedQty,
+    discrepancy?.expected_qty,
+    discrepancy?.expectedQuantity,
+    discrepancy?.expected_quantity,
+    discrepancy?.qtyExpected,
+    discrepancy?.qty_expected,
+    discrepancy?.expectedUnits,
+    discrepancy?.expected_units,
+    discrepancy?.unitsExpected,
+    discrepancy?.units_expected,
+    discrepancy?.expected
+  );
+  const expectedFromLineItem = firstNonZeroQuantity(
+    getLineItemExpectedQty(discrepancyLineItem),
+    getLineItemExpectedQty(matchedLineItem)
+  );
+  const fallbackExpected = firstQuantity(
+    discrepancy?.expectedQty,
+    discrepancy?.expected_qty,
+    discrepancy?.expectedQuantity,
+    discrepancy?.expected_quantity,
+    discrepancy?.qtyExpected,
+    discrepancy?.qty_expected,
+    discrepancy?.expectedUnits,
+    discrepancy?.expected_units,
+    discrepancy?.unitsExpected,
+    discrepancy?.units_expected,
+    discrepancy?.expected,
+    getLineItemExpectedQty(discrepancyLineItem),
+    getLineItemExpectedQty(matchedLineItem),
+    0
+  );
+
+  return firstPresent(expectedFromLineItem, expectedFromDiscrepancy, fallbackExpected, 0);
+};
+
+const getDiscrepancyReceivedQty = (discrepancy = {}, matchedLineItem = {}) => {
+  const discrepancyLineItem = getDiscrepancyLineItem(discrepancy);
+  const receivedFromDiscrepancy = firstNonZeroQuantity(
+    discrepancy?.receivedQty,
+    discrepancy?.received_qty,
+    discrepancy?.receivedQuantity,
+    discrepancy?.received_quantity,
+    discrepancy?.qtyReceived,
+    discrepancy?.qty_received,
+    discrepancy?.unitsReceived,
+    discrepancy?.units_received,
+    discrepancy?.received,
+    discrepancy?.actualQty,
+    discrepancy?.actual_qty,
+    discrepancy?.actualQuantity,
+    discrepancy?.actual_quantity,
+    discrepancy?.actual,
+    discrepancy?.actualReceivedQty,
+    discrepancy?.actual_received_qty,
+    discrepancy?.receivedUnits,
+    discrepancy?.received_units,
+    discrepancy?.receivedCount,
+    discrepancy?.received_count,
+    discrepancy?.countedQty,
+    discrepancy?.counted_qty,
+    discrepancy?.counted
+  );
+  const receivedFromLineItem = firstNonZeroQuantity(
+    getItemReceivedQty(discrepancyLineItem),
+    getItemReceivedQty(matchedLineItem)
+  );
+  const fallbackReceived = firstQuantity(
+    discrepancy?.receivedQty,
+    discrepancy?.received_qty,
+    discrepancy?.receivedQuantity,
+    discrepancy?.received_quantity,
+    discrepancy?.qtyReceived,
+    discrepancy?.qty_received,
+    discrepancy?.unitsReceived,
+    discrepancy?.units_received,
+    discrepancy?.received,
+    discrepancy?.actualQty,
+    discrepancy?.actual_qty,
+    discrepancy?.actualQuantity,
+    discrepancy?.actual_quantity,
+    discrepancy?.actual,
+    discrepancy?.actualReceivedQty,
+    discrepancy?.actual_received_qty,
+    discrepancy?.receivedUnits,
+    discrepancy?.received_units,
+    discrepancy?.receivedCount,
+    discrepancy?.received_count,
+    discrepancy?.countedQty,
+    discrepancy?.counted_qty,
+    discrepancy?.counted,
+    getItemReceivedQty(discrepancyLineItem),
+    getItemReceivedQty(matchedLineItem),
+    0
+  );
+
+  return firstPresent(receivedFromDiscrepancy, receivedFromLineItem, fallbackReceived, 0);
+};
+
+const getDiscrepancyDifferenceQty = (discrepancy = {}, matchedLineItem = {}) => {
+  const explicitDifference = firstQuantity(
+    discrepancy?.difference,
+    discrepancy?.differenceQty,
+    discrepancy?.difference_qty,
+    discrepancy?.qtyDifference,
+    discrepancy?.qty_difference,
+    discrepancy?.quantityDifference,
+    discrepancy?.quantity_difference
+  );
+
+  if (explicitDifference !== "") return explicitDifference;
+
+  const expected = Number(getDiscrepancyExpectedQty(discrepancy, matchedLineItem));
+  const received = Number(getDiscrepancyReceivedQty(discrepancy, matchedLineItem));
+
+  return Number.isFinite(expected) && Number.isFinite(received) ? received - expected : "";
+};
+
+const updateDiscrepancyRowsAfterResolve = (rows = [], target = {}, responseData = {}) => {
+  const lineItemId = String(target?.lineItemId || "").trim();
+  const discrepancyId = String(getDiscrepancyId(target?.discrepancy) || "").trim();
+
+  const matchesTarget = (row = {}) => {
+    const rowIds = [
+      getDiscrepancyLineItemId(row),
+      getLineItemId(getDiscrepancyLineItem(row)),
+      getDiscrepancyId(row),
+    ].map((value) => String(value || "").trim());
+
+    return Boolean(
+      (lineItemId && rowIds.includes(lineItemId)) ||
+        (discrepancyId && rowIds.includes(discrepancyId))
+    );
+  };
+
+  if (responseData?.resolved === true) {
+    return rows.filter((row) => !matchesTarget(row));
+  }
+
+  const linePatch = { ...(responseData || {}) };
+  delete linePatch.shipment;
+
+  return rows.map((row) => {
+    if (!matchesTarget(row)) return row;
+
+    return {
+      ...row,
+      ...linePatch,
+      lineItem: {
+        ...getDiscrepancyLineItem(row),
+        ...linePatch,
+      },
+    };
+  });
+};
 
 const getServiceUnits = (service = {}, lineItem = {}) =>
   Number(
@@ -3849,8 +4141,9 @@ const ShipmentsStaff = () => {
   const [statusValue, setStatusValue] = useState("in_progress");
   const [bulkServiceType, setBulkServiceType] = useState("FNSKU_LABEL");
   const [bulkStatus, setBulkStatus] = useState("IN_PROGRESS");
-  const [resolveDiscrepancyId, setResolveDiscrepancyId] = useState("");
-  const [resolveNotes, setResolveNotes] = useState("");
+  const [discrepancyResolveTarget, setDiscrepancyResolveTarget] = useState(null);
+  const [discrepancyResolveError, setDiscrepancyResolveError] = useState("");
+  const [isResolvingDiscrepancy, setIsResolvingDiscrepancy] = useState(false);
   const [taskId, setTaskId] = useState("");
   const [taskStatus, setTaskStatus] = useState("IN_PROGRESS");
   const [taskUnitsDone, setTaskUnitsDone] = useState("");
@@ -4774,23 +5067,67 @@ const ShipmentsStaff = () => {
     }
   };
 
-  const handleResolveDiscrepancy = async () => {
+  const handleOpenDiscrepancyResolve = (discrepancy = {}, matchedLineItem = {}) => {
+    const fallbackLineItem = matchedLineItem && Object.keys(matchedLineItem).length
+      ? matchedLineItem
+      : findLineItemForDiscrepancy(discrepancy, lineItems);
+    const discrepancyLineItem = getDiscrepancyLineItem(discrepancy);
+    const lineItemId = firstPresent(
+      getDiscrepancyLineItemId(discrepancy),
+      getLineItemId(fallbackLineItem),
+      getLineItemId(discrepancyLineItem)
+    );
+
+    setDiscrepancyResolveError("");
+    setDiscrepancyResolveTarget({
+      discrepancy,
+      lineItem: fallbackLineItem,
+      lineItemId,
+      sku: firstPresent(getItemSku(fallbackLineItem), getDiscrepancySku(discrepancy), lineItemId),
+      productName: firstPresent(getItemName(fallbackLineItem), getItemName(discrepancyLineItem)),
+      expectedQty: getDiscrepancyExpectedQty(discrepancy, fallbackLineItem),
+      receivedQty: getDiscrepancyReceivedQty(discrepancy, fallbackLineItem),
+      differenceQty: getDiscrepancyDifferenceQty(discrepancy, fallbackLineItem),
+    });
+  };
+
+  const handleCloseDiscrepancyResolve = () => {
+    if (isResolvingDiscrepancy) return;
+    setDiscrepancyResolveTarget(null);
+    setDiscrepancyResolveError("");
+  };
+
+  const handleResolveDiscrepancySubmit = async (payload) => {
     try {
+      const target = discrepancyResolveTarget;
+
       setError("");
       setMessage("");
-      if (!resolveDiscrepancyId.trim()) {
-        throw new Error("Discrepancy UUID required hai.");
+      setDiscrepancyResolveError("");
+      setIsResolvingDiscrepancy(true);
+
+      if (!target?.lineItemId) {
+        throw new Error("Line item ID is required to update received quantity.");
       }
-      const response = await fetch(`${API_BASE_URL}/api/discrepancies/${resolveDiscrepancyId}/resolve`, {
-        method: "PATCH",
-        headers: buildHeaders(true),
-        body: JSON.stringify({ notes: resolveNotes }),
-      });
-      await parseResponse(response);
-      setMessage("Discrepancy resolved.");
+
+      const responsePayload = await resolveDiscrepancyRequest(target.lineItemId, payload);
+      const responseData = getDiscrepancyResolveData(responsePayload) || {};
+
+      if (responseData?.shipment && typeof responseData.shipment === "object") {
+        setSelectedShipment(normalizeMappedShipment(responseData.shipment));
+      }
+
+      setDiscrepancies((currentRows) => updateDiscrepancyRowsAfterResolve(currentRows, target, responseData));
+      setMessage(responseData?.resolved === true ? "Discrepancy resolved." : "Received quantity updated. Discrepancy remains active.");
+      setDiscrepancyResolveTarget(null);
       await loadShipmentDetail(selectedShipmentId);
+      await refreshSubShipmentAvailability();
+      await loadShipments();
     } catch (requestError) {
+      setDiscrepancyResolveError(requestError.message);
       setError(requestError.message);
+    } finally {
+      setIsResolvingDiscrepancy(false);
     }
   };
 
@@ -6106,6 +6443,9 @@ const ShipmentsStaff = () => {
                         const receivedQty = getItemReceivedQty(item) || 0;
                         const bundleSize = getViewItemBundleSize(item);
                         const bundleSizeDisplay = bundleSize || "-";
+                        const itemDiscrepancies = discrepancies.filter((discrepancy, discrepancyIndex) =>
+                          isDiscrepancyForItem(discrepancy, item, lineItems, discrepancyIndex)
+                        );
                         return (
                           <div key={getLineItemId(item) || item?.sku || index} className="overflow-hidden rounded-md border border-[#d9e3f2] bg-[#f5f9ff]">
                             <div className="flex items-start justify-between gap-4 border-b border-[#e4ecf8] px-4 py-4">
@@ -6160,6 +6500,40 @@ const ShipmentsStaff = () => {
                               ) : (
                                 <p className="text-sm text-[#7b889f]">No service tasks on this line item.</p>
                               )}
+
+                              {itemDiscrepancies.length ? (
+                                <div>
+                                  <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">Discrepancies</p>
+                                  <div className="space-y-2">
+                                    {itemDiscrepancies.map((discrepancy, discrepancyIndex) => {
+                                      const discrepancyLineItemId = firstPresent(getDiscrepancyLineItemId(discrepancy), getLineItemId(item));
+                                      return (
+                                        <div key={getDiscrepancyId(discrepancy) || discrepancyLineItemId || discrepancyIndex} className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+                                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                            <p className="text-[13px] font-semibold text-amber-900">{itemSku || getDiscrepancySku(discrepancy) || "Line Item"}</p>
+                                            <div className="flex flex-wrap items-center gap-2">
+                                              <span className="rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-amber-700">
+                                                {discrepancy?.status || "OPEN"}
+                                              </span>
+                                              <button
+                                                type="button"
+                                                onClick={() => handleOpenDiscrepancyResolve(discrepancy, item)}
+                                                disabled={!discrepancyLineItemId}
+                                                className="rounded-md bg-[#132347] px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                                              >
+                                                Update Received Qty
+                                              </button>
+                                            </div>
+                                          </div>
+                                          <p className="mt-1 text-[12px] text-amber-800">
+                                            Expected {getDiscrepancyExpectedQty(discrepancy, item)}, received {getDiscrepancyReceivedQty(discrepancy, item)}, difference {formatQuantityValue(getDiscrepancyDifferenceQty(discrepancy, item))}
+                                          </p>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              ) : null}
                             </div>
                           </div>
                         );
@@ -6475,31 +6849,36 @@ const ShipmentsStaff = () => {
                 </div>
                 {discrepancies.length ? (
                   <div className="mb-4 space-y-3">
-                    {discrepancies.map((item, index) => (
-                      <div key={item?.id || item?.lineItemId || index} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="font-semibold text-amber-900">{item?.sku || item?.lineItem?.sku || item?.lineItemId || "Line Item"}</p>
-                          <div className="flex items-center gap-2">
-                            <span className="rounded-full bg-white px-2 py-1 text-xs font-medium text-amber-700">
-                              {item?.status || "OPEN"}
-                            </span>
-                            {getDiscrepancyId(item) ? (
-                              <button
-                                type="button"
-                                onClick={() => setResolveDiscrepancyId(getDiscrepancyId(item))}
-                                className="rounded-full bg-[#132347] px-2.5 py-1 text-xs font-semibold text-white hover:bg-[#0f1b38]"
-                              >
-                                Use this ID
-                              </button>
-                            ) : null}
+                    {discrepancies.map((item, index) => {
+                      const matchedLineItem = findLineItemForDiscrepancy(item, lineItems, index);
+                      const discrepancyLineItemId = firstPresent(getDiscrepancyLineItemId(item), getLineItemId(matchedLineItem));
+
+                      return (
+                        <div key={getDiscrepancyId(item) || discrepancyLineItemId || index} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="font-semibold text-amber-900">{getItemSku(matchedLineItem) || getDiscrepancySku(item) || discrepancyLineItemId || "Line Item"}</p>
+                            <div className="flex items-center gap-2">
+                              <span className="rounded-full bg-white px-2 py-1 text-xs font-medium text-amber-700">
+                                {item?.status || "OPEN"}
+                              </span>
+                              {discrepancyLineItemId ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenDiscrepancyResolve(item, matchedLineItem)}
+                                  className="rounded-full bg-[#132347] px-2.5 py-1 text-xs font-semibold text-white hover:bg-[#0f1b38]"
+                                >
+                                  Update Received Qty
+                                </button>
+                              ) : null}
+                            </div>
                           </div>
+                          <p className="mt-2 text-amber-800">
+                            Expected {getDiscrepancyExpectedQty(item, matchedLineItem)}, received {getDiscrepancyReceivedQty(item, matchedLineItem)}
+                          </p>
+                          {item?.notes ? <p className="mt-1 text-xs text-amber-700">{item.notes}</p> : null}
                         </div>
-                        <p className="mt-2 text-amber-800">
-                          Expected {item?.expectedQty ?? item?.expected ?? 0}, received {item?.receivedQty ?? item?.received ?? 0}
-                        </p>
-                        {item?.notes ? <p className="mt-1 text-xs text-amber-700">{item.notes}</p> : null}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <p className="mb-4 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
@@ -6507,11 +6886,6 @@ const ShipmentsStaff = () => {
                   </p>
                 )}
                
-                <div className="mt-4 space-y-3">
-                  <input type="text" placeholder="Discrepancy UUID" value={resolveDiscrepancyId} onChange={(e) => setResolveDiscrepancyId(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
-                  <input type="text" placeholder="Resolution Notes" value={resolveNotes} onChange={(e) => setResolveNotes(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
-                  <button onClick={handleResolveDiscrepancy} className="rounded-lg bg-[#132347] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#0f1b38]">Resolve</button>
-                </div>
               </div>
 
               <div className="rounded-2xl border border-[#dce6f7] bg-white p-6 shadow-sm">
@@ -6678,6 +7052,20 @@ const ShipmentsStaff = () => {
             </div>
           </div>
         )}
+
+        <DiscrepancyResolutionModal
+          open={Boolean(discrepancyResolveTarget)}
+          sku={discrepancyResolveTarget?.sku}
+          productName={discrepancyResolveTarget?.productName}
+          expectedQty={discrepancyResolveTarget?.expectedQty}
+          receivedQty={discrepancyResolveTarget?.receivedQty}
+          differenceQty={discrepancyResolveTarget?.differenceQty}
+          lineItemId={discrepancyResolveTarget?.lineItemId}
+          error={discrepancyResolveError}
+          isSubmitting={isResolvingDiscrepancy}
+          onClose={handleCloseDiscrepancyResolve}
+          onSubmit={handleResolveDiscrepancySubmit}
+        />
 
         {viewShipment ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">

@@ -3,7 +3,9 @@ import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import ProductSkuCombobox from '../common/ProductSkuCombobox';
+import DiscrepancyResolutionModal from '../common/DiscrepancyResolutionModal';
 import { getSession } from '../../utils/auth';
+import { getDiscrepancyResolveData, resolveDiscrepancy as resolveDiscrepancyRequest } from '../../utils/discrepancies';
 import {
   Search,
   Plus,
@@ -1187,6 +1189,64 @@ const getDiscrepancyReceivedQty = (discrepancy = {}, matchedLineItem = {}) => {
   );
 
   return firstPresent(receivedFromDiscrepancy, receivedFromLineItem, fallbackReceived, 0);
+};
+
+const getDiscrepancyDifferenceQty = (discrepancy = {}, matchedLineItem = {}) => {
+  const explicitDifference = firstQuantity(
+    discrepancy?.difference,
+    discrepancy?.differenceQty,
+    discrepancy?.difference_qty,
+    discrepancy?.qtyDifference,
+    discrepancy?.qty_difference,
+    discrepancy?.quantityDifference,
+    discrepancy?.quantity_difference
+  );
+
+  if (explicitDifference !== '') return explicitDifference;
+
+  const expected = Number(getDiscrepancyExpectedQty(discrepancy, matchedLineItem));
+  const received = Number(getDiscrepancyReceivedQty(discrepancy, matchedLineItem));
+
+  return Number.isFinite(expected) && Number.isFinite(received) ? received - expected : '';
+};
+
+const updateDiscrepancyRowsAfterResolve = (rows = [], target = {}, responseData = {}) => {
+  const lineItemId = String(target?.lineItemId || '').trim();
+  const discrepancyId = String(target?.discrepancy?.id || target?.discrepancy?.uuid || '').trim();
+
+  const matchesTarget = (row = {}) => {
+    const rowIds = [
+      getDiscrepancyLineItemId(row),
+      getLineItemRecordId(getDiscrepancyLineItem(row)),
+      row?.id,
+      row?.uuid,
+    ].map((value) => String(value || '').trim());
+
+    return Boolean(
+      (lineItemId && rowIds.includes(lineItemId)) ||
+        (discrepancyId && rowIds.includes(discrepancyId))
+    );
+  };
+
+  if (responseData?.resolved === true) {
+    return rows.filter((row) => !matchesTarget(row));
+  }
+
+  const linePatch = { ...(responseData || {}) };
+  delete linePatch.shipment;
+
+  return rows.map((row) => {
+    if (!matchesTarget(row)) return row;
+
+    return {
+      ...row,
+      ...linePatch,
+      lineItem: {
+        ...getDiscrepancyLineItem(row),
+        ...linePatch,
+      },
+    };
+  });
 };
 
 const isDiscrepancyForItem = (discrepancy = {}, item = {}, lineItems = [], discrepancyIndex = -1) => {
@@ -3369,6 +3429,9 @@ const Shipments = () => {
   const [quickViewFiles, setQuickViewFiles] = useState([]);
   const [isQuickViewLoading, setIsQuickViewLoading] = useState(false);
   const [quickViewError, setQuickViewError] = useState('');
+  const [discrepancyResolveTarget, setDiscrepancyResolveTarget] = useState(null);
+  const [discrepancyResolveError, setDiscrepancyResolveError] = useState('');
+  const [isResolvingDiscrepancy, setIsResolvingDiscrepancy] = useState(false);
   const quickViewRequestIdRef = useRef(0);
   const [createForm, setCreateForm] = useState(initialCreateForm);
   const [createItems, setCreateItems] = useState([createEmptyProductItem()]);
@@ -3589,6 +3652,8 @@ const Shipments = () => {
     setQuickViewBoxes([]);
     setQuickViewFiles([]);
     setQuickViewError('');
+    setDiscrepancyResolveTarget(null);
+    setDiscrepancyResolveError('');
     setShowQuickViewModal(true);
 
     const lookupCandidates = getShipmentLookupCandidates(shipment, previewShipment);
@@ -3866,7 +3931,78 @@ const Shipments = () => {
     setQuickViewBoxes([]);
     setQuickViewFiles([]);
     setQuickViewError('');
+    setDiscrepancyResolveTarget(null);
+    setDiscrepancyResolveError('');
     setIsQuickViewLoading(false);
+  };
+
+  const handleOpenDiscrepancyResolve = (discrepancy = {}, matchedLineItem = {}) => {
+    const fallbackLineItem = matchedLineItem && Object.keys(matchedLineItem).length
+      ? matchedLineItem
+      : findLineItemForDiscrepancy(discrepancy, quickViewItems);
+    const discrepancyLineItem = getDiscrepancyLineItem(discrepancy);
+    const lineItemId = firstPresent(
+      getDiscrepancyLineItemId(discrepancy),
+      getLineItemRecordId(fallbackLineItem),
+      getLineItemRecordId(discrepancyLineItem)
+    );
+
+    setDiscrepancyResolveError('');
+    setDiscrepancyResolveTarget({
+      discrepancy,
+      lineItem: fallbackLineItem,
+      lineItemId,
+      sku: firstPresent(getLineItemSku(fallbackLineItem), getDiscrepancySku(discrepancy), lineItemId),
+      productName: firstPresent(getLineItemProductName(fallbackLineItem), getLineItemProductName(discrepancyLineItem)),
+      expectedQty: getDiscrepancyExpectedQty(discrepancy, fallbackLineItem),
+      receivedQty: getDiscrepancyReceivedQty(discrepancy, fallbackLineItem),
+      differenceQty: getDiscrepancyDifferenceQty(discrepancy, fallbackLineItem),
+    });
+  };
+
+  const handleCloseDiscrepancyResolve = () => {
+    if (isResolvingDiscrepancy) return;
+    setDiscrepancyResolveTarget(null);
+    setDiscrepancyResolveError('');
+  };
+
+  const handleResolveDiscrepancySubmit = async (payload) => {
+    try {
+      const target = discrepancyResolveTarget;
+
+      setError('');
+      setQuickViewError('');
+      setDiscrepancyResolveError('');
+      setIsResolvingDiscrepancy(true);
+
+      if (!target?.lineItemId) {
+        throw new Error('Line item ID is required to update received quantity.');
+      }
+
+      const responsePayload = await resolveDiscrepancyRequest(target.lineItemId, payload);
+      const responseData = getDiscrepancyResolveData(responsePayload) || {};
+
+      if (responseData?.shipment && typeof responseData.shipment === 'object') {
+        const updatedShipment = normalizeShipment(responseData.shipment);
+        const updatedItems = sortLineItemsForDisplay(applyBundleSizesFromNotes(getShipmentLineItems(updatedShipment), updatedShipment));
+        setQuickViewShipment(updatedShipment);
+        if (updatedItems.length) setQuickViewItems(updatedItems);
+      }
+
+      setQuickViewDiscrepancies((currentRows) => updateDiscrepancyRowsAfterResolve(currentRows, target, responseData));
+      showToast('success', responseData?.resolved === true ? 'Discrepancy resolved.' : 'Received quantity updated. Discrepancy remains active.');
+      setDiscrepancyResolveTarget(null);
+
+      if (responseData?.shipment || quickViewShipment) {
+        await handleQuickViewShipment(responseData?.shipment || quickViewShipment);
+      }
+    } catch (requestError) {
+      setDiscrepancyResolveError(requestError.message);
+      setQuickViewError(requestError.message);
+      showToast('error', requestError.message || 'Failed to update received quantity.');
+    } finally {
+      setIsResolvingDiscrepancy(false);
+    }
   };
 
   const requestDeleteShipment = (shipment) => {
@@ -4925,6 +5061,20 @@ const Shipments = () => {
           </div>
         )}
 
+        <DiscrepancyResolutionModal
+          open={Boolean(discrepancyResolveTarget)}
+          sku={discrepancyResolveTarget?.sku}
+          productName={discrepancyResolveTarget?.productName}
+          expectedQty={discrepancyResolveTarget?.expectedQty}
+          receivedQty={discrepancyResolveTarget?.receivedQty}
+          differenceQty={discrepancyResolveTarget?.differenceQty}
+          lineItemId={discrepancyResolveTarget?.lineItemId}
+          error={discrepancyResolveError}
+          isSubmitting={isResolvingDiscrepancy}
+          onClose={handleCloseDiscrepancyResolve}
+          onSubmit={handleResolveDiscrepancySubmit}
+        />
+
         {showQuickViewModal && quickViewShipment ? (
           <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4">
             <div className="max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl bg-white shadow-2xl">
@@ -5261,14 +5411,24 @@ const Shipments = () => {
                                           <div className="space-y-2">
                                             {itemDiscrepancies.map((discrepancy, discrepancyIndex) => (
                                               <div key={discrepancy?.id || discrepancy?.uuid || getDiscrepancyLineItemId(discrepancy) || discrepancyIndex} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                                                <div className="flex items-center justify-between gap-3">
+                                                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                                   <p className="font-medium text-amber-900">{getLineItemSku(item) || getDiscrepancySku(discrepancy) || 'Line Item'}</p>
-                                                  <span className="rounded-full bg-white px-2 py-1 text-xs font-medium text-amber-700">
-                                                    {discrepancy?.status || 'OPEN'}
-                                                  </span>
+                                                  <div className="flex flex-wrap items-center gap-2">
+                                                    <span className="rounded-full bg-white px-2 py-1 text-xs font-medium text-amber-700">
+                                                      {discrepancy?.status || 'OPEN'}
+                                                    </span>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => handleOpenDiscrepancyResolve(discrepancy, item)}
+                                                      disabled={!firstPresent(getDiscrepancyLineItemId(discrepancy), getLineItemRecordId(item))}
+                                                      className="rounded-md bg-[#132347] px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                                                    >
+                                                      Update Received Qty
+                                                    </button>
+                                                  </div>
                                                 </div>
                                                 <p className="mt-1 text-xs text-amber-800">
-                                                  Expected {getDiscrepancyExpectedQty(discrepancy, item)}, received {getDiscrepancyReceivedQty(discrepancy, item)}
+                                                  Expected {getDiscrepancyExpectedQty(discrepancy, item)}, received {getDiscrepancyReceivedQty(discrepancy, item)}, difference {getDiscrepancyDifferenceQty(discrepancy, item)}
                                                 </p>
                                               </div>
                                             ))}
@@ -5366,14 +5526,24 @@ const Shipments = () => {
 
                                       return (
                                         <div key={discrepancy?.id || discrepancy?.uuid || getDiscrepancyLineItemId(discrepancy) || index} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                                          <div className="flex items-center justify-between gap-3">
+                                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                             <p className="font-medium text-amber-900">{displaySku}</p>
-                                            <span className="rounded-full bg-white px-2 py-1 text-xs font-medium text-amber-700">
-                                              {discrepancy?.status || 'OPEN'}
-                                            </span>
+                                            <div className="flex flex-wrap items-center gap-2">
+                                              <span className="rounded-full bg-white px-2 py-1 text-xs font-medium text-amber-700">
+                                                {discrepancy?.status || 'OPEN'}
+                                              </span>
+                                              <button
+                                                type="button"
+                                                onClick={() => handleOpenDiscrepancyResolve(discrepancy, matchedLineItem)}
+                                                disabled={!firstPresent(getDiscrepancyLineItemId(discrepancy), getLineItemRecordId(matchedLineItem))}
+                                                className="rounded-md bg-[#132347] px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                                              >
+                                                Update Received Qty
+                                              </button>
+                                            </div>
                                           </div>
                                           <p className="mt-1 text-xs text-amber-800">
-                                            Expected {getDiscrepancyExpectedQty(discrepancy, matchedLineItem)}, received {getDiscrepancyReceivedQty(discrepancy, matchedLineItem)}
+                                            Expected {getDiscrepancyExpectedQty(discrepancy, matchedLineItem)}, received {getDiscrepancyReceivedQty(discrepancy, matchedLineItem)}, difference {getDiscrepancyDifferenceQty(discrepancy, matchedLineItem)}
                                           </p>
                                         </div>
                                       );
