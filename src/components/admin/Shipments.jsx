@@ -33,7 +33,6 @@ import {
   normalizeServiceList,
 } from '../../utils/serviceCatalog';
 import {
-  buildShipmentItemPayload as mapShipmentItemPayload,
   findLineItemLabelFile as findMappedLineItemLabelFile,
   getLineItemOutboundPackageGroups,
   getItemLabelFileAssignments as getMappedItemLabelFileAssignments,
@@ -46,6 +45,19 @@ import {
 import {
   normalizeSkuProductOptions,
 } from '../../utils/productSkuOptions';
+import {
+  buildDraftShipmentItems,
+  buildSubmittedShipmentItems,
+  createDraftItemId,
+  deleteDraftFileRecord,
+  ensureDraftItemIds,
+  getDraftFileRecordId,
+  getShipmentDraftFiles,
+  getShipmentDraftItems,
+  getShipmentDraftPayload,
+  mapDraftPayloadItemsToFormItems,
+  uploadDraftFnskuLabelFiles,
+} from '../../utils/shipmentDrafts';
 
 const API_BASE_URL = '';
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app';
@@ -91,6 +103,7 @@ const initialCreateForm = {
 };
 
 const createEmptyProductItem = () => ({
+  draftItemId: createDraftItemId(),
   sku: '',
   productName: '',
   expectedQty: '',
@@ -320,6 +333,11 @@ const formatListDate = (value = '') => {
   if (/^\d{4}-\d{2}-\d{2}/.test(textValue)) return textValue.slice(0, 10);
   const parsedDate = new Date(textValue);
   return Number.isNaN(parsedDate.getTime()) ? textValue : parsedDate.toISOString().slice(0, 10);
+};
+
+const formatDateForInput = (value = '') => {
+  const formattedDate = formatListDate(value);
+  return /^\d{4}-\d{2}-\d{2}$/.test(formattedDate) ? formattedDate : '';
 };
 
 const getShipmentCreatedDate = (shipment = {}) =>
@@ -3230,45 +3248,29 @@ const statusBadgeClass = (status = '') => {
   }
 };
 
-const buildShipmentItems = (items) => {
-  if (!items.length) {
-    throw new Error('At least one product line item is required.');
-  }
+const canEditDraftShipment = (shipment = {}) =>
+  String(shipment?.status || '').trim().toLowerCase() === 'draft';
 
-  const validItems = items
-    .map((item, index) => ({
-      ...item,
-      itemIndex: index,
-      item_index: index,
-      lineItemIndex: index,
-      line_item_index: index,
-      displayOrder: index,
-      display_order: index,
-      sku: String(item.sku || '').trim(),
-      productName: String(item.productName || '').trim(),
-      expectedQty: Number(item.expectedQty || 0),
-      ...(item.needsBundling ? { bundleSize: Number(item.bundleSize || 0) } : {}),
-      fnskuLabel: String(item.fnskuLabel || '').trim(),
-      fileName: String(item.fileName || item.fnskuLabelFileName || item.fnsku_label_file_name || '').trim(),
-    }))
-    .filter((item) => item.sku || item.productName || item.expectedQty || item.fnskuLabel || item.services?.length);
+const buildShipmentItems = (items) => buildSubmittedShipmentItems(items);
 
-  if (!validItems.length) {
-    throw new Error('At least one product line item is required.');
-  }
+const mapShipmentItemsToCreateItems = (items = []) => {
+  const mappedItems = sortLineItemsForDisplay(getShipmentLineItems({ items })).map((item) => ({
+    draftItemId: firstPresent(item?.draftItemId, item?.draft_item_id) || createDraftItemId(),
+    sku: getLineItemSku(item),
+    productName: getLineItemProductName(item),
+    expectedQty: String(getLineItemExpectedQty(item) || ''),
+    bundleSize: String(getLineItemBundleSize(item) || ''),
+    fnskuLabel: getLineItemFnsku(item),
+    needsBundling: Boolean(item?.needsBundling || item?.needs_bundling),
+    serviceType: '',
+    serviceQty: '',
+    services: normalizeServiceList(getLineItemServiceLabels(item)),
+    customServiceName: '',
+    fileName: String(item?.fileName || item?.file_name || item?.fnskuLabelFileName || item?.fnsku_label_file_name || '').trim(),
+    file: null,
+  }));
 
-  return validItems.map((item, index) => {
-    if (!item.sku || !item.productName || item.expectedQty <= 0) {
-      throw new Error('Each product line item needs product, SKU, and qty expected.');
-    }
-
-    const services = normalizeServiceList(item.services);
-
-    return {
-      ...mapShipmentItemPayload({ ...item, services }, index),
-      services,
-    };
-  });
+  return mappedItems.length ? mappedItems : [createEmptyProductItem()];
 };
 
 const extractCreatedShipmentId = (payload) =>
@@ -3432,12 +3434,14 @@ const Shipments = () => {
   const quickViewRequestIdRef = useRef(0);
   const [createForm, setCreateForm] = useState(initialCreateForm);
   const [createItems, setCreateItems] = useState([createEmptyProductItem()]);
+  const [editingShipmentId, setEditingShipmentId] = useState('');
   const [skuOptions, setSkuOptions] = useState([]);
   const [isSkuOptionsLoading, setIsSkuOptionsLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isClientsLoading, setIsClientsLoading] = useState(false);
   const [isStaffLoading, setIsStaffLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [savingAction, setSavingAction] = useState('');
   const [deletingShipmentId, setDeletingShipmentId] = useState('');
   const [pendingDeleteShipment, setPendingDeleteShipment] = useState(null);
   const [error, setError] = useState('');
@@ -3595,6 +3599,7 @@ const Shipments = () => {
 
   const openCreateSection = () => {
     setShowCreateSection(true);
+    setEditingShipmentId('');
     setError('');
     setCreateForm((current) => ({
       ...current,
@@ -3612,8 +3617,10 @@ const Shipments = () => {
 
   const closeCreateSection = () => {
     setShowCreateSection(false);
+    setEditingShipmentId('');
     setCreateForm(initialCreateForm);
     setCreateItems([createEmptyProductItem()]);
+    setSavingAction('');
   };
 
   const loadShipments = async () => {
@@ -4177,6 +4184,28 @@ const Shipments = () => {
     setError('');
   };
 
+  const deleteDraftLabelFileForItem = async (item = {}) => {
+    const fileRecordId = firstPresent(
+      item?.draftFileRecordId,
+      item?.fnskuLabelFileId,
+      item?.fnsku_label_file_id,
+      getDraftFileRecordId(item?.uploadedDraftFile)
+    );
+
+    if (!fileRecordId) return;
+
+    try {
+      await deleteDraftFileRecord({
+        fileRecordId,
+        apiBaseUrl: API_BASE_URL,
+        buildHeaders,
+        parseResponse,
+      });
+    } catch (requestError) {
+      showToast('error', requestError.message || 'Could not remove the previous draft FNSKU label.');
+    }
+  };
+
   const handleProductLabelFile = (index, file) => {
     if (!file) return;
     if (file.size > SAFE_FILE_UPLOAD_BYTES) {
@@ -4185,6 +4214,7 @@ const Shipments = () => {
       showToast('error', errorMessage);
       return;
     }
+    void deleteDraftLabelFileForItem(createItems[index]);
     setCreateItems((current) =>
       current.map((item, itemIndex) =>
         itemIndex === index
@@ -4194,6 +4224,10 @@ const Shipments = () => {
               fileName: file.name,
               fnskuLabelFileName: file.name,
               fnsku_label_file_name: file.name,
+              fnskuLabelFileId: '',
+              fnsku_label_file_id: '',
+              draftFileRecordId: '',
+              uploadedDraftFile: null,
             }
           : item
       )
@@ -4272,12 +4306,81 @@ const Shipments = () => {
   };
 
   const handleRemoveItem = (index) => {
+    void deleteDraftLabelFileForItem(createItems[index]);
     setCreateItems((current) => (current.length === 1 ? current : current.filter((_, itemIndex) => itemIndex !== index)));
   };
 
-  const handleCreateShipment = async () => {
+  const handleEditDraftShipment = async (shipment) => {
+    if (!canEditDraftShipment(shipment)) return;
+
+    const shipmentId = getShipmentRecordId(shipment) || getShipmentId(shipment);
+
+    if (!shipmentId) {
+      const errorMessage = 'Shipment id is missing.';
+      setError(errorMessage);
+      showToast('error', errorMessage);
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+      setError('');
+      const payload = await parseResponse(
+        await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(shipmentId)}`, {
+          method: 'GET',
+          headers: buildHeaders(),
+          cache: 'no-store',
+        })
+      );
+      const detail = extractShipmentDetail(payload);
+      const draftPayload = getShipmentDraftPayload(detail);
+      const draftItems = getShipmentDraftItems(detail);
+      const draftFiles = getShipmentDraftFiles(detail);
+      const hydratedDraftItems = mapDraftPayloadItemsToFormItems(draftItems, draftFiles);
+      const fallbackItems = mapShipmentItemsToCreateItems(getShipmentLineItems(detail).length ? getShipmentLineItems(detail) : getShipmentLineItems(shipment));
+      const clientId = firstPresent(
+        draftPayload?.clientId,
+        draftPayload?.client_id,
+        detail?.clientId,
+        detail?.client_id,
+        detail?.clients?.id,
+        detail?.client?.id,
+        shipment?.clientId,
+        shipment?.client_id
+      );
+
+      setCreateForm({
+        reference: detail?.reference || detail?.shipmentNumber || detail?.shipment_number || shipment?.reference || '',
+        clientId,
+        assignedStaff: getAssignedStaffId(detail) || getAssignedStaffId(shipment) || '',
+        expectedArrivalDate: formatDateForInput(
+          firstPresent(
+            draftPayload?.expectedArrivalDate,
+            draftPayload?.expected_arrival_date,
+            detail?.expectedArrivalDate,
+            detail?.expected_arrival_date,
+            shipment?.expected
+          )
+        ) || getTodayDate(),
+        notes: firstPresent(draftPayload?.notes, detail?.notes, detail?.client_notes, shipment?.notes),
+      });
+      setCreateItems(hydratedDraftItems.length ? hydratedDraftItems : ensureDraftItemIds(fallbackItems));
+      setEditingShipmentId(getShipmentRecordId(detail) || shipmentId);
+      setShowQuickViewModal(false);
+      setShowCreateSection(true);
+      showToast('success', 'Draft loaded for editing.');
+    } catch (requestError) {
+      setError(requestError.message || 'Failed to load draft for editing.');
+      showToast('error', requestError.message || 'Failed to load draft for editing.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCreateShipment = async (isDraft = false) => {
     try {
       setIsSaving(true);
+      setSavingAction(isDraft ? 'draft' : 'submit');
       setError('');
 
       if (!createForm.clientId.trim()) {
@@ -4288,20 +4391,47 @@ const Shipments = () => {
         throw new Error('Expected arrival date is required.');
       }
 
-      const items = buildShipmentItems(createItems);
+      const createItemsWithDraftIds = ensureDraftItemIds(createItems);
+      setCreateItems(createItemsWithDraftIds);
+      const items = isDraft
+        ? buildDraftShipmentItems(createItemsWithDraftIds)
+        : buildShipmentItems(createItemsWithDraftIds);
       const notes = buildShipmentNotes(createForm.notes, items);
-      const labelFileInputs = createItems
+      const labelFileInputs = createItemsWithDraftIds
         .map((item, index) => ({ item, index, file: item.file }))
-        .filter(({ item }) => item.sku || item.productName || item.expectedQty || item.fnskuLabel || item.services?.length)
         .filter(({ file }) => file && typeof file === 'object' && file.name);
-      const response = await fetch(`${API_BASE_URL}/api/shipments`, {
-        method: 'POST',
+      let stagedDraftUploadResult = { uploadedFiles: [], uploadedCount: 0, failedMessages: [] };
+
+      if (!isDraft && editingShipmentId && labelFileInputs.length) {
+        stagedDraftUploadResult = await uploadDraftFnskuLabelFiles({
+          shipmentId: editingShipmentId,
+          items: createItemsWithDraftIds,
+          apiBaseUrl: API_BASE_URL,
+          buildHeaders,
+          parseResponse,
+        });
+
+        if (stagedDraftUploadResult.failedMessages.length) {
+          throw new Error(stagedDraftUploadResult.failedMessages.join(' '));
+        }
+      }
+
+      const requestUrl = editingShipmentId
+        ? `${API_BASE_URL}/api/shipments/${encodeURIComponent(editingShipmentId)}`
+        : `${API_BASE_URL}/api/shipments`;
+      const response = await fetch(requestUrl, {
+        method: editingShipmentId ? 'PATCH' : 'POST',
         headers: buildHeaders(true),
         body: JSON.stringify({
-          clientId: createForm.clientId.trim(),
-          reference: createForm.reference.trim() || undefined,
+          ...(editingShipmentId
+            ? {}
+            : {
+                clientId: createForm.clientId.trim(),
+                reference: createForm.reference.trim() || undefined,
+              }),
           notes,
           expectedArrivalDate: createForm.expectedArrivalDate,
+          isDraft,
           items,
         }),
       });
@@ -4309,10 +4439,10 @@ const Shipments = () => {
       const payload = await parseResponse(response);
       const createdShipmentDetail = extractShipmentDetail(payload);
       const createdLineItems = getShipmentLineItems(createdShipmentDetail);
-      const createdShipmentId = extractCreatedShipmentId(payload);
+      const createdShipmentId = extractCreatedShipmentId(payload) || editingShipmentId;
       const createdShipmentStatus = String(extractCreatedShipmentStatus(payload) || '').toLowerCase();
       const postCreateWarnings = [];
-      let labelUploadCount = 0;
+      let labelUploadCount = stagedDraftUploadResult.uploadedCount;
 
       if (createdShipmentId) {
         if (createForm.assignedStaff.trim()) {
@@ -4345,7 +4475,7 @@ const Shipments = () => {
           }
         };
 
-        if (!createdShipmentStatus || createdShipmentStatus === 'draft') {
+        if (!isDraft && (!createdShipmentStatus || createdShipmentStatus === 'draft')) {
           try {
             await updateShipmentStatus('submitted');
           } catch (statusError) {
@@ -4353,7 +4483,18 @@ const Shipments = () => {
           }
         }
 
-        if (labelFileInputs.length) {
+        if (isDraft && labelFileInputs.length) {
+          const draftUploadResult = await uploadDraftFnskuLabelFiles({
+            shipmentId: createdShipmentId,
+            items: createItemsWithDraftIds,
+            apiBaseUrl: API_BASE_URL,
+            buildHeaders,
+            parseResponse,
+          });
+
+          labelUploadCount += draftUploadResult.uploadedCount;
+          postCreateWarnings.push(...draftUploadResult.failedMessages);
+        } else if (!editingShipmentId && labelFileInputs.length) {
           const usedCreatedLineItemKeys = new Set();
           const uploadResults = await Promise.allSettled(
             labelFileInputs.map(async ({ file, item, index }) => {
@@ -4453,7 +4594,7 @@ const Shipments = () => {
           }
         }
 
-        if (labelFileInputs.length) {
+        if (!isDraft && !editingShipmentId && labelFileInputs.length) {
           try {
             await reloadShipmentDetailWithItemFiles(createdShipmentId, createdLineItems);
           } catch (refreshError) {
@@ -4461,16 +4602,18 @@ const Shipments = () => {
           }
         }
       } else if (labelFileInputs.length) {
-        postCreateWarnings.push('FNSKU label upload skipped because shipment ID was not returned.');
+        postCreateWarnings.push(`${isDraft ? 'Draft' : 'FNSKU'} label upload skipped because shipment ID was not returned.`);
       }
 
       showToast(
         postCreateWarnings.length ? 'error' : 'success',
         postCreateWarnings.length
-          ? `Shipment created, but ${postCreateWarnings.join(' ')}`
+          ? `${isDraft ? 'Draft saved' : 'Shipment created'}, but ${postCreateWarnings.join(' ')}`
           : labelUploadCount
-            ? `Shipment created successfully. ${labelUploadCount} FNSKU label file(s) attached.`
-            : 'Shipment created successfully.'
+            ? `${isDraft ? 'Draft saved' : 'Shipment created successfully.'} ${labelUploadCount} FNSKU label file(s) attached.`
+            : isDraft
+              ? 'Draft saved.'
+              : 'Shipment created successfully.'
       );
       closeCreateSection();
       await loadShipments();
@@ -4479,6 +4622,7 @@ const Shipments = () => {
       showToast('error', requestError.message || 'Failed to create shipment.');
     } finally {
       setIsSaving(false);
+      setSavingAction('');
     }
   };
 
@@ -4654,6 +4798,15 @@ const Shipments = () => {
                               View
                               <ArrowRight size={14} />
                             </button>
+                            {canEditDraftShipment(shipment) ? (
+                              <button
+                                type="button"
+                                onClick={() => handleEditDraftShipment(shipment)}
+                                className="rounded-lg border border-[#dbe3ef] px-2.5 py-1.5 text-xs font-semibold text-[#132347] hover:bg-[#f8fafc]"
+                              >
+                                Edit Draft
+                              </button>
+                            ) : null}
                             <button
                               type="button"
                               onClick={() => requestDeleteShipment(shipment)}
@@ -4729,8 +4882,10 @@ const Shipments = () => {
             </button>
 
             <div className="mb-5">
-              <h1 className="text-3xl font-semibold text-[#1d2942]">Add Arrival Shipment</h1>
-              <p className="mt-1 text-sm text-gray-500">Register new inbound freight and assign handling resources.</p>
+              <h1 className="text-3xl font-semibold text-[#1d2942]">{editingShipmentId ? 'Edit Draft Shipment' : 'Add Arrival Shipment'}</h1>
+              <p className="mt-1 text-sm text-gray-500">
+                {editingShipmentId ? 'Update the draft and save it before submitting.' : 'Register new inbound freight and assign handling resources.'}
+              </p>
             </div>
 
             {error ? <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
@@ -4760,9 +4915,11 @@ const Shipments = () => {
                         value={createForm.clientId}
                         onChange={(e) => {
                           setCreateForm((prev) => ({ ...prev, clientId: e.target.value }));
-                          setCreateItems([createEmptyProductItem()]);
+                          if (!editingShipmentId) {
+                            setCreateItems([createEmptyProductItem()]);
+                          }
                         }}
-                        disabled={isClientsLoading || !clientOptions.length}
+                        disabled={Boolean(editingShipmentId) || isClientsLoading || !clientOptions.length}
                         className={`w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm ${
                           createForm.clientId ? 'text-gray-900' : 'text-gray-400'
                         }`}
@@ -5041,16 +5198,24 @@ const Shipments = () => {
                 <div className="flex items-center justify-end gap-3 rounded-xl border border-[#e6ecf5] bg-white p-5">
                   <button
                     onClick={closeCreateSection}
+                    disabled={isSaving}
                     className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
                   >
                     Cancel
                   </button>
                   <button
-                    onClick={handleCreateShipment}
+                    onClick={() => handleCreateShipment(true)}
+                    disabled={isSaving}
+                    className="rounded-lg border border-[#ffd6b6] px-5 py-2 text-sm font-semibold text-[#ff6900] hover:bg-[#fff7ed] disabled:opacity-60"
+                  >
+                    {savingAction === 'draft' ? 'Saving...' : 'Save Draft'}
+                  </button>
+                  <button
+                    onClick={() => handleCreateShipment(false)}
                     disabled={isSaving}
                     className="rounded-lg bg-[#ff9d20] px-5 py-2 text-sm font-semibold text-white hover:bg-[#f08f09] disabled:opacity-60"
                   >
-                    {isSaving ? 'Submitting...' : 'Confirm Shipment'}
+                    {savingAction === 'submit' ? 'Submitting...' : 'Confirm Shipment'}
                   </button>
                 </div>
               </div>

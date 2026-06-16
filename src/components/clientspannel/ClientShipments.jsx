@@ -7,7 +7,6 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getSession } from '../../utils/auth';
 import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
 import {
-  buildShipmentItemPayload as mapShipmentItemPayload,
   findSavedLineItemForUpload as findMappedSavedLineItemForUpload,
   getLineItemOutboundPackageGroups,
   getItemLabelFileAssignments as getMappedItemLabelFileAssignments,
@@ -20,6 +19,19 @@ import {
 import {
   normalizeSkuProductOptions,
 } from '../../utils/productSkuOptions';
+import {
+  buildDraftShipmentItems,
+  buildSubmittedShipmentItems,
+  createDraftItemId,
+  deleteDraftFileRecord,
+  ensureDraftItemIds,
+  getDraftFileRecordId,
+  getShipmentDraftFiles,
+  getShipmentDraftItems,
+  getShipmentDraftPayload,
+  mapDraftPayloadItemsToFormItems,
+  uploadDraftFnskuLabelFiles,
+} from '../../utils/shipmentDrafts';
 import {
   SERVICE_SELECT_OPTIONS,
   STANDARD_SERVICE_KEYS as STANDARD_CATALOG_SERVICE_KEYS,
@@ -84,6 +96,7 @@ const getFnskuLabelTooLargeMessage = (fileName = 'FNSKU label file') =>
   `${fileName} is too large. FNSKU label files must be ${formatFileSize(SAFE_FILE_UPLOAD_BYTES)} or less.`;
 
 const createEmptyProductItem = () => ({
+  draftItemId: createDraftItemId(),
   productName: '',
   sku: '',
   expectedQty: '',
@@ -3927,6 +3940,7 @@ const mapCsvRowsToProductItems = (rows) => {
     }, {});
 
     return {
+      draftItemId: createDraftItemId(),
       productName: getCsvValue(row, ['productName', 'product_name', 'product', 'name']),
       sku: getCsvValue(row, ['sku', 'sellerSku', 'seller_sku']),
       expectedQty: getCsvValue(row, ['expectedQty', 'expected_qty', 'qtyExpected', 'qty_expected', 'quantity', 'qty']),
@@ -4189,6 +4203,7 @@ const buildShipmentNotes = (form = {}, items = []) =>
 
 const mapShipmentItemsToProductItems = (items = []) => {
   const mappedItems = sortLineItemsForDisplay(getLineItems({ items })).map((item) => ({
+    draftItemId: item?.draftItemId || item?.draft_item_id || createDraftItemId(),
     productName: getItemProductName(item),
     sku: getItemSku(item),
     expectedQty: String(getItemExpectedQty(item) || ''),
@@ -4206,10 +4221,10 @@ const mapShipmentItemsToProductItems = (items = []) => {
 };
 
 const serializeProductItemsForDraft = (items = []) =>
-  items.map(({ file, ...item }) => ({
+  items.map(({ file, uploadedDraftFile, ...item }) => ({
     ...item,
     bundleSize: item.needsBundling ? item.bundleSize : '',
-    fileName: item.fileName || file?.name || '',
+    fileName: item.fileName || uploadedDraftFile?.fileName || uploadedDraftFile?.file_name || file?.name || '',
   }));
 
 const getShipmentViewStats = (shipment = {}) => {
@@ -4496,6 +4511,28 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     setError('');
   };
 
+  const deleteDraftLabelFileForItem = async (item = {}) => {
+    const fileRecordId = firstPresent(
+      item?.draftFileRecordId,
+      item?.fnskuLabelFileId,
+      item?.fnsku_label_file_id,
+      getDraftFileRecordId(item?.uploadedDraftFile)
+    );
+
+    if (!fileRecordId) return;
+
+    try {
+      await deleteDraftFileRecord({
+        fileRecordId,
+        apiBaseUrl: API_BASE_URL,
+        buildHeaders,
+        parseResponse,
+      });
+    } catch (requestError) {
+      showToast('error', requestError.message || 'Could not remove the previous draft FNSKU label.');
+    }
+  };
+
   const handleProductLabelFile = (index, file) => {
     if (!file) return;
     if (file.size > SAFE_FILE_UPLOAD_BYTES) {
@@ -4504,6 +4541,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       showToast('error', errorMessage);
       return;
     }
+    void deleteDraftLabelFileForItem(productItems[index]);
     setProductItems((current) =>
       current.map((item, itemIndex) =>
         itemIndex === index
@@ -4513,6 +4551,10 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
               fileName: file.name,
               fnskuLabelFileName: file.name,
               fnsku_label_file_name: file.name,
+              fnskuLabelFileId: '',
+              fnsku_label_file_id: '',
+              draftFileRecordId: '',
+              uploadedDraftFile: null,
             }
           : item
       )
@@ -4525,6 +4567,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   };
 
   const handleRemoveProductItem = (index) => {
+    void deleteDraftLabelFileForItem(productItems[index]);
     setProductItems((current) => (current.length === 1 ? current : current.filter((_, itemIndex) => itemIndex !== index)));
   };
 
@@ -5139,28 +5182,17 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         throw new Error('Client UUID is required.');
       }
 
-      const items = productItems
-        .map((item, index) => {
-          const bundleSizeValue = Number(item.bundleSize || 0);
-          const needsBundling = Boolean(item.needsBundling);
-          const services = normalizeServiceList(item.services);
-
-          return mapShipmentItemPayload({
-            ...item,
-            itemIndex: index,
-            displayOrder: index,
-            needsBundling,
-            ...(needsBundling ? { bundleSize: bundleSizeValue } : {}),
-            services,
-          }, index);
-        })
-        .filter((item) => item.sku && item.productName && item.expectedQty > 0);
+      const productItemsWithDraftIds = ensureDraftItemIds(productItems);
+      setProductItems(productItemsWithDraftIds);
+      const items = isDraft
+        ? buildDraftShipmentItems(productItemsWithDraftIds)
+        : buildSubmittedShipmentItems(productItemsWithDraftIds);
 
       if (!items.length) {
         throw new Error('At least one product line item is required.');
       }
 
-      const labelFileInputs = productItems
+      const labelFileInputs = productItemsWithDraftIds
         .map((item, index) => ({
           item,
           index,
@@ -5217,6 +5249,22 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           backendStatusForEdit !== 'draft'
       );
       let savePayload = null;
+      let stagedDraftUploadResult = { uploadedFiles: [], uploadedCount: 0, failedMessages: [] };
+
+      if (!isDraft && editingShipmentId && labelFileInputs.length) {
+        stagedDraftUploadResult = await uploadDraftFnskuLabelFiles({
+          shipmentId: editingShipmentId,
+          items: productItemsWithDraftIds,
+          apiBaseUrl: API_BASE_URL,
+          buildHeaders,
+          parseResponse,
+          prepareFileForUpload,
+        });
+
+        if (stagedDraftUploadResult.failedMessages.length) {
+          throw new Error(stagedDraftUploadResult.failedMessages.join(' '));
+        }
+      }
 
       if (shouldSaveDraftLocallyOnly) {
         savePayload = buildLocalDraftSavePayload();
@@ -5310,8 +5358,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         (isUuidValue(editingShipmentId) ? editingShipmentId : '');
       const savedLineItems = savedShipmentLineItems || [];
       const labelUploadWarnings = [];
-      let uploadedLabelFiles = [];
-      let uploadedLabelCount = 0;
+      let uploadedLabelFiles = [...stagedDraftUploadResult.uploadedFiles];
+      let uploadedLabelCount = stagedDraftUploadResult.uploadedCount;
 
       if (isDraft) {
         savedShipmentForList.status = 'draft';
@@ -5333,7 +5381,24 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         }
       }
 
-      if (labelFileInputs.length) {
+      if (labelFileInputs.length && isDraft) {
+        if (savedShipmentRecordId) {
+          const draftUploadResult = await uploadDraftFnskuLabelFiles({
+            shipmentId: savedShipmentRecordId,
+            items: productItemsWithDraftIds,
+            apiBaseUrl: API_BASE_URL,
+            buildHeaders,
+            parseResponse,
+            prepareFileForUpload,
+          });
+
+          uploadedLabelFiles = mergeFileLists(uploadedLabelFiles, draftUploadResult.uploadedFiles);
+          uploadedLabelCount += draftUploadResult.uploadedCount;
+          labelUploadWarnings.push(...draftUploadResult.failedMessages);
+        } else {
+          labelUploadWarnings.push('Draft label file upload skipped because shipment database ID was not returned.');
+        }
+      } else if (labelFileInputs.length && !editingShipmentId) {
         if (savedShipmentRecordId) {
           const usedSavedLineItemKeys = new Set();
           const uploadResults = await Promise.allSettled(
@@ -5474,6 +5539,30 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
             attachments: uploadedLabelFiles,
           }
         : savedShipmentForList;
+      const uploadedDraftFileByItemId = new Map(
+        uploadedLabelFiles
+          .map((file) => [String(file?.metadata?.draftItemId || '').trim(), file])
+          .filter(([draftItemId]) => draftItemId)
+      );
+      const productItemsForSnapshot = productItemsWithDraftIds.map((item) => {
+        const uploadedDraftFile = uploadedDraftFileByItemId.get(String(item.draftItemId || '').trim());
+        const uploadedDraftFileId = uploadedDraftFile ? getDraftFileRecordId(uploadedDraftFile) : '';
+        const uploadedDraftFileName = uploadedDraftFile?.fileName || uploadedDraftFile?.file_name || '';
+
+        return uploadedDraftFile
+          ? {
+              ...item,
+              file: null,
+              fileName: uploadedDraftFileName || item.fileName,
+              fnskuLabelFileName: uploadedDraftFileName || item.fnskuLabelFileName,
+              fnsku_label_file_name: uploadedDraftFileName || item.fnsku_label_file_name,
+              fnskuLabelFileId: uploadedDraftFileId,
+              fnsku_label_file_id: uploadedDraftFileId,
+              draftFileRecordId: uploadedDraftFileId,
+              uploadedDraftFile,
+            }
+          : item;
+      });
       const draftSnapshot = {
         isDraft: Boolean(isDraft),
         status: isDraft ? 'draft' : 'submitted',
@@ -5482,7 +5571,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           clientId: getClientIdFromSession(),
           expectedArrivalDate: formatDateForInput(createForm.expectedArrivalDate),
         },
-        productItems: serializeProductItemsForDraft(productItems),
+        productItems: serializeProductItemsForDraft(productItemsForSnapshot),
       };
 
       writeCachedDraft(
@@ -6022,6 +6111,10 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         if (!cachedBeforeFetch) throw requestError;
       }
 
+      const serverDraftPayload = getShipmentDraftPayload(detail);
+      const serverDraftItems = getShipmentDraftItems(detail);
+      const serverDraftFiles = getShipmentDraftFiles(detail);
+      const serverDraftFormItems = mapDraftPayloadItemsToFormItems(serverDraftItems, serverDraftFiles);
       const detailItems = getLineItems(detail);
       const fallbackItems = getLineItems(fallbackShipment);
       const mergedDraftItems = mergeLineItemGroups(detailItems, fallbackItems, cachedBeforeFetch?.productItems || []);
@@ -6035,8 +6128,10 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         shipmentId
       );
       const cachedDraft = getCachedDraft(fallbackShipment, detail, draft, shipmentId) || cachedBeforeFetch;
-      const notes = draft?.notes || draft?.client_notes || '';
+      const notes = firstPresent(serverDraftPayload?.notes, draft?.notes, draft?.client_notes);
       const expectedArrivalDate =
+        serverDraftPayload?.expectedArrivalDate ||
+        serverDraftPayload?.expected_arrival_date ||
         draft?.expectedArrivalDate ||
         draft?.expected_arrival_date ||
         fallbackShipment?.expectedArrivalDate ||
@@ -6059,7 +6154,13 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         notes: cachedForm?.notes ?? stripNoteLine(stripNoteLine(stripNoteLine(stripNoteLine(stripNoteLine(stripNoteLine(notes, 'QC inspection requested'), BUNDLE_SIZE_NOTE_PREFIX), 'Tracking:'), 'Boxes:'), 'Pallets:'), 'Boxes/Pallets:'),
         expectedArrivalDate: formatDateForInput(cachedForm?.expectedArrivalDate || expectedArrivalDate),
       });
-      setProductItems(cachedDraft?.productItems?.length ? cachedDraft.productItems : mapShipmentItemsToProductItems(getLineItems(draft)));
+      setProductItems(
+        serverDraftFormItems.length
+          ? serverDraftFormItems
+          : cachedDraft?.productItems?.length
+            ? ensureDraftItemIds(cachedDraft.productItems)
+            : mapShipmentItemsToProductItems(getLineItems(draft))
+      );
       setEditingShipmentId(getShipmentRecordId(draft) || getShipmentId(draft) || shipmentId);
       setShowViewModal(false);
       setShowTrackModal(false);
