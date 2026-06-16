@@ -3929,6 +3929,42 @@ const parseServiceList = (servicesValue = '', serviceType = '', serviceQty = '')
   return normalizeServiceList(qty ? `${type} /${qty}qty` : type);
 };
 
+const normalizeImportedProductKeyPart = (value = '') =>
+  String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+const getImportedProductItemKey = (item = {}) => {
+  const sku = normalizeImportedProductKeyPart(item.sku);
+  if (sku) return `sku:${sku}`;
+
+  const fnsku = normalizeImportedProductKeyPart(item.fnskuLabel);
+  const productName = normalizeImportedProductKeyPart(item.productName);
+  if (fnsku && productName) return `fnsku-product:${fnsku}:${productName}`;
+  if (fnsku) return `fnsku:${fnsku}`;
+  if (productName) return `product:${productName}`;
+
+  return '';
+};
+
+const dedupeImportedProductItems = (items = []) => {
+  const seenKeys = new Set();
+  let duplicateCount = 0;
+  const uniqueItems = [];
+
+  items.forEach((item) => {
+    const key = getImportedProductItemKey(item);
+
+    if (key && seenKeys.has(key)) {
+      duplicateCount += 1;
+      return;
+    }
+
+    if (key) seenKeys.add(key);
+    uniqueItems.push(item);
+  });
+
+  return { uniqueItems, duplicateCount };
+};
+
 const mapCsvRowsToProductItems = (rows) => {
   if (rows.length < 2) return [];
 
@@ -4633,13 +4669,18 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       const text = await file.text();
       const rows = parseCsvRows(text);
       const importedItems = mapCsvRowsToProductItems(rows);
+      const { uniqueItems, duplicateCount } = dedupeImportedProductItems(importedItems);
 
-      if (!importedItems.length) {
+      if (!uniqueItems.length) {
         throw new Error('CSV file is empty or has invalid format. Please ensure it has the correct headers and data.');
       }
 
-      setProductItems(importedItems);
-      setMessage(`${importedItems.length} product line item(s) imported from CSV.`);
+      setProductItems(uniqueItems);
+      setMessage(
+        `${uniqueItems.length} product line item(s) imported from CSV.${
+          duplicateCount ? ` ${duplicateCount} duplicate row(s) skipped.` : ''
+        }`
+      );
     } catch (requestError) {
       setError(requestError.message || 'CSV import failed.');
     }
