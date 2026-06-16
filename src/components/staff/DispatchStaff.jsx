@@ -136,6 +136,48 @@ const extractFiles = (payload) => {
 
 const getBoxId = (box) => box?.id || box?.uuid || box?.boxId || box?.box_id || "";
 
+const getBoxTypeValue = (box = {}) => {
+  const value = String(firstPresent(box?.boxType, box?.box_type, box?.containerType, box?.container_type, box?.type, "box")).trim().toLowerCase();
+  return value === "pallet" ? "pallet" : "box";
+};
+
+const isPalletBox = (box = {}) => getBoxTypeValue(box) === "pallet";
+
+const getBoxPalletId = (box = {}) =>
+  firstPresent(box?.palletId, box?.pallet_id, box?.pallet?.id, box?.pallet?.uuid);
+
+const isBoxInsidePallet = (box = {}) =>
+  Boolean(getBoxPalletId(box) || box?.insidePallet || box?.inside_pallet || box?.isChildBox || box?.is_child_box);
+
+const getPalletChildBoxes = (box = {}) => [
+  ...toArray(box?.palletChildren || box?.pallet_children),
+  ...toArray(box?.childBoxes || box?.child_boxes),
+  ...toArray(box?.children),
+];
+
+const getDispatchBoxTitle = (box = {}, index = 0) => {
+  const rawTitle = firstPresent(box?.reference, box?.label, box?.name);
+  const title = String(rawTitle || "").trim();
+  if (title) return title;
+
+  const boxNumber = String(firstPresent(box?.boxNumber, box?.box_number) || "").trim();
+  if (boxNumber) return `${isPalletBox(box) ? "Pallet" : "Box"} ${boxNumber}`;
+
+  const fallbackId = String(box?.id || "").trim();
+  return fallbackId || `${isPalletBox(box) ? "Pallet" : "Box"} ${index + 1}`;
+};
+
+const getDispatchableBoxes = (source = {}) => {
+  const dispatchableBoxes = toArray(source?.dispatchableBoxes || source?.dispatchable_boxes);
+  if (dispatchableBoxes.length) return dispatchableBoxes;
+
+  const looseBoxes = toArray(source?.looseBoxes || source?.loose_boxes);
+  const pallets = toArray(source?.pallets);
+  if (looseBoxes.length || pallets.length) return [...looseBoxes, ...pallets];
+
+  return getBoxes(source).filter((box) => !isBoxInsidePallet(box));
+};
+
 const getBoxLookupIds = (box = {}) => [
   ...new Set(
     [box?.id, box?.uuid, box?.boxId, box?.box_id, box?.recordId, box?.record_id]
@@ -316,12 +358,16 @@ const hydrateBoxesWithLabelFiles = async (boxes = []) => {
 
       const fileResults = await Promise.allSettled(
         lookupIds.map(async (boxId) => {
-          const filesResponse = await fetch(`${API_BASE_URL}/api/files?entityType=box&entityId=${encodeURIComponent(boxId)}`, {
+          const filesResponse = await fetch(`${API_BASE_URL}/api/files?entityType=${isPalletBox(box) ? "pallet" : "box"}&entityId=${encodeURIComponent(boxId)}`, {
             method: "GET",
             headers: buildHeaders(),
             cache: "no-store",
           });
-          return extractFiles(await parseResponse(filesResponse)).map((file) => normalizeBoxLabelFile(file, primaryBoxId || boxId));
+          return extractFiles(await parseResponse(filesResponse)).map((file) => ({
+            ...normalizeBoxLabelFile(file, primaryBoxId || boxId),
+            entityType: isPalletBox(box) ? "pallet" : "box",
+            entity_type: isPalletBox(box) ? "pallet" : "box",
+          }));
         })
       );
 
@@ -723,6 +769,17 @@ const formatBoxContentRows = (items = [], lineItems = [], box = {}) => {
 };
 
 const formatBoxContents = (shipment, box, subShipment = null) => {
+  const palletChildren = getPalletChildBoxes(box);
+  if (isPalletBox(box) && palletChildren.length) {
+    return palletChildren
+      .map((childBox, index) => {
+        const childTitle = getDispatchBoxTitle(childBox, index);
+        const childContents = formatBoxContents(shipment, childBox, subShipment);
+        return childContents && childContents !== "--" ? `${childTitle}: ${childContents}` : childTitle;
+      })
+      .join("; ");
+  }
+
   const lineItems = getLineItems(shipment);
   const boxItems = getBoxItems(box);
   const contentRows = formatBoxContentRows(boxItems, lineItems, box);
@@ -874,11 +931,11 @@ const normalizeDispatchShipment = (shipment) => {
   const reference = getReference(shipment);
   const shipmentId = shipment?.id || shipment?.uuid || reference;
   const client = getClientName(shipment);
-  const boxes = getBoxes(shipment);
+  const boxes = getDispatchableBoxes(shipment);
   const subShipments = extractSubShipments(shipment);
   const parentRows = boxes.map((box) => ({ box, subShipment: null }));
   const subShipmentRows = subShipments.flatMap((subShipment) =>
-    getSubShipmentBoxes(subShipment).map((box) => ({ box, subShipment }))
+    getDispatchableBoxes(subShipment).map((box) => ({ box, subShipment }))
   );
   const normalizedBoxes = parentRows.length || subShipmentRows.length
     ? dedupeDispatchBoxRows([...parentRows, ...subShipmentRows], shipment)
@@ -887,20 +944,15 @@ const normalizeDispatchShipment = (shipment) => {
   return normalizedBoxes.map(({ box, subShipment }, index) => {
     const subShipmentId = getSubShipmentId(subShipment || {});
     const subShipmentReference = getSubShipmentReference(subShipment || {});
-    const boxLabel =
-      box?.reference ||
-      box?.label ||
-      box?.name ||
-      box?.boxNumber ||
-      box?.box_number ||
-      box?.id ||
-      (parentRows.length || subShipmentRows.length ? `BOX-${String(index + 1).padStart(2, "0")}` : "--");
-    const boxType = box?.boxType || box?.box_type || box?.type || box?.size || box?.boxSize || box?.box_size || "--";
+    const isPallet = isPalletBox(box);
+    const palletChildren = getPalletChildBoxes(box);
+    const boxLabel = getDispatchBoxTitle(box, index) || (parentRows.length || subShipmentRows.length ? `BOX-${String(index + 1).padStart(2, "0")}` : "--");
+    const boxType = isPallet ? "Pallet" : (box?.boxType || box?.box_type || box?.type || box?.size || box?.boxSize || box?.box_size || "--");
     const weight = Number(box?.weight || box?.weightKg || box?.weight_kg || box?.grossWeight || box?.gross_weight || 0);
     const fbaLabelUploaded = parentRows.length || subShipmentRows.length ? getBoxLabelUploaded(box) : false;
     const dispatchedAt = box?.dispatched_at || box?.dispatchedAt || "";
     const dispatchState = getBoxDispatchState(subShipment || shipment, box);
-    const action = getDispatchAction({ dispatchState, fbaLabelUploaded });
+    const action = isPallet && !dispatchState ? "Dispatch" : getDispatchAction({ dispatchState, fbaLabelUploaded });
 
     return {
       id: `${shipmentId}-${subShipmentId || "parent"}-${box?.id || boxLabel || index}`,
@@ -914,6 +966,9 @@ const normalizeDispatchShipment = (shipment) => {
       type: String(boxType).replaceAll("_", " "),
       weight: weight ? `${weight} kg` : "--",
       contents: formatBoxContents(shipment, box, subShipment),
+      childBoxCount: palletChildren.length,
+      childBoxes: palletChildren.map((childBox, childIndex) => getDispatchBoxTitle(childBox, childIndex)).join(", "),
+      isPallet,
       status,
       fbaLabelUploaded,
       fbaShippingLabelFileId: box?.fba_shipping_label_file_id || box?.fbaShippingLabelFileId || "",
@@ -1035,6 +1090,11 @@ const DispatchStaff = () => {
     }
 
     try {
+      if (box?.isPallet && !box?.fbaLabelUploaded && !box?.fbaShippingLabelFileId && !box?.labelUploadedAt) {
+        const confirmed = window.confirm("This pallet does not have an FBA label. Are you sure you want to dispatch this pallet without a pallet FBA label?");
+        if (!confirmed) return;
+      }
+
       setUpdatingId(boxId);
       setError("");
       setMessage("");
@@ -1079,7 +1139,8 @@ const DispatchStaff = () => {
           };
         })
       );
-      setMessage("Box dispatched successfully.");
+      await loadShipments({ silent: true });
+      setMessage(`${box?.isPallet ? "Pallet" : "Box"} dispatched successfully.`);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -1225,16 +1286,28 @@ const DispatchStaff = () => {
                   ) : filteredShipments.map((shipment) => {
                     const labelUploaded = Boolean(shipment.fbaShippingLabelFileId || shipment.labelUploadedAt || shipment.fbaLabelUploaded);
                     const dispatchComplete = shipment.action === "Dispatched" || shipment.action === "Completed";
-                    const canDispatch = labelUploaded && !dispatchComplete;
+                    const canDispatch = (labelUploaded || shipment.isPallet) && !dispatchComplete;
                     return (
                       <tr key={shipment.id} className="hover:bg-gray-50/70">
                         <td className="px-5 py-4 text-sm font-bold text-gray-900">{shipment.reference}</td>
                         <td className="px-5 py-4 text-sm font-medium text-gray-700">{shipment.subShipment}</td>
                         <td className="px-5 py-4 text-sm font-semibold text-gray-800">{shipment.client}</td>
                         <td className="px-5 py-4 text-sm font-medium text-gray-700">{shipment.box}</td>
-                        <td className="px-5 py-4"><span className="rounded bg-gray-100 px-2 py-1 text-[11px] font-semibold text-gray-600">{shipment.type}</span></td>
+                        <td className="px-5 py-4">
+                          <span className="rounded bg-gray-100 px-2 py-1 text-[11px] font-semibold text-gray-600">{shipment.type}</span>
+                          {shipment.isPallet ? (
+                            <span className="ml-2 rounded bg-[#fff7ed] px-2 py-1 text-[11px] font-semibold text-[#d76000]">
+                              {shipment.childBoxCount || 0} child box{shipment.childBoxCount === 1 ? "" : "es"}
+                            </span>
+                          ) : null}
+                        </td>
                         <td className="px-5 py-4 text-sm font-medium text-gray-700">{shipment.weight}</td>
-                        <td className="px-5 py-4 text-sm text-gray-500">{shipment.contents}</td>
+                        <td className="px-5 py-4 text-sm text-gray-500">
+                          {shipment.contents}
+                          {shipment.isPallet && shipment.childBoxes ? (
+                            <p className="mt-1 text-xs text-gray-400">Boxes: {shipment.childBoxes}</p>
+                          ) : null}
+                        </td>
                         <td className="px-5 py-4">
                           {labelUploaded ? (
                             <span className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
@@ -1244,7 +1317,7 @@ const DispatchStaff = () => {
                           ) : (
                             <span className="inline-flex items-center gap-1 text-sm font-semibold text-red-500">
                               <span className="inline-block h-2 w-2 rounded-full bg-red-500" />
-                              Missing
+                              {shipment.isPallet ? "Missing (optional)" : "Missing"}
                             </span>
                           )}
                         </td>

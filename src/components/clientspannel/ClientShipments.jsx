@@ -1681,12 +1681,13 @@ const formatTrackerDate = (value) => {
 const getBoxId = (box = {}) => box?.id || box?.uuid || box?.boxId || box?.box_id || '';
 
 const getBoxTitle = (box = {}, index = 0) =>
-  box?.name || box?.label || box?.reference || box?.boxNumber || box?.box_number || `Box #${index + 1}`;
+  firstPresent(box?.name, box?.label, box?.reference, box?.boxNumber, box?.box_number, `Box #${index + 1}`);
 
 const getBoxDisplayTitle = (box = {}, index = 0) => {
   const title = String(getBoxTitle(box, index) || '').trim();
-  if (/^\d+$/.test(title)) return `Box ${title}`;
-  return title || `Box ${index + 1}`;
+  const typeLabel = String(box?.box_type || box?.boxType || '').toLowerCase() === 'pallet' ? 'Pallet' : 'Box';
+  if (/^\d+$/.test(title)) return `${typeLabel} ${title}`;
+  return title || `${typeLabel} ${index + 1}`;
 };
 
 const getBoxLookupIds = (box = {}) => [
@@ -2261,6 +2262,33 @@ const getBoxSize = (box = {}) =>
 const getBoxType = (box = {}) => {
   const value = String(firstPresent(box?.boxType, box?.box_type, box?.containerType, box?.container_type, box?.type, 'box')).toLowerCase();
   return value === 'pallet' ? 'pallet' : 'box';
+};
+
+const getBoxPalletId = (box = {}) =>
+  firstPresent(box?.palletId, box?.pallet_id, box?.pallet?.id, box?.pallet?.uuid);
+
+const isBoxInsidePallet = (box = {}) =>
+  Boolean(getBoxPalletId(box) || box?.insidePallet || box?.inside_pallet || box?.isChildBox || box?.is_child_box);
+
+const getPalletChildBoxes = (box = {}) => {
+  const children = [
+    ...extractList(box, ['palletChildren', 'pallet_children', 'childBoxes', 'child_boxes']),
+    ...extractList(box?.pallet || {}, ['palletChildren', 'pallet_children', 'childBoxes', 'child_boxes', 'children', 'boxes']),
+  ];
+  const seen = new Set();
+
+  return children.filter((childBox, index) => {
+    if (!childBox || typeof childBox !== 'object') return false;
+    const childKey = String(getBoxItemsLookupId(childBox) || getBoxId(childBox) || getBoxDisplayTitle(childBox, index) || index).trim();
+    if (seen.has(childKey)) return false;
+    seen.add(childKey);
+    return true;
+  });
+};
+
+const getPalletChildCount = (box = {}) => {
+  const children = getPalletChildBoxes(box);
+  return firstPresent(box?.childBoxCount, box?.child_box_count, box?.palletChildCount, box?.pallet_child_count, children.length);
 };
 
 const getBoxDimensionValue = (box = {}, longKey, shortKey) => {
@@ -6124,12 +6152,13 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     }
   };
 
-  const handleUploadBoxLabel = async (box, index, file) => {
+  const handleUploadBoxLabel = async (box, index, file, shipmentOverride = selectedShipment) => {
     if (!file) return;
 
-    const shipmentId = getShipmentRecordId(selectedShipment) || (isUuidValue(getShipmentId(selectedShipment)) ? getShipmentId(selectedShipment) : '');
+    const shipmentContext = shipmentOverride || selectedShipment || {};
+    const shipmentId = getShipmentRecordId(shipmentContext) || (isUuidValue(getShipmentId(shipmentContext)) ? getShipmentId(shipmentContext) : '');
     const boxId = getBoxItemsLookupId(box);
-    const entityType = 'box';
+    const entityType = getBoxType(box) === 'pallet' ? 'pallet' : 'box';
     const entityId = boxId;
     const uploadFileType = 'fba_shipping_label';
     const uploadKey = `${entityType}-${entityId || index}`;
@@ -6148,7 +6177,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       const boxNumber = firstPresent(box?.box_number, box?.boxNumber, index + 1);
       const uploadFileName = sanitizeFileName(`fba-label-box-${boxNumber}-${boxId}-${uploadFile.name}`);
       const clientId = getClientIdFromSession();
-      const shipmentReference = getShipmentReference(selectedShipment);
+      const shipmentReference = getShipmentReference(shipmentContext);
       const metadata = {
         clientId,
         client_id: clientId,
@@ -6198,7 +6227,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         {};
 
       if (shipmentId) {
-        await loadShipmentDetails(shipmentId, selectedShipment);
+        await loadShipmentDetails(shipmentId, shipmentContext);
       }
 
       setSelectedShipmentBoxes((current) =>
@@ -6257,6 +6286,11 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     const boxId = getBoxItemsLookupId(box);
     if (!boxId) {
       setError('Box ID missing');
+      return;
+    }
+
+    if (getBoxType(box) === 'pallet') {
+      await handleUploadSingleFbaLabelInSection(shipment, box, index, file);
       return;
     }
 
@@ -6424,6 +6458,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       const clientId = getClientIdFromSession();
       const shipmentRecordId = getShipmentRecordId(shipment) || (isUuidValue(shipmentId) ? shipmentId : '');
       const shipmentReference = getShipmentReference(shipment);
+      const uploadEntityType = getBoxType(box) === 'pallet' ? 'pallet' : 'box';
       const metadata = {
         clientId,
         client_id: clientId,
@@ -6438,7 +6473,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       };
       const formData = new FormData();
       formData.append('file', uploadFile, uploadFileName);
-      formData.append('entityType', 'box');
+      formData.append('entityType', uploadEntityType);
       formData.append('entityId', boxId);
       formData.append('fileType', 'fba_shipping_label');
       formData.append('metadata', JSON.stringify(metadata));
@@ -6471,8 +6506,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         ...current,
         [boxId]: {
           ...uploadedFile,
-          entityType: 'box',
-          entity_type: 'box',
+          entityType: uploadEntityType,
+          entity_type: uploadEntityType,
           entityId: boxId,
           entity_id: boxId,
           fileType: uploadedFile?.fileType || uploadedFile?.file_type || 'fba_shipping_label',
@@ -6599,7 +6634,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     extractServiceTasks(selectedShipment || {})
   );
   const detailDiscrepancies = extractList(selectedShipmentDiscrepancies, ['discrepancies']);
-  const displayTrackBoxes = trackBoxes;
+  const displayTrackBoxes = trackBoxes.filter((box) => !isBoxInsidePallet(box));
   const hasTrackBoxes = displayTrackBoxes.length > 0;
   const isBoxLabelUploaded = (box, index) => {
     const boxId = getBoxId(box);
@@ -6643,7 +6678,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   const awaitingFbaRows = fbaLabelShipments
     .map((shipment) => {
       const shipmentId = getShipmentId(shipment);
-      const boxes = (fbaLabelBoxesMap[shipmentId] || []).filter((box) => !isBoxLabelReadyInSection(box));
+      const boxes = (fbaLabelBoxesMap[shipmentId] || []).filter((box) => !isBoxInsidePallet(box) && !isBoxLabelReadyInSection(box));
       return { shipment, shipmentId, boxes };
     })
     .filter((row) => row.boxes.length);
@@ -6670,7 +6705,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         boxId: getBoxItemsLookupId(box),
         index,
       }))
-      .filter(({ box, boxId }) => boxId && !isBoxLabelReadyInSection(box));
+      .filter(({ box, boxId }) => boxId && getBoxType(box) === 'box' && !isBoxInsidePallet(box) && !isBoxLabelReadyInSection(box));
   }, [awaitingFbaRows, batchFbaUpload, fbaLabelFilesMap]);
 
   const parseBoxSkuQuantityText = (value = '') => {
@@ -6918,6 +6953,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     return normalizeDisplayValue(row?.sku);
   };
   const getBoxGroupLabel = (box = {}, shipment = {}, boxIndex = -1) => {
+    if (getBoxType(box) === 'pallet') return 'Pallets';
+
     const skus = [
       ...new Set(
         getBoxContentRows(box, shipment, boxIndex)
@@ -7131,30 +7168,55 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     const dimensions = getBoxDimensions(box);
     const boxSize = getBoxSize(box);
     const boxWeight = getBoxWeight(box);
+    const isPallet = getBoxType(box) === 'pallet';
+    const insidePallet = isBoxInsidePallet(box);
+    const palletChildren = getPalletChildBoxes(box);
+    const palletChildCount = getPalletChildCount(box);
 
     return (
       <div key={box?.id || box?.uuid || index} className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
         <div className="p-3">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <p className="font-medium text-gray-900">{getBoxDisplayTitle(box, index)}{boxSize ? ` - ${boxSize}` : ''}</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-medium text-gray-900">{getBoxDisplayTitle(box, index)}{!isPallet && boxSize ? ` - ${boxSize}` : ''}</p>
+                {isPallet ? (
+                  <span className="rounded-full bg-[#fff7ed] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#ff6900]">Pallet</span>
+                ) : null}
+                {insidePallet ? (
+                  <span className="rounded-full bg-[#eef4ff] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#315c99]">Inside pallet</span>
+                ) : null}
+              </div>
               {box.__subShipmentReference ? (
                 <p className="mt-1 text-xs font-semibold text-[#ff6900]">Sub-shipment: {box.__subShipmentReference}</p>
               ) : null}
+              {isPallet ? (
+                <p className="mt-1 text-xs text-[#64748b]">
+                  {[dimensions, boxWeight ? `${boxWeight} kg` : '', `${palletChildCount || 0} box${Number(palletChildCount) === 1 ? '' : 'es'}`].filter(Boolean).join(' - ') || 'Pallet details pending'}
+                </p>
+              ) : null}
             </div>
             <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${labelReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
-              {labelReady ? 'FBA Label Ready' : 'FBA Label Missing'}
+              {isPallet ? (labelReady ? 'Pallet Label Ready' : 'Pallet Label Missing') : (labelReady ? 'FBA Label Ready' : 'FBA Label Missing')}
             </span>
           </div>
 
           <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
-            {[
-              { label: 'Status', value: getBoxDisplayStatus(box, selectedShipment?.status) },
-              { label: 'Dimensions', value: dimensions || '-' },
-              { label: 'Weight', value: boxWeight ? `${boxWeight} kg` : '-' },
-              { label: 'SKU', value: contentSummary || primarySku || 'Pending' },
-              { label: 'Qty', value: totalQty !== '' ? totalQty : 'Pending' },
-            ].map((meta) => (
+            {(isPallet
+              ? [
+                  { label: 'Status', value: getBoxDisplayStatus(box, selectedShipment?.status) },
+                  { label: 'Pallet Dimensions', value: dimensions || '-' },
+                  { label: 'Pallet Weight', value: boxWeight ? `${boxWeight} kg` : '-' },
+                  { label: 'Boxes Inside', value: `${palletChildCount || 0} box${Number(palletChildCount) === 1 ? '' : 'es'}` },
+                  { label: 'Pallet FBA Label', value: labelReady ? 'Uploaded' : 'Missing' },
+                ]
+              : [
+                  { label: 'Status', value: getBoxDisplayStatus(box, selectedShipment?.status) },
+                  { label: 'Dimensions', value: dimensions || '-' },
+                  { label: 'Weight', value: boxWeight ? `${boxWeight} kg` : '-' },
+                  { label: 'SKU', value: contentSummary || primarySku || 'Pending' },
+                  { label: 'Qty', value: totalQty !== '' ? totalQty : 'Pending' },
+                ]).map((meta) => (
               <div key={meta.label} className="rounded-md border border-[#dfe7f3] bg-white px-3 py-2">
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-[#94a3b8]">{meta.label}</p>
                 <p className="mt-1 break-words font-semibold text-[#132347]">{meta.value}</p>
@@ -7162,7 +7224,47 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
             ))}
           </div>
 
-          {boxRows.length ? (
+          {isPallet ? (
+            <div className="mt-3 rounded-md border border-[#dfe7f3] bg-white p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Boxes in pallet</p>
+                <span className="rounded-full bg-[#f8fafc] px-2 py-0.5 text-[10px] font-semibold text-[#64748b]">
+                  {palletChildCount || 0} box{Number(palletChildCount) === 1 ? '' : 'es'}
+                </span>
+              </div>
+              {palletChildren.length ? (
+                <div className="space-y-2">
+                  {palletChildren.map((childBox, childIndex) => {
+                    const childDimensions = getBoxDimensions(childBox);
+                    const childWeight = getBoxWeight(childBox);
+                    const childRows = getBoxRowsForLineItem(childBox, selectedShipment || {}, childIndex);
+                    const childSummary = getBoxRowsSummary(childRows);
+                    const childLabelReady = Boolean(getBoxFbaLabelFile(childBox, trackFiles, trackBoxes, childIndex, selectedShipment));
+
+                    return (
+                      <div key={getBoxItemsLookupId(childBox) || childIndex} className="rounded-md border border-[#e8eef7] bg-[#f8fbff] px-3 py-2">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-[#132347]">{getBoxDisplayTitle(childBox, childIndex)}</p>
+                            <p className="mt-1 text-xs text-[#64748b]">
+                              {[childDimensions, childWeight ? `${childWeight} kg` : '', childSummary].filter(Boolean).join(' - ') || 'Box details pending'}
+                            </p>
+                          </div>
+                          <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${childLabelReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+                            {childLabelReady ? 'FBA Label Ready' : 'FBA Label Missing'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-md border border-dashed border-[#d7e0ee] bg-[#f8fbff] px-3 py-4 text-center text-xs text-[#64748b]">
+                  No child boxes returned for this pallet.
+                </div>
+              )}
+            </div>
+          ) : boxRows.length ? (
             <div className="mt-3 rounded-md border border-gray-200 bg-white">
               {boxRows.map((row, rowIndex) => (
                 <div key={row?.id || row?.shipmentItemId || row?.lineItemId || row?.sku || rowIndex} className="flex items-center justify-between gap-3 border-b border-gray-100 px-3 py-2 text-xs last:border-b-0">
@@ -7368,31 +7470,49 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                   const labelUploaded = isBoxLabelUploaded(box, index);
                   const uploadKey = `box-${getBoxItemsLookupId(box) || index}`;
                   const isUploading = uploadingBoxKey === uploadKey;
+                  const isPallet = getBoxType(box) === 'pallet';
+                  const palletChildren = getPalletChildBoxes(box);
+                  const palletChildCount = getPalletChildCount(box);
                   const dimensionsText = [box?.length_cm, box?.width_cm, box?.height_cm].some((value) => Number(value) > 0)
                     ? `${Number(box?.length_cm || 0)}x${Number(box?.width_cm || 0)}x${Number(box?.height_cm || 0)} CM`
-                    : '';
+                    : getBoxDimensions(box);
                   const weightText = Number(box?.weight_kg || box?.weight || box?.weightKg || 0) > 0
                     ? `${Number(box?.weight_kg || box?.weight || box?.weightKg)} KG`
                     : '';
                   const contents = Array.isArray(box?.contents) ? box.contents : [];
+                  const palletSummary = [
+                    dimensionsText,
+                    weightText,
+                    `${palletChildCount || 0} box${Number(palletChildCount) === 1 ? '' : 'es'}`,
+                  ].filter(Boolean).join(' - ');
                   return (
                     <div key={box?.id || index} className="border-t border-[#edf2f7] px-4 py-3 text-sm">
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0 flex-1">
-                          <p className="font-medium text-[#132347]">{getBoxTitle(box, index)}</p>
-                          {[dimensionsText, weightText].filter(Boolean).length ? (
+                          <p className="font-medium text-[#132347]">{getBoxDisplayTitle(box, index)}</p>
+                          {isPallet ? (
+                            <p className="mt-0.5 text-xs text-[#7a8ca5]">
+                              {palletSummary || 'Pallet details pending'}
+                            </p>
+                          ) : [dimensionsText, weightText].filter(Boolean).length ? (
                             <p className="mt-0.5 text-xs text-[#7a8ca5]">
                               {[dimensionsText, weightText].filter(Boolean).join(' · ')}
                             </p>
                           ) : null}
-                          {contents.length ? (
+                          {isPallet ? (
+                            <p className="mt-0.5 text-xs text-[#7a8ca5]">
+                              {palletChildren.length
+                                ? `Boxes: ${palletChildren.map((childBox, childIndex) => getBoxDisplayTitle(childBox, childIndex)).join(', ')}`
+                                : 'No child boxes returned for this pallet.'}
+                            </p>
+                          ) : contents.length ? (
                             <p className="mt-0.5 text-xs text-[#7a8ca5]">
                               {contents.map((item) => `${item?.sku || 'SKU'} x ${item?.quantity || 0}`).join(', ')}
                             </p>
                           ) : null}
                         </div>
                         <span className={`shrink-0 text-xs font-semibold ${labelUploaded ? 'text-[#d8a11f]' : 'text-[#e45a5a]'}`}>
-                          {labelUploaded ? 'UPLOADED' : 'MISSING'}
+                          {isPallet ? (labelUploaded ? 'PALLET LABEL UPLOADED' : 'PALLET LABEL MISSING') : (labelUploaded ? 'UPLOADED' : 'MISSING')}
                         </span>
                         <label className={`inline-flex shrink-0 cursor-pointer items-center justify-center text-[#ff8c2f] hover:text-[#f67d17] ${isUploading ? 'pointer-events-none opacity-50' : ''}`} title="Upload FBA label">
                           {isUploading ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
@@ -7467,7 +7587,11 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                     {getBoxesGroupedBySku(allBoxes, shipment).map((group) => (
                       <div key={group.key}>
                         <div className="bg-[#f8fafc] px-5 py-2 text-xs font-semibold uppercase tracking-wide text-[#64748b]">
-                          {group.label || 'SKU allocation pending'} - {group.boxes.length} box{group.boxes.length !== 1 ? 'es' : ''}
+                          {(() => {
+                            const palletGroup = group.boxes.every(({ box }) => getBoxType(box) === 'pallet');
+                            const unitLabel = palletGroup ? 'pallet' : 'box';
+                            return `${group.label || 'SKU allocation pending'} - ${group.boxes.length} ${unitLabel}${group.boxes.length !== 1 ? 's' : ''}`;
+                          })()}
                         </div>
                         <div className="divide-y divide-[#f1f5f9]">
                           {group.boxes.map(({ box, originalIndex }) => {
@@ -7482,6 +7606,16 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                       const boxType = getBoxType(box);
                       const boxNumber = firstPresent(box?.box_number, box?.boxNumber, boxIndex + 1);
                       const boxSize = getBoxSize(box);
+                      const isPallet = boxType === 'pallet';
+                      const palletChildren = getPalletChildBoxes(box);
+                      const palletChildCount = getPalletChildCount(box);
+                      const palletDimensions = getBoxDimensions(box);
+                      const palletWeight = getBoxWeight(box);
+                      const palletSummary = [
+                        palletDimensions,
+                        palletWeight ? `${palletWeight} KG` : '',
+                        `${palletChildCount || 0} box${Number(palletChildCount) === 1 ? '' : 'es'}`,
+                      ].filter(Boolean).join(' - ');
 
                       return (
                         <div
@@ -7506,23 +7640,40 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                           <div className="min-w-0">
                             <p className="text-sm font-medium text-[#132347]">
                               {boxType === 'pallet' ? 'Pallet' : 'Box'} #{boxNumber}
-                              {boxSize ? ` - ${boxSize}` : ''}
+                              {!isPallet && boxSize ? ` - ${boxSize}` : ''}
                             </p>
                             {box.__subShipmentReference ? (
                               <p className="mt-0.5 text-xs font-semibold text-[#ff6900]">
                                 Sub-shipment: {box.__subShipmentReference}
                               </p>
                             ) : null}
-                            {contentsStr && contentsStr !== '-' ? (
-                              <p className="mt-0.5 text-sm font-semibold text-[#132347]">
-                                Contents: {contentsStr}
-                              </p>
-                            ) : primarySku ? (
-                              <p className="mt-0.5 text-sm font-semibold text-[#132347]">SKU: {primarySku}</p>
-                            ) : null}
-                            {totalQuantity !== '' ? (
-                              <p className="mt-0.5 text-xs text-[#64748b]">Units: {totalQuantity}</p>
-                            ) : null}
+                            {isPallet ? (
+                              <>
+                                <p className="mt-0.5 text-sm font-semibold text-[#132347]">
+                                  {palletSummary || 'Pallet details pending'}
+                                </p>
+                                {palletChildren.length ? (
+                                  <p className="mt-0.5 text-xs text-[#64748b]">
+                                    Boxes: {palletChildren.map((childBox, childIndex) => getBoxDisplayTitle(childBox, childIndex)).join(', ')}
+                                  </p>
+                                ) : (
+                                  <p className="mt-0.5 text-xs text-[#64748b]">No child boxes returned for this pallet.</p>
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                {contentsStr && contentsStr !== '-' ? (
+                                  <p className="mt-0.5 text-sm font-semibold text-[#132347]">
+                                    Contents: {contentsStr}
+                                  </p>
+                                ) : primarySku ? (
+                                  <p className="mt-0.5 text-sm font-semibold text-[#132347]">SKU: {primarySku}</p>
+                                ) : null}
+                                {totalQuantity !== '' ? (
+                                  <p className="mt-0.5 text-xs text-[#64748b]">Units: {totalQuantity}</p>
+                                ) : null}
+                              </>
+                            )}
                             {/* <p className="mt-0.5 truncate text-xs text-[#6b7280]">
                               {[dimStr, weightStr, contentsStr].filter(Boolean).join(' - ')}
                             </p> */}
@@ -7532,11 +7683,11 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                             {labelReady ? (
                               <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
                                 <Check size={13} />
-                                Label Uploaded
+                                {isPallet ? 'Pallet Label Uploaded' : 'Label Uploaded'}
                               </span>
                             ) : (
                               <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-600">
-                                Label Missing
+                                {isPallet ? 'Pallet Label Missing' : 'Label Missing'}
                               </span>
                             )}
                           </div>
@@ -8447,6 +8598,9 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
               const dimensions = getBoxDimensions(box);
               const weight = getBoxWeight(box);
               const boxNumber = firstPresent(box?.box_number, box?.boxNumber, boxIndex + 1);
+              const isPallet = boxType === 'pallet';
+              const palletChildren = getPalletChildBoxes(box);
+              const palletChildCount = getPalletChildCount(box);
               const clientName = getShipmentClientName(shipment);
               const clientEmail = getShipmentClientEmail(shipment);
 
@@ -8463,7 +8617,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                           Client: {clientName || '-'}{clientEmail ? ` (${clientEmail})` : ''}
                         </p>
                       ) : null}
-                      {primarySku || contentSummary !== '-' ? (
+                      {!isPallet && (primarySku || contentSummary !== '-') ? (
                         <p className="mt-1 text-sm font-semibold text-[#132347]">
                           Contents: {contentSummary !== '-' ? contentSummary : primarySku}
                         </p>
@@ -8479,43 +8633,72 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                   </div>
 
                   <div className="space-y-5 p-6">
-                    <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-5">
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Type</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{boxType}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Size</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{boxSize || '-'}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Dimensions</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{dimensions || '-'}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Weight</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{weight ? `${weight} KG` : '-'}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Contents</p>
-                        <p className="mt-1 break-words font-semibold text-[#132347]">{contentSummary !== '-' ? contentSummary : primarySku || 'Pending'}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Units</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{totalQuantity !== '' ? totalQuantity : 'Pending'}</p>
-                      </div>
+                    <div className={`grid grid-cols-1 gap-3 text-sm ${isPallet ? 'sm:grid-cols-4' : 'sm:grid-cols-5'}`}>
+                      {(isPallet
+                        ? [
+                            { label: 'Type', value: 'Pallet' },
+                            { label: 'Pallet Dimensions', value: dimensions || '-' },
+                            { label: 'Pallet Weight', value: weight ? `${weight} KG` : '-' },
+                            { label: 'Boxes Inside', value: `${palletChildCount || 0} box${Number(palletChildCount) === 1 ? '' : 'es'}` },
+                            { label: 'Pallet FBA Label', value: labelReady ? 'Uploaded' : 'Missing' },
+                          ]
+                        : [
+                            { label: 'Type', value: boxType },
+                            { label: 'Size', value: boxSize || '-' },
+                            { label: 'Dimensions', value: dimensions || '-' },
+                            { label: 'Weight', value: weight ? `${weight} KG` : '-' },
+                            { label: 'Contents', value: contentSummary !== '-' ? contentSummary : primarySku || 'Pending' },
+                            { label: 'Units', value: totalQuantity !== '' ? totalQuantity : 'Pending' },
+                          ]).map((meta) => (
+                        <div key={meta.label} className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
+                          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">{meta.label}</p>
+                          <p className="mt-1 break-words font-semibold text-[#132347]">{meta.value}</p>
+                        </div>
+                      ))}
                     </div>
 
                     <div>
                       <div className="mb-2 flex items-center justify-between">
-                        <p className="text-sm font-semibold text-[#132347]">SKU Allocation</p>
+                        <p className="text-sm font-semibold text-[#132347]">{isPallet ? 'Boxes in this pallet' : 'SKU Allocation'}</p>
                         {labelReady ? (
-                          <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">Label Uploaded</span>
+                          <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">{isPallet ? 'Pallet Label Uploaded' : 'Label Uploaded'}</span>
                         ) : (
-                          <span className="rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-600">Label Missing</span>
+                          <span className="rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-600">{isPallet ? 'Pallet Label Missing' : 'Label Missing'}</span>
                         )}
                       </div>
-                      {contentRows.length ? (
+                      {isPallet ? (
+                        palletChildren.length ? (
+                          <div className="overflow-hidden rounded-xl border border-[#e2e8f0]">
+                            {palletChildren.map((childBox, childIndex) => {
+                              const childDimensions = getBoxDimensions(childBox);
+                              const childWeight = getBoxWeight(childBox);
+                              const childRows = getBoxRowsForLineItem(childBox, shipment, childIndex);
+                              const childSummary = getBoxRowsSummary(childRows);
+                              const childLabelReady = isBoxLabelReadyInSection(childBox);
+
+                              return (
+                                <div key={getBoxItemsLookupId(childBox) || childIndex} className="border-b border-[#f1f5f9] px-4 py-3 last:border-b-0">
+                                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                    <div className="min-w-0">
+                                      <p className="text-sm font-semibold text-[#132347]">{getBoxDisplayTitle(childBox, childIndex)}</p>
+                                      <p className="mt-1 text-xs text-[#64748b]">
+                                        {[childDimensions, childWeight ? `${childWeight} KG` : '', childSummary].filter(Boolean).join(' - ') || 'Box details pending'}
+                                      </p>
+                                    </div>
+                                    <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${childLabelReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+                                      {childLabelReady ? 'FBA Label Ready' : 'FBA Label Missing'}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-[#d1d5db] bg-[#f8fafc] px-4 py-6 text-center text-sm text-[#6b7280]">
+                            No child boxes returned for this pallet.
+                          </div>
+                        )
+                      ) : contentRows.length ? (
                         <div className="overflow-hidden rounded-xl border border-[#e2e8f0]">
                           {contentRows.map((item, index) => (
                             <div key={item?.id || item?.shipmentItemId || index} className="flex items-center justify-between border-b border-[#f1f5f9] px-4 py-3 last:border-b-0">

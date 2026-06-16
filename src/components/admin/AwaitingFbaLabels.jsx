@@ -884,9 +884,10 @@ const getBoxFbaLabelFileId = (box = {}) =>
 const getBoxTitle = (box = {}, index = 0) => {
   const rawTitle = firstPresent(box?.name, box?.label, box?.reference, box?.boxNumber, box?.box_number);
   const title = String(rawTitle || '').trim();
+  const typeLabel = String(box?.box_type || box?.boxType || '').toLowerCase() === 'pallet' ? 'Pallet' : 'Box';
 
-  if (/^\d+$/.test(title)) return `Box ${title}`;
-  return title || `${String(box?.box_type || box?.boxType || '').toLowerCase() === 'pallet' ? 'Pallet' : 'Box'} #${index + 1}`;
+  if (/^\d+$/.test(title)) return `${typeLabel} ${title}`;
+  return title || `${typeLabel} #${index + 1}`;
 };
 
 const getBoxSize = (box = {}) =>
@@ -895,6 +896,33 @@ const getBoxSize = (box = {}) =>
 const getBoxType = (box = {}) => {
   const value = String(firstPresent(box?.boxType, box?.box_type, box?.containerType, box?.container_type, box?.type, 'box')).toLowerCase();
   return value === 'pallet' ? 'pallet' : 'box';
+};
+
+const getBoxPalletId = (box = {}) =>
+  firstPresent(box?.palletId, box?.pallet_id, box?.pallet?.id, box?.pallet?.uuid);
+
+const isBoxInsidePallet = (box = {}) =>
+  Boolean(getBoxPalletId(box) || box?.insidePallet || box?.inside_pallet || box?.isChildBox || box?.is_child_box);
+
+const getPalletChildBoxes = (box = {}) => {
+  const children = [
+    ...extractList(box, ['palletChildren', 'pallet_children', 'childBoxes', 'child_boxes']),
+    ...extractList(box?.pallet || {}, ['palletChildren', 'pallet_children', 'childBoxes', 'child_boxes', 'children', 'boxes']),
+  ];
+  const seen = new Set();
+
+  return children.filter((childBox, index) => {
+    if (!childBox || typeof childBox !== 'object') return false;
+    const childKey = String(getBoxRecordId(childBox) || getBoxId(childBox) || getBoxTitle(childBox, index) || index).trim();
+    if (seen.has(childKey)) return false;
+    seen.add(childKey);
+    return true;
+  });
+};
+
+const getPalletChildCount = (box = {}) => {
+  const children = getPalletChildBoxes(box);
+  return firstPresent(box?.childBoxCount, box?.child_box_count, box?.palletChildCount, box?.pallet_child_count, children.length);
 };
 
 const getBoxDisplaySize = (box = {}) =>
@@ -1736,8 +1764,8 @@ const getBoxDirectFbaLabelFile = (box = {}) => {
     name,
     fileName: name,
     url,
-    entityType: 'box',
-    entity_type: 'box',
+    entityType: getBoxType(box) === 'pallet' ? 'pallet' : 'box',
+    entity_type: getBoxType(box) === 'pallet' ? 'pallet' : 'box',
     entityId: boxId,
     entity_id: boxId,
     fileType: 'fba_shipping_label',
@@ -2002,8 +2030,9 @@ const fetchBoxesForShipment = async (lookupCandidates = []) => {
 
 const fetchSubShipmentBoxesForShipment = async (lookupCandidates = []) => {
   const uniqueLookupCandidates = [...new Set(lookupCandidates.map((value) => String(value || '').trim()).filter(Boolean))];
+  const subShipmentLookupCandidates = getUuidLookupCandidates(uniqueLookupCandidates);
 
-  for (const lookupId of uniqueLookupCandidates) {
+  for (const lookupId of subShipmentLookupCandidates) {
     try {
       const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(lookupId)}/sub-shipments`, {
         method: 'GET',
@@ -2041,7 +2070,7 @@ const fetchSubShipmentBoxesForShipment = async (lookupCandidates = []) => {
       const boxes = boxResults.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
       if (boxes.length) return boxes;
     } catch {
-      // Try the next shipment identifier.
+      // Try the next UUID. Reference-based lookups are skipped because this route rejects them.
     }
   }
 
@@ -2179,7 +2208,7 @@ const fetchFilesForBox = async (box = {}) => {
   const lookupIds = getBoxRecordId(box) ? [getBoxRecordId(box)] : [];
   for (const boxId of lookupIds) {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/files?entityType=box&entityId=${encodeURIComponent(boxId)}`, {
+      const response = await fetch(`${API_BASE_URL}/api/files?entityType=${getBoxType(box) === 'pallet' ? 'pallet' : 'box'}&entityId=${encodeURIComponent(boxId)}`, {
         method: 'GET',
         headers: buildHeaders(),
         cache: 'no-store',
@@ -2197,8 +2226,8 @@ const fetchFilesForBox = async (box = {}) => {
           box_id: boxId,
           entityId: getFileEntityId(file) || boxId,
           entity_id: getFileEntityId(file) || boxId,
-          entityType: getFileEntityType(file) || 'box',
-          entity_type: getFileEntityType(file) || 'box',
+          entityType: getFileEntityType(file) || (getBoxType(box) === 'pallet' ? 'pallet' : 'box'),
+          entity_type: getFileEntityType(file) || (getBoxType(box) === 'pallet' ? 'pallet' : 'box'),
         }));
       }
     } catch {
@@ -2370,7 +2399,7 @@ const AwaitingFbaLabels = () => {
       rows
         .map((row) => ({
           ...row,
-          boxes: row.boxes.filter((box) => !isBoxLabelReady(box, filesByBox)),
+          boxes: row.boxes.filter((box) => !isBoxInsidePallet(box) && !isBoxLabelReady(box, filesByBox)),
         }))
         .filter((row) => row.boxes.length),
     [rows, filesByBox]
@@ -2402,7 +2431,7 @@ const AwaitingFbaLabels = () => {
         boxId: getBoxRecordId(box) || getBoxId(box),
         index,
       }))
-      .filter(({ box, boxId }) => boxId && !isBoxLabelReady(box, filesByBox));
+      .filter(({ box, boxId }) => boxId && getBoxType(box) === 'box' && !isBoxInsidePallet(box) && !isBoxLabelReady(box, filesByBox));
   }, [batchFbaUpload, filesByBox, visibleRows]);
 
   const loadAwaitingFbaLabels = useCallback(async ({ clearMessage = false, showLoader = true } = {}) => {
@@ -2567,6 +2596,8 @@ const AwaitingFbaLabels = () => {
   };
 
   const getBoxGroupLabel = (box = {}, shipment = {}, index = 0) => {
+    if (getBoxType(box) === 'pallet') return 'Pallets';
+
     const skus = [
       ...new Set(
         getBoxContentRows(box, shipment, index)
@@ -2596,6 +2627,11 @@ const AwaitingFbaLabels = () => {
     const boxId = getBoxRecordId(box) || getBoxId(box);
     if (!boxId) {
       setError('Box ID missing.');
+      return;
+    }
+
+    if (getBoxType(box) === 'pallet') {
+      handleUploadFbaLabel(shipment, box, index, file);
       return;
     }
 
@@ -2736,7 +2772,6 @@ const AwaitingFbaLabels = () => {
     }
   };
 
-  // eslint-disable-next-line no-unused-vars
   const handleUploadFbaLabel = async (shipment, box, index, file) => {
     if (!file) return;
 
@@ -2766,6 +2801,7 @@ const AwaitingFbaLabels = () => {
       const clientEmail = getShipmentClientEmail(shipment);
       const shipmentReference = getShipmentReference(shipment);
       const boxNumber = firstPresent(box?.box_number, box?.boxNumber, index + 1);
+      const uploadEntityType = getBoxType(box) === 'pallet' ? 'pallet' : 'box';
       const uploadedFileName = `fba-label-box-${boxNumber}-${boxId}-${uploadFile.name}`.replace(/[^a-z0-9._-]+/gi, '-');
       const buildMetadata = (uploadClientId) => ({
         ...(uploadClientId
@@ -2831,7 +2867,7 @@ const AwaitingFbaLabels = () => {
         return nextFormData;
       };
       const uploadTargets = [
-        boxRecordId ? { entityType: 'box', entityId: boxRecordId } : null,
+        boxRecordId ? { entityType: uploadEntityType, entityId: boxRecordId } : null,
         !boxRecordId && shipmentRecordId ? { entityType: 'shipment', entityId: shipmentRecordId } : null,
       ].filter(Boolean);
       if (!uploadTargets.length) {
@@ -2885,8 +2921,8 @@ const AwaitingFbaLabels = () => {
         ...uploadedFile,
         url: getFileUrl(uploadedFile) || localUrl,
         localUrl: localUrl || uploadedFile?.localUrl,
-        entityType: 'box',
-        entity_type: 'box',
+        entityType: uploadEntityType,
+        entity_type: uploadEntityType,
         entityId: boxId,
         entity_id: boxId,
         boxId,
@@ -3007,7 +3043,11 @@ const AwaitingFbaLabels = () => {
                     {getBoxesGroupedBySku(boxes, shipment).map((group) => (
                         <div key={group.key || 'pending-sku'}>
                         <div className="bg-[#f8fafc] px-5 py-2 text-xs font-semibold uppercase tracking-wide text-[#64748b]">
-                          {group.label || 'SKU allocation pending'} - {group.boxes.length} box{group.boxes.length !== 1 ? 'es' : ''}
+                          {(() => {
+                            const palletGroup = group.boxes.every(({ box }) => getBoxType(box) === 'pallet');
+                            const unitLabel = palletGroup ? 'pallet' : 'box';
+                            return `${group.label || 'SKU allocation pending'} - ${group.boxes.length} ${unitLabel}${group.boxes.length !== 1 ? 's' : ''}`;
+                          })()}
                         </div>
                         <div className="divide-y divide-[#f1f5f9]">
                           {group.boxes.map(({ box, originalIndex }) => {
@@ -3019,7 +3059,17 @@ const AwaitingFbaLabels = () => {
                             const contentSummary = getBoxContentsSummary(box, shipment, originalIndex);
                             const boxUnits = getBoxTotalQuantity(box, shipment, originalIndex);
                             const boxSize = getBoxSize(box);
-                            const boxType = String(box?.box_type || box?.boxType || '').toLowerCase() === 'pallet' ? 'Pallet' : 'Box';
+                            const isPallet = getBoxType(box) === 'pallet';
+                            const boxType = isPallet ? 'Pallet' : 'Box';
+                            const palletChildren = getPalletChildBoxes(box);
+                            const palletChildCount = getPalletChildCount(box);
+                            const palletDimensions = getBoxDimensions(box);
+                            const palletWeight = getBoxWeight(box);
+                            const palletSummary = [
+                              palletDimensions,
+                              palletWeight !== '' ? `${palletWeight} KG` : '',
+                              `${palletChildCount || 0} box${Number(palletChildCount) === 1 ? '' : 'es'}`,
+                            ].filter(Boolean).join(' - ');
 
                             return (
                               <div
@@ -3044,21 +3094,38 @@ const AwaitingFbaLabels = () => {
                                 <div className="min-w-0">
                                   <p className="text-sm font-medium text-[#132347]">
                                     {boxType} #{box?.box_number || originalIndex + 1}
-                                    {boxSize ? ` - ${boxSize}` : ''}
+                                    {!isPallet && boxSize ? ` - ${boxSize}` : ''}
                                   </p>
                                   {box.__subShipmentReference ? (
                                     <p className="mt-0.5 text-xs font-semibold text-[#ff8c2f]">
                                       Sub-shipment: {box.__subShipmentReference}
                                     </p>
                                   ) : null}
-                                  {contentSummary ? (
-                                    <p className="mt-0.5 text-sm font-semibold text-[#132347]">
-                                      Contents: {contentSummary}
-                                    </p>
-                                  ) : null}
-                                  {boxUnits !== '' ? (
-                                    <p className="mt-0.5 text-xs text-[#64748b]">Units: {boxUnits}</p>
-                                  ) : null}
+                                  {isPallet ? (
+                                    <>
+                                      <p className="mt-0.5 text-sm font-semibold text-[#132347]">
+                                        {palletSummary || 'Pallet details pending'}
+                                      </p>
+                                      {palletChildren.length ? (
+                                        <p className="mt-0.5 text-xs text-[#64748b]">
+                                          Boxes: {palletChildren.map((childBox, childIndex) => getBoxTitle(childBox, childIndex)).join(', ')}
+                                        </p>
+                                      ) : (
+                                        <p className="mt-0.5 text-xs text-[#64748b]">No child boxes returned for this pallet.</p>
+                                      )}
+                                    </>
+                                  ) : (
+                                    <>
+                                      {contentSummary ? (
+                                        <p className="mt-0.5 text-sm font-semibold text-[#132347]">
+                                          Contents: {contentSummary}
+                                        </p>
+                                      ) : null}
+                                      {boxUnits !== '' ? (
+                                        <p className="mt-0.5 text-xs text-[#64748b]">Units: {boxUnits}</p>
+                                      ) : null}
+                                    </>
+                                  )}
                                 </div>
 
                                 <div>
@@ -3066,7 +3133,7 @@ const AwaitingFbaLabels = () => {
                                     labelReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
                                   }`}>
                                     {labelReady ? <CheckCircle size={13} /> : null}
-                                    {labelReady ? 'Label Uploaded' : 'Label Missing'}
+                                    {isPallet ? (labelReady ? 'Pallet Label Uploaded' : 'Pallet Label Missing') : (labelReady ? 'Label Uploaded' : 'Label Missing')}
                                   </span>
                                 </div>
 
@@ -3240,6 +3307,9 @@ const AwaitingFbaLabels = () => {
               const dimensions = getBoxDimensions(box);
               const weight = getBoxWeight(box);
               const boxNumber = firstPresent(box?.box_number, box?.boxNumber, boxIndex + 1);
+              const isPallet = getBoxType(box) === 'pallet';
+              const palletChildren = getPalletChildBoxes(box);
+              const palletChildCount = getPalletChildCount(box);
               const clientName = getShipmentClientName(shipment);
               const clientEmail = getShipmentClientEmail(shipment);
 
@@ -3254,7 +3324,7 @@ const AwaitingFbaLabels = () => {
                       <p className="mt-1 text-xs font-semibold text-[#132347]">
                         Client: {clientName || '-'}{clientEmail ? ` (${clientEmail})` : ''}
                       </p>
-                      {contentSummary || primarySku ? (
+                      {!isPallet && (contentSummary || primarySku) ? (
                         <p className="mt-1 text-sm font-semibold text-[#132347]">
                           Contents: {contentSummary || primarySku}
                         </p>
@@ -3271,46 +3341,74 @@ const AwaitingFbaLabels = () => {
                   </div>
 
                   <div className="space-y-5 p-6">
-                    <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-5">
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Type</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{getBoxType(box)}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Size</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{getBoxDisplaySize(box)}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Dimensions</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{dimensions || '-'}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Weight</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{weight !== '' ? `${weight} KG` : '-'}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Contents</p>
-                        <p className="mt-1 break-words font-semibold text-[#132347]">{contentSummary || primarySku || '-'}</p>
-                      </div>
-                      <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">Units</p>
-                        <p className="mt-1 font-semibold text-[#132347]">{totalQuantity !== '' ? totalQuantity : '-'}</p>
-                      </div>
+                    <div className={`grid grid-cols-1 gap-3 text-sm ${isPallet ? 'sm:grid-cols-4' : 'sm:grid-cols-5'}`}>
+                      {(isPallet
+                        ? [
+                            { label: 'Type', value: 'Pallet' },
+                            { label: 'Pallet Dimensions', value: dimensions || '-' },
+                            { label: 'Pallet Weight', value: weight !== '' ? `${weight} KG` : '-' },
+                            { label: 'Boxes Inside', value: `${palletChildCount || 0} box${Number(palletChildCount) === 1 ? '' : 'es'}` },
+                            { label: 'Pallet FBA Label', value: labelReady ? 'Uploaded' : 'Missing' },
+                          ]
+                        : [
+                            { label: 'Type', value: getBoxType(box) },
+                            { label: 'Size', value: getBoxDisplaySize(box) },
+                            { label: 'Dimensions', value: dimensions || '-' },
+                            { label: 'Weight', value: weight !== '' ? `${weight} KG` : '-' },
+                            { label: 'Contents', value: contentSummary || primarySku || '-' },
+                            { label: 'Units', value: totalQuantity !== '' ? totalQuantity : '-' },
+                          ]).map((meta) => (
+                        <div key={meta.label} className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-3">
+                          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#94a3b8]">{meta.label}</p>
+                          <p className="mt-1 break-words font-semibold text-[#132347]">{meta.value}</p>
+                        </div>
+                      ))}
                     </div>
 
                     <div>
                       <div className="mb-2 flex items-center justify-between gap-3">
-                        <p className="text-sm font-semibold text-[#132347]">SKU Allocation</p>
+                        <p className="text-sm font-semibold text-[#132347]">{isPallet ? 'Boxes in this pallet' : 'SKU Allocation'}</p>
                         <span
                           className={`rounded-full px-3 py-1 text-xs font-semibold ${
                             labelReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
                           }`}
                         >
-                          {labelReady ? 'Label Uploaded' : 'Label Missing'}
+                          {isPallet ? (labelReady ? 'Pallet Label Uploaded' : 'Pallet Label Missing') : (labelReady ? 'Label Uploaded' : 'Label Missing')}
                         </span>
                       </div>
 
-                      {contentRows.length ? (
+                      {isPallet ? (
+                        palletChildren.length ? (
+                          <div className="overflow-hidden rounded-xl border border-[#e2e8f0]">
+                            {palletChildren.map((childBox, childIndex) => {
+                              const childDimensions = getBoxDimensions(childBox);
+                              const childWeight = getBoxWeight(childBox);
+                              const childContents = getBoxContentsSummary(childBox, shipment, childIndex);
+                              const childLabelReady = isBoxLabelReady(childBox, filesByBox);
+
+                              return (
+                                <div key={getBoxRecordId(childBox) || getBoxId(childBox) || childIndex} className="border-b border-[#f1f5f9] px-4 py-3 last:border-b-0">
+                                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                    <div className="min-w-0">
+                                      <p className="text-sm font-semibold text-[#132347]">{getBoxTitle(childBox, childIndex)}</p>
+                                      <p className="mt-1 text-xs text-[#64748b]">
+                                        {[childDimensions, childWeight !== '' ? `${childWeight} KG` : '', childContents].filter(Boolean).join(' - ') || 'Box details pending'}
+                                      </p>
+                                    </div>
+                                    <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${childLabelReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+                                      {childLabelReady ? 'FBA Label Ready' : 'FBA Label Missing'}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-[#d1d5db] bg-[#f8fafc] px-4 py-6 text-center text-sm text-[#6b7280]">
+                            No child boxes returned for this pallet.
+                          </div>
+                        )
+                      ) : contentRows.length ? (
                         <div className="overflow-hidden rounded-xl border border-[#e2e8f0]">
                           {contentRows.map((item) => (
                             <div key={item.key} className="flex items-center justify-between border-b border-[#f1f5f9] px-4 py-3 last:border-b-0">
