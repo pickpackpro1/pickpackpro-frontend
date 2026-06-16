@@ -474,6 +474,105 @@ export const normalizeShipmentList = (payload = {}) => {
   return toArray(payload).map(normalizeShipment);
 };
 
+const getPackageRecordKey = (box = {}, index = 0) =>
+  String(
+    firstPresent(
+      box?.id,
+      box?.uuid,
+      box?.boxId,
+      box?.box_id,
+      box?.recordId,
+      box?.record_id,
+      box?.reference,
+      box?.label,
+      index
+    )
+  );
+
+const defaultIsPalletBox = (box = {}) =>
+  String(firstPresent(box?.boxType, box?.box_type, box?.containerType, box?.container_type, box?.type, 'box'))
+    .trim()
+    .toLowerCase() === 'pallet';
+
+const getPackageChildList = (value) => {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.boxes)) return value.boxes;
+  if (Array.isArray(value?.rows)) return value.rows;
+  if (Array.isArray(value?.data)) return value.data;
+  return [];
+};
+
+const defaultGetPalletChildBoxes = (box = {}) => [
+  ...getPackageChildList(box?.palletChildren || box?.pallet_children),
+  ...getPackageChildList(box?.childBoxes || box?.child_boxes),
+  ...getPackageChildList(box?.children),
+];
+
+const uniquePackageRows = (rows = []) => {
+  const seenKeys = new Set();
+
+  return rows.filter((row, rowIndex) => {
+    const key = String(row?.key || getPackageRecordKey(row?.box, row?.boxIndex ?? rowIndex));
+    if (seenKeys.has(key)) return false;
+    seenKeys.add(key);
+    return true;
+  });
+};
+
+export const getLineItemOutboundPackageGroups = ({
+  item = {},
+  boxes = [],
+  lineItems = [],
+  isBoxLinkedToItem,
+  isPalletBox = defaultIsPalletBox,
+  getPalletChildBoxes = defaultGetPalletChildBoxes,
+  getBoxKey = getPackageRecordKey,
+} = {}) => {
+  const boxRows = toArray(boxes).map((box, boxIndex) => {
+    const key = String(getBoxKey(box, boxIndex) || getPackageRecordKey(box, boxIndex));
+    return { box, boxIndex, key };
+  });
+  const topLevelIndexByKey = new Map(boxRows.map((row) => [row.key, row.boxIndex]));
+  const matcher = typeof isBoxLinkedToItem === 'function' ? isBoxLinkedToItem : () => false;
+  const boxMatchesItem = (box, boxIndex) => Boolean(matcher(box, item, boxIndex, lineItems));
+
+  const directBoxes = uniquePackageRows(
+    boxRows.filter((row) => !isPalletBox(row.box) && boxMatchesItem(row.box, row.boxIndex))
+  );
+
+  const pallets = uniquePackageRows(
+    boxRows
+      .filter((row) => isPalletBox(row.box))
+      .map((row) => {
+        const children = getPackageChildList(getPalletChildBoxes(row.box));
+        const childRows = children.map((childBox, childIndex) => {
+          const childKey = String(getBoxKey(childBox, childIndex) || getPackageRecordKey(childBox, childIndex));
+          return {
+            box: childBox,
+            boxIndex: topLevelIndexByKey.has(childKey) ? topLevelIndexByKey.get(childKey) : childIndex,
+            key: childKey,
+          };
+        });
+        const matchedChildBoxes = uniquePackageRows(
+          childRows.filter((childRow) => boxMatchesItem(childRow.box, childRow.boxIndex))
+        );
+
+        return {
+          ...row,
+          childBoxes: children,
+          matchedChildBoxes,
+          matchesLineItem: matchedChildBoxes.length > 0,
+        };
+      })
+      .filter((row) => row.matchesLineItem)
+  );
+
+  return {
+    boxes: directBoxes,
+    pallets,
+  };
+};
+
 export const buildShipmentItemPayload = (item = {}, index = 0) => {
   const normalized = normalizeLineItem(item, index);
   const bundleSize = Number(normalized.bundleSize || 0);

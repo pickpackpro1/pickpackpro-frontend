@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
@@ -16,7 +16,6 @@ import {
   Download,
   Trash2,
   X,
-  ImagePlus,
 } from 'lucide-react';
 import {
   getProductActiveStatus,
@@ -232,90 +231,6 @@ const getProductInlineClientEmail = (product = {}) =>
     product?.contact_email
   );
 
-const isUsableAssetUrl = (value = '') => {
-  const url = String(value || '').trim();
-  return Boolean(url && (/^(https?:|data:|blob:)/i.test(url) || url.startsWith('/')));
-};
-
-const resolveAssetUrl = (value = '') => {
-  const url = String(value || '').trim();
-  if (!url) return '';
-  if (!isUsableAssetUrl(url)) return url;
-  if (/^(https?:|data:|blob:)/i.test(url)) return url;
-  if (url.startsWith('/')) return `${API_BASE_URL}${url}`;
-  return url;
-};
-
-const getFileLikeUrl = (file = {}) => {
-  if (!file) return '';
-  if (typeof file === 'string') return file;
-
-  return (
-    file?.url ||
-    file?.imageUrl ||
-    file?.image_url ||
-    file?.fileUrl ||
-    file?.file_url ||
-    file?.publicUrl ||
-    file?.public_url ||
-    file?.secureUrl ||
-    file?.secure_url ||
-    file?.downloadUrl ||
-    file?.download_url ||
-    file?.src ||
-    file?.href ||
-    file?.path ||
-    file?.storagePath ||
-    file?.storage_path ||
-    ''
-  );
-};
-
-const isImageLikeFile = (file = {}) => {
-  const type = String(file?.mimeType || file?.mime_type || file?.type || file?.contentType || file?.content_type || '').toLowerCase();
-  const name = String(file?.name || file?.fileName || file?.file_name || file?.originalName || file?.original_name || getFileLikeUrl(file)).toLowerCase();
-
-  return type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg)(?:$|\?)/i.test(name);
-};
-
-const getProductImageUrl = (product = {}) => {
-  const directUrl =
-    product?.imageUrl ||
-    product?.image_url ||
-    product?.productImageUrl ||
-    product?.product_image_url ||
-    product?.photoUrl ||
-    product?.photo_url ||
-    product?.thumbnailUrl ||
-    product?.thumbnail_url ||
-    product?.image ||
-    product?.productImage ||
-    product?.product_image ||
-    product?.metadata?.imageUrl ||
-    product?.metadata?.image_url ||
-    product?.meta?.imageUrl ||
-    product?.meta?.image_url;
-
-  if (typeof directUrl === 'string' && directUrl.trim()) return resolveAssetUrl(directUrl);
-  if (directUrl && typeof directUrl === 'object') {
-    const nestedUrl = getFileLikeUrl(directUrl);
-    if (nestedUrl) return resolveAssetUrl(nestedUrl);
-  }
-
-  const fileLists = [
-    product?.files,
-    product?.attachments,
-    product?.images,
-    product?.uploadedFiles,
-    product?.uploaded_files,
-    product?.data?.files,
-    product?.data?.attachments,
-  ].filter(Array.isArray);
-  const matchedFile = fileLists.flat().find((file) => isImageLikeFile(file) && getFileLikeUrl(file));
-
-  return matchedFile ? resolveAssetUrl(getFileLikeUrl(matchedFile)) : '';
-};
-
 const normalizeProduct = (product) => {
   const isActive = getProductActiveStatus(product);
   const dimensions = getProductDimensionParts(product);
@@ -354,7 +269,6 @@ const normalizeProduct = (product) => {
     bundleSize: product?.bundleSize ?? product?.bundle_size ?? '',
     active: isActive,
     status: isActive ? 'Active' : 'Inactive',
-    imageUrl: getProductImageUrl(product),
   };
 };
 
@@ -363,22 +277,27 @@ const toOptionalNumber = (value) => {
   return normalizedValue ? Number(normalizedValue) : undefined;
 };
 
-const toPayload = (form) => ({
-  clientId: form.clientId.trim(),
-  productName: form.productName.trim(),
-  sku: form.sku.trim(),
-  defaultFnsku: form.defaultFnsku.trim(),
-  lengthCm: toOptionalNumber(form.lengthCm),
-  widthCm: toOptionalNumber(form.widthCm),
-  heightCm: toOptionalNumber(form.heightCm),
-  weightKg: toOptionalNumber(form.weightKg),
-  hazmatFlag: form.hazmatFlag,
-  expiryTracked: form.expiryTracked,
-  lotTracked: form.lotTracked,
-  needsBundling: form.needsBundling,
-  bundleSize: form.needsBundling && String(form.bundleSize || '').trim() ? Number(form.bundleSize) : undefined,
-  active: form.active,
-});
+const toPayload = (form, { includeClientId = true, includeSku = true } = {}) => {
+  const payload = {
+    productName: form.productName.trim(),
+    defaultFnsku: form.defaultFnsku.trim(),
+    lengthCm: toOptionalNumber(form.lengthCm),
+    widthCm: toOptionalNumber(form.widthCm),
+    heightCm: toOptionalNumber(form.heightCm),
+    weightKg: toOptionalNumber(form.weightKg),
+    hazmatFlag: form.hazmatFlag,
+    expiryTracked: form.expiryTracked,
+    lotTracked: form.lotTracked,
+    needsBundling: form.needsBundling,
+    bundleSize: form.needsBundling ? Number(form.bundleSize) : null,
+    active: form.active,
+  };
+
+  if (includeClientId) payload.clientId = form.clientId.trim();
+  if (includeSku) payload.sku = form.sku.trim();
+
+  return payload;
+};
 
 const normalizeProductIdentityValue = (value = '') => String(value || '').trim().toLowerCase();
 
@@ -467,9 +386,6 @@ const Products = () => {
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [importFile, setImportFile] = useState(null);
-  const [imageFile, setImageFile] = useState(null);
-  const [currentProductImageUrl, setCurrentProductImageUrl] = useState('');
-  const [imagePreviewUrl, setImagePreviewUrl] = useState('');
   const [productFormError, setProductFormError] = useState('');
   const importInputRef = useRef(null);
   const clientFilterRef = useRef(null);
@@ -555,18 +471,6 @@ const Products = () => {
     document.addEventListener('mousedown', handleDocumentMouseDown);
     return () => document.removeEventListener('mousedown', handleDocumentMouseDown);
   }, []);
-
-  useEffect(() => {
-    if (!imageFile) {
-      setImagePreviewUrl(currentProductImageUrl);
-      return undefined;
-    }
-
-    const objectUrl = URL.createObjectURL(imageFile);
-    setImagePreviewUrl(objectUrl);
-
-    return () => URL.revokeObjectURL(objectUrl);
-  }, [imageFile, currentProductImageUrl]);
 
   const clientLookup = useMemo(() => {
     const lookup = new Map();
@@ -770,8 +674,6 @@ const Products = () => {
     setEditingProductId('');
     setProductForm(initialProductForm);
     setProductFormError('');
-    setImageFile(null);
-    setCurrentProductImageUrl('');
     setFormClientSearch('');
     setIsFormClientOpen(false);
     setShowFormModal(true);
@@ -780,9 +682,6 @@ const Products = () => {
   const closeProductFormModal = () => {
     setShowFormModal(false);
     setProductFormError('');
-    setImageFile(null);
-    setCurrentProductImageUrl('');
-    setImagePreviewUrl('');
     setFormClientSearch('');
     setIsFormClientOpen(false);
   };
@@ -827,8 +726,6 @@ const Products = () => {
       bundleSize: productForEdit.needsBundling ? String(productForEdit.bundleSize || '1') : '',
       active: productForEdit.active,
     });
-    setImageFile(null);
-    setCurrentProductImageUrl(productForEdit.imageUrl || '');
     setFormClientSearch('');
     setIsFormClientOpen(false);
     setShowFormModal(true);
@@ -857,7 +754,14 @@ const Products = () => {
       return;
     }
 
-    const duplicateProduct = findProductWithSameClientSku(products, productForm, editingProductId);
+    if (productForm.needsBundling && !String(productForm.bundleSize || '').trim()) {
+      const message = 'Bundle size is required when bundling is enabled.';
+      setProductFormError(message);
+      setError(message);
+      return;
+    }
+
+    const duplicateProduct = editingProductId ? null : findProductWithSameClientSku(products, productForm, editingProductId);
     if (duplicateProduct) {
       const message = getDuplicateProductSkuMessage(productForm, duplicateProduct);
       setProductFormError(message);
@@ -875,41 +779,19 @@ const Products = () => {
         {
           method: editingProductId ? 'PATCH' : 'POST',
           headers: buildHeaders(true),
-          body: JSON.stringify(toPayload(productForm)),
+          body: JSON.stringify(toPayload(productForm, {
+            includeClientId: !editingProductId,
+            includeSku: !editingProductId,
+          })),
           skipApiToast: true,
         }
       );
 
-      const payload = await parseResponse(response);
-      const savedId =
-        payload?.id ||
-        payload?.product?.id ||
-        payload?.data?.product?.id ||
-        payload?.data?.row?.id ||
-        payload?.row?.id ||
-        payload?.data?.id ||
-        editingProductId;
-
-      if (imageFile && savedId) {
-        const formData = new FormData();
-        formData.append('file', imageFile);
-
-        const imageResponse = await fetch(`${API_BASE_URL}/api/products/${savedId}/image`, {
-          method: 'POST',
-          headers: buildHeaders(),
-          body: formData,
-          skipApiToast: true,
-        });
-
-        await parseResponse(imageResponse);
-      }
+      await parseResponse(response);
 
       setMessage(editingProductId ? 'Product updated successfully.' : 'Product created successfully.');
       setShowFormModal(false);
       setProductForm(initialProductForm);
-      setImageFile(null);
-      setCurrentProductImageUrl('');
-      setImagePreviewUrl('');
       await loadProducts();
     } catch (requestError) {
       const message = isDuplicateProductSkuError(requestError.message)
@@ -1440,11 +1322,7 @@ const Products = () => {
                     <td className="py-3.5 px-6">
                       <div className="flex items-center gap-3">
                         <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-lg bg-gray-100">
-                          {product.imageUrl ? (
-                            <img src={product.imageUrl} alt={product.productName} className="h-full w-full object-cover" />
-                          ) : (
-                            <Box size={14} className="text-gray-500" />
-                          )}
+                          <Box size={14} className="text-gray-500" />
                         </div>
                         <div>
                           <span className="block text-sm font-medium text-gray-900">{product.productName}</span>
@@ -1582,11 +1460,6 @@ const Products = () => {
               </div>
 
               <div className="p-6 grid grid-cols-2 gap-4 text-sm">
-                {selectedProduct.imageUrl ? (
-                  <div className="col-span-2 overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
-                    <img src={selectedProduct.imageUrl} alt={selectedProduct.productName} className="max-h-56 w-full object-contain" />
-                  </div>
-                ) : null}
                 <div>
                   <p className="text-xs text-gray-500 mb-1">Client</p>
                   <p className="font-medium text-gray-900">{getProductClientDisplay(selectedProduct).primary}</p>
@@ -1790,17 +1663,20 @@ const Products = () => {
                     type="text"
                     value={formClientSearch}
                     onFocus={() => {
+                      if (editingProductId) return;
                       setFormClientSearch('');
                       setIsFormClientOpen(true);
                     }}
                     onChange={(event) => {
+                      if (editingProductId) return;
                       setFormClientSearch(event.target.value);
                       setIsFormClientOpen(true);
                     }}
+                    disabled={Boolean(editingProductId)}
                     placeholder="Select client"
-                    className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-9 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                    className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-9 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900] disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500 disabled:focus:ring-0"
                   />
-                  {productForm.clientId ? (
+                  {productForm.clientId && !editingProductId ? (
                     <button
                       type="button"
                       onClick={() => selectFormClient('')}
@@ -1862,11 +1738,12 @@ const Products = () => {
                     type="text"
                     placeholder="SKU"
                     value={productForm.sku}
+                    disabled={Boolean(editingProductId)}
                     onChange={(e) => {
                       setProductFormError('');
                       setProductForm((prev) => ({ ...prev, sku: e.target.value }));
                     }}
-                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900] disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500 disabled:focus:ring-0"
                   />
                 </label>
                 <label className="block">
@@ -1975,21 +1852,6 @@ const Products = () => {
                     onChange={(e) => setProductForm((prev) => ({ ...prev, bundleSize: e.target.value }))}
                     disabled={!productForm.needsBundling}
                     className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900] disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-400 disabled:focus:ring-0"
-                  />
-                </label>
-                {imagePreviewUrl ? (
-                  <div className="md:col-span-2 overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
-                    <img src={imagePreviewUrl} alt={productForm.productName || 'Product image'} className="max-h-48 w-full object-contain" />
-                  </div>
-                ) : null}
-                <label className="inline-flex items-center gap-2 rounded-lg border border-dashed border-gray-300 px-3 py-3 text-sm text-gray-600 md:col-span-2 cursor-pointer hover:bg-gray-50">
-                  <ImagePlus size={16} />
-                  {imageFile ? imageFile.name : imagePreviewUrl ? 'Replace product image' : 'Optional product image'}
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp,image/gif"
-                    onChange={(e) => setImageFile(e.target.files?.[0] || null)}
-                    className="hidden"
                   />
                 </label>
                 {productFormError ? (

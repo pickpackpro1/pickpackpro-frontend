@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import LayoutClient from './clientlayout/LayoutClient';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
@@ -8,6 +8,8 @@ import {
   AlertTriangle,
   Truck,
   Eye,
+  Edit3,
+  Plus,
   RefreshCw,
   X,
 } from 'lucide-react';
@@ -22,6 +24,22 @@ import {
 } from '../../utils/productFields';
 
 const API_BASE_URL = '';
+
+const initialProductForm = {
+  productName: '',
+  sku: '',
+  defaultFnsku: '',
+  lengthCm: '',
+  widthCm: '',
+  heightCm: '',
+  weightKg: '',
+  hazmatFlag: false,
+  expiryTracked: false,
+  lotTracked: false,
+  needsBundling: false,
+  bundleSize: '1',
+  active: true,
+};
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();
@@ -80,6 +98,66 @@ const extractProducts = (payload) => {
   return [];
 };
 
+const extractProductDetail = (payload) => {
+  const candidates = [
+    payload?.product,
+    payload?.data?.product,
+    payload?.data?.row,
+    payload?.data?.record,
+    payload?.row,
+    payload?.record,
+    payload?.data,
+    payload,
+  ];
+
+  return (
+    candidates.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate)) ||
+    {}
+  );
+};
+
+const toOptionalNumber = (value) => {
+  const normalizedValue = String(value ?? '').trim();
+  return normalizedValue ? Number(normalizedValue) : undefined;
+};
+
+const toFormNumberValue = (value) => {
+  if (value === null || value === undefined || String(value).trim() === '') return '';
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? String(value) : '';
+};
+
+const toPayload = (form, { includeSku = true } = {}) => {
+  const payload = {
+    productName: form.productName.trim(),
+    defaultFnsku: form.defaultFnsku.trim(),
+    lengthCm: toOptionalNumber(form.lengthCm),
+    widthCm: toOptionalNumber(form.widthCm),
+    heightCm: toOptionalNumber(form.heightCm),
+    weightKg: toOptionalNumber(form.weightKg),
+    hazmatFlag: form.hazmatFlag,
+    expiryTracked: form.expiryTracked,
+    lotTracked: form.lotTracked,
+    needsBundling: form.needsBundling,
+    bundleSize: form.needsBundling ? Number(form.bundleSize) : null,
+    active: form.active,
+  };
+
+  if (includeSku) payload.sku = form.sku.trim();
+
+  return payload;
+};
+
+const normalizeProductIdentityValue = (value = '') => String(value || '').trim().toLowerCase();
+
+const isDuplicateProductSkuError = (message = '') => {
+  const normalizedMessage = String(message || '').toLowerCase();
+  return normalizedMessage.includes('unique') && normalizedMessage.includes('sku');
+};
+
+const getDuplicateProductSkuMessage = (sku = '') =>
+  `SKU "${String(sku || '').trim() || 'this SKU'}" already exists in your product catalog. Please edit that product or use a different SKU.`;
+
 const normalizeProduct = (product) => {
   const dimensions = getProductDimensionParts(product);
   const flags = getProductFlags(product);
@@ -94,6 +172,8 @@ const normalizeProduct = (product) => {
     hazmatFlag: flags.some((flag) => flag.toLowerCase() === 'hazmat'),
     expiryTracked: Boolean(product?.expiryTracked ?? product?.expiry_tracked),
     lotTracked: Boolean(product?.lotTracked ?? product?.lot_tracked),
+    needsBundling: Boolean(product?.needsBundling ?? product?.needs_bundling),
+    bundleSize: product?.bundleSize ?? product?.bundle_size ?? '',
     defaultFnsku: product?.defaultFnsku || product?.defaultFNSKU || product?.default_fnsku || '',
     lengthCm: dimensions.length,
     widthCm: dimensions.width,
@@ -108,6 +188,11 @@ const ProductsClient = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [showViewModal, setShowViewModal] = useState(false);
+  const [showFormModal, setShowFormModal] = useState(false);
+  const [productForm, setProductForm] = useState(initialProductForm);
+  const [editingProductId, setEditingProductId] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [productFormError, setProductFormError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -152,6 +237,117 @@ const ProductsClient = () => {
     setShowViewModal(true);
   };
 
+  const openCreateModal = () => {
+    setEditingProductId('');
+    setProductForm(initialProductForm);
+    setProductFormError('');
+    setShowFormModal(true);
+  };
+
+  const closeProductFormModal = () => {
+    if (isSaving) return;
+    setShowFormModal(false);
+    setProductForm(initialProductForm);
+    setProductFormError('');
+    setEditingProductId('');
+  };
+
+  const openEditModal = async (product) => {
+    const productId = String(product?.id || '').trim();
+    let productForEdit = product;
+
+    if (productId) {
+      try {
+        setError('');
+        const response = await fetch(`${API_BASE_URL}/api/products/${encodeURIComponent(productId)}`, {
+          method: 'GET',
+          headers: buildHeaders(),
+          cache: 'no-store',
+        });
+        const payload = await parseResponse(response);
+        productForEdit = normalizeProduct({
+          ...product,
+          ...extractProductDetail(payload),
+        });
+      } catch {
+        productForEdit = product;
+      }
+    }
+
+    setEditingProductId(productId);
+    setProductFormError('');
+    setProductForm({
+      productName: productForEdit.productName,
+      sku: productForEdit.sku,
+      defaultFnsku: productForEdit.defaultFnsku,
+      lengthCm: toFormNumberValue(productForEdit.lengthCm),
+      widthCm: toFormNumberValue(productForEdit.widthCm),
+      heightCm: toFormNumberValue(productForEdit.heightCm),
+      weightKg: toFormNumberValue(productForEdit.weightKg),
+      hazmatFlag: productForEdit.hazmatFlag,
+      expiryTracked: productForEdit.expiryTracked,
+      lotTracked: productForEdit.lotTracked,
+      needsBundling: productForEdit.needsBundling,
+      bundleSize: productForEdit.needsBundling ? String(productForEdit.bundleSize || '1') : '',
+      active: productForEdit.active,
+    });
+    setShowFormModal(true);
+  };
+
+  const handleSaveProduct = async () => {
+    if (!productForm.productName.trim() || !productForm.sku.trim()) {
+      const message = 'Product name and SKU are required.';
+      setProductFormError(message);
+      setError(message);
+      return;
+    }
+
+    if (productForm.needsBundling && !String(productForm.bundleSize || '').trim()) {
+      const message = 'Bundle size is required when bundling is enabled.';
+      setProductFormError(message);
+      setError(message);
+      return;
+    }
+
+    if (!editingProductId) {
+      const targetSku = normalizeProductIdentityValue(productForm.sku);
+      const duplicateProduct = products.find((product) => normalizeProductIdentityValue(product.sku) === targetSku);
+      if (duplicateProduct) {
+        const message = getDuplicateProductSkuMessage(productForm.sku);
+        setProductFormError(message);
+        setError(message);
+        return;
+      }
+    }
+
+    try {
+      setIsSaving(true);
+      setError('');
+      setProductFormError('');
+      const response = await fetch(
+        `${API_BASE_URL}${editingProductId ? `/api/products/${encodeURIComponent(editingProductId)}` : '/api/products'}`,
+        {
+          method: editingProductId ? 'PATCH' : 'POST',
+          headers: buildHeaders(true),
+          body: JSON.stringify(toPayload(productForm, { includeSku: !editingProductId })),
+        }
+      );
+      await parseResponse(response);
+      setShowFormModal(false);
+      setProductForm(initialProductForm);
+      setEditingProductId('');
+      await loadProducts();
+    } catch (requestError) {
+      const message = isDuplicateProductSkuError(requestError.message)
+        ? getDuplicateProductSkuMessage(productForm.sku)
+        : requestError.message || 'Product could not be saved.';
+      setProductFormError(message);
+      setError(message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const totalProducts = products.length;
   const flaggedProducts = products.filter((product) => product.flags.length).length;
   const activeProducts = products.filter((product) => product.active).length;
@@ -166,6 +362,14 @@ const ProductsClient = () => {
               <h1 className="text-[34px] font-semibold leading-none text-[#132347]">MyProducts</h1>
               <p className="mt-2 text-sm text-[#64748b]">View your inventory catalog and product specifications.</p>
             </div>
+            <button
+              type="button"
+              onClick={openCreateModal}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#e55d00]"
+            >
+              <Plus size={16} />
+              Add Product
+            </button>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -341,6 +545,15 @@ const ProductsClient = () => {
                           >
                             <Eye size={15} />
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(product)}
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[#dbe2ee] bg-white text-[#64748b] transition-colors hover:bg-[#f8fafc]"
+                            title="Edit product"
+                            aria-label={`Edit ${product.productName}`}
+                          >
+                            <Edit3 size={14} />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -425,6 +638,188 @@ const ProductsClient = () => {
                 <p className="text-xs text-gray-500 mb-1">Status</p>
                 <p className="font-medium text-gray-900">{selectedProduct.active ? 'Active' : 'Inactive'}</p>
               </div>
+              <div>
+                <p className="text-xs text-gray-500 mb-1">Bundling</p>
+                <p className="font-medium text-gray-900">
+                  {selectedProduct.needsBundling ? `Yes (${selectedProduct.bundleSize})` : 'No'}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showFormModal ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
+              <h3 className="text-lg font-semibold text-[#132347]">
+                {editingProductId ? 'Edit Product' : 'Add Product'}
+              </h3>
+              <button
+                type="button"
+                onClick={closeProductFormModal}
+                disabled={isSaving}
+                className="rounded-lg p-1 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="max-h-[calc(90vh-132px)] overflow-y-auto p-6">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">Product Name</span>
+                  <input
+                    type="text"
+                    value={productForm.productName}
+                    onChange={(event) => {
+                      setProductFormError('');
+                      setProductForm((currentForm) => ({ ...currentForm, productName: event.target.value }));
+                    }}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                    placeholder="Product name"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">SKU</span>
+                  <input
+                    type="text"
+                    value={productForm.sku}
+                    disabled={Boolean(editingProductId)}
+                    onChange={(event) => {
+                      setProductFormError('');
+                      setProductForm((currentForm) => ({ ...currentForm, sku: event.target.value }));
+                    }}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900] disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500 disabled:focus:ring-0"
+                    placeholder="SKU"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">Default FNSKU</span>
+                  <input
+                    type="text"
+                    value={productForm.defaultFnsku}
+                    onChange={(event) => setProductForm((currentForm) => ({ ...currentForm, defaultFnsku: event.target.value }))}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                    placeholder="Default FNSKU"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">Weight (kg)</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={productForm.weightKg}
+                    onChange={(event) => setProductForm((currentForm) => ({ ...currentForm, weightKg: event.target.value }))}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                    placeholder="Weight kg"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">Length (cm)</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={productForm.lengthCm}
+                    onChange={(event) => setProductForm((currentForm) => ({ ...currentForm, lengthCm: event.target.value }))}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                    placeholder="Length"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">Width (cm)</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={productForm.widthCm}
+                    onChange={(event) => setProductForm((currentForm) => ({ ...currentForm, widthCm: event.target.value }))}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                    placeholder="Width"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">Height (cm)</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={productForm.heightCm}
+                    onChange={(event) => setProductForm((currentForm) => ({ ...currentForm, heightCm: event.target.value }))}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                    placeholder="Height"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">Bundle Size</span>
+                  <input
+                    type="number"
+                    value={productForm.bundleSize}
+                    disabled={!productForm.needsBundling}
+                    onChange={(event) => setProductForm((currentForm) => ({ ...currentForm, bundleSize: event.target.value }))}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900] disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-400 disabled:focus:ring-0"
+                    placeholder="Bundle size"
+                  />
+                </label>
+
+                <div className="grid grid-cols-1 gap-3 md:col-span-2 sm:grid-cols-2">
+                  {[
+                    ['hazmatFlag', 'Hazmat'],
+                    ['expiryTracked', 'Expiry Tracked'],
+                    ['lotTracked', 'Lot Tracked'],
+                    ['needsBundling', 'Needs Bundling'],
+                    ['active', 'Active'],
+                  ].map(([field, label]) => (
+                    <label key={field} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(productForm[field])}
+                        onChange={(event) =>
+                          setProductForm((currentForm) => ({
+                            ...currentForm,
+                            [field]: event.target.checked,
+                            ...(field === 'needsBundling'
+                              ? { bundleSize: event.target.checked && !currentForm.bundleSize ? '1' : currentForm.bundleSize }
+                              : {}),
+                          }))
+                        }
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+
+                {productFormError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 md:col-span-2">
+                    {productFormError}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t border-gray-100 bg-gray-50 px-6 py-4">
+              <button
+                type="button"
+                onClick={closeProductFormModal}
+                disabled={isSaving}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveProduct}
+                disabled={isSaving}
+                className="rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSaving ? 'Saving...' : editingProductId ? 'Update Product' : 'Add Product'}
+              </button>
             </div>
           </div>
         </div>

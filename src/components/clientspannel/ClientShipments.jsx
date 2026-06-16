@@ -9,6 +9,7 @@ import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
 import {
   buildShipmentItemPayload as mapShipmentItemPayload,
   findSavedLineItemForUpload as findMappedSavedLineItemForUpload,
+  getLineItemOutboundPackageGroups,
   getItemLabelFileAssignments as getMappedItemLabelFileAssignments,
   getLineItemId as getMappedLineItemId,
   getShipmentItems as getMappedShipmentItems,
@@ -7099,14 +7100,30 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
     return itemCount === 1 && !boxLineItemId && !boxSku && !contentItems.length;
   };
+  const getOutboundPackagesForShipmentItem = (item, boxes = trackBoxes, items = selectedShipmentViewStats.items) =>
+    getLineItemOutboundPackageGroups({
+      item,
+      boxes,
+      lineItems: items,
+      isBoxLinkedToItem: (box, currentItem, boxIndex) =>
+        isBoxLinkedToItem(box, currentItem, items.length, selectedShipment || {}, boxIndex),
+      isPalletBox: (box) => getBoxType(box) === 'pallet',
+      getPalletChildBoxes,
+      getBoxKey: (box, boxIndex) => String(getBoxItemsLookupId(box) || getBoxDisplayTitle(box, boxIndex) || boxIndex),
+    });
   const getBoxesForShipmentItem = (item, boxes = trackBoxes, items = selectedShipmentViewStats.items) =>
-    boxes
-      .map((box, boxIndex) => ({ box, boxIndex }))
-      .filter(({ box, boxIndex }) => isBoxLinkedToItem(box, item, items.length, selectedShipment || {}, boxIndex));
+    getOutboundPackagesForShipmentItem(item, boxes, items).boxes;
+  const getPalletsForShipmentItem = (item, boxes = trackBoxes, items = selectedShipmentViewStats.items) =>
+    getOutboundPackagesForShipmentItem(item, boxes, items).pallets;
   const getUnassignedShipmentBoxes = (boxes = trackBoxes, items = selectedShipmentViewStats.items) =>
     boxes
       .map((box, boxIndex) => ({ box, boxIndex }))
-      .filter(({ box, boxIndex }) => !items.some((item) => isBoxLinkedToItem(box, item, items.length, selectedShipment || {}, boxIndex)));
+      .filter(({ box, boxIndex }) => !items.some((item) => {
+        const packages = getOutboundPackagesForShipmentItem(item, boxes, items);
+        const packageRows = [...packages.boxes, ...packages.pallets];
+        const currentKey = String(getBoxItemsLookupId(box) || getBoxDisplayTitle(box, boxIndex) || boxIndex);
+        return packageRows.some((row) => String(row.key || getBoxItemsLookupId(row.box) || getBoxDisplayTitle(row.box, row.boxIndex) || row.boxIndex) === currentKey);
+      }));
   const getBoxRowsForLineItem = (box = {}, shipment = {}, boxIndex = -1, lineItem = null) => {
     const rows = getBoxContentRows(box, shipment, boxIndex);
     if (!lineItem) return rows;
@@ -8873,6 +8890,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                             const labelFileIsImage = Boolean(labelFile && isImageFile(labelFile));
                             const itemDisplayProductName = getItemDisplayProductName(item, labelFile);
                             const itemOutboundBoxes = getBoxesForShipmentItem(item, trackBoxes, viewStats.items);
+                            const itemOutboundPallets = getPalletsForShipmentItem(item, trackBoxes, viewStats.items);
                             return (
                               <div key={item?.id || item?.sku || index} className="rounded-lg border border-gray-200 bg-gray-50 p-4">
                                 <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
@@ -8937,16 +8955,27 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                                     )}
                                   </div>
 
-                                  <div>
-                                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Outbound Boxes</p>
-                                        {itemOutboundBoxes.length ? (
-                                          <div className="space-y-2">
-                                        {itemOutboundBoxes.map(({ box, boxIndex }) => renderShipmentBoxCard(box, boxIndex, item))}
+                                    <div>
+                                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Outbound Boxes</p>
+                                      {itemOutboundBoxes.length ? (
+                                        <div className="space-y-2">
+                                          {itemOutboundBoxes.map(({ box, boxIndex }) => renderShipmentBoxCard(box, boxIndex, item))}
                                           </div>
                                         ) : (
-                                      <p className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">No outbound boxes linked to this item.</p>
-                                    )}
-                                  </div>
+                                        <p className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">No outbound boxes linked to this item.</p>
+                                      )}
+                                    </div>
+
+                                    <div>
+                                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Outbound Pallets</p>
+                                      {itemOutboundPallets.length ? (
+                                        <div className="space-y-2">
+                                          {itemOutboundPallets.map(({ box, boxIndex }) => renderShipmentBoxCard(box, boxIndex, item))}
+                                        </div>
+                                      ) : (
+                                        <p className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">No outbound pallets linked to this item.</p>
+                                      )}
+                                    </div>
 
                                   {itemDiscrepancies.length ? (
                                     <div>

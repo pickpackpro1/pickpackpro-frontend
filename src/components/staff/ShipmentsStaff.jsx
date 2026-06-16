@@ -27,6 +27,7 @@ import { getDiscrepancyResolveData, resolveDiscrepancy as resolveDiscrepancyRequ
 import { formatToastMessage, showToast } from "../../utils/toast";
 import {
   findLineItemLabelFile as findMappedLineItemLabelFile,
+  getLineItemOutboundPackageGroups,
   getItemLabelFileAssignments as getMappedItemLabelFileAssignments,
   getLineItemId as getMappedLineItemId,
   getShipmentItems as getMappedShipmentItems,
@@ -7393,15 +7394,28 @@ const ShipmentsStaff = () => {
                   });
                 };
 
-                const getBoxesForViewItem = (item) =>
-                  viewShipmentBoxes
-                    .map((box, boxIndex) => ({ box, boxIndex }))
-                    .filter(({ box, boxIndex }) => isBoxLinkedToViewItem(box, item, boxIndex));
+                const getOutboundPackagesForViewItem = (item) =>
+                  getLineItemOutboundPackageGroups({
+                    item,
+                    boxes: viewShipmentBoxes,
+                    lineItems: viewLineItems,
+                    isBoxLinkedToItem: (box, currentItem, boxIndex) => isBoxLinkedToViewItem(box, currentItem, boxIndex),
+                    getPalletChildBoxes,
+                    isPalletBox,
+                    getBoxKey: (box, boxIndex) => String(getBoxRecordId(box) || getBoxId(box) || getBoxPalletLabel(box, boxIndex) || boxIndex),
+                  });
+                const getBoxesForViewItem = (item) => getOutboundPackagesForViewItem(item).boxes;
+                const getPalletsForViewItem = (item) => getOutboundPackagesForViewItem(item).pallets;
 
                 const getUnassignedViewBoxes = () =>
                   viewShipmentBoxes
                     .map((box, boxIndex) => ({ box, boxIndex }))
-                    .filter(({ box, boxIndex }) => !viewLineItems.some((item) => isBoxLinkedToViewItem(box, item, boxIndex)));
+                    .filter(({ box, boxIndex }) => !viewLineItems.some((item) => {
+                      const packages = getOutboundPackagesForViewItem(item);
+                      const packageRows = [...packages.boxes, ...packages.pallets];
+                      const currentKey = String(getBoxRecordId(box) || getBoxId(box) || getBoxPalletLabel(box, boxIndex) || boxIndex);
+                      return packageRows.some((row) => String(row.key || getBoxRecordId(row.box) || getBoxId(row.box) || getBoxPalletLabel(row.box, row.boxIndex) || row.boxIndex) === currentKey);
+                    }));
 
                 const getBoxRowsForViewItem = (box = {}, boxIndex = -1, lineItem = null) => {
                   const rows = getBoxContentRowsForView(box, boxIndex);
@@ -7449,25 +7463,40 @@ const ShipmentsStaff = () => {
                   const boxWeight = getBoxWeight(box);
                   const totalQty = firstPresent(getRowsTotalQuantity(displayRows), getRowsTotalQuantity(rows), getBoxUnits(box), "");
                   const boxSku = firstPresent(getBoxRowsSummary(displayRows), getBoxRowsSummary(rows), getBoxSkuValue(box, viewShipmentFiles), lineItem ? getItemSku(lineItem) : "");
+                  const isPallet = isPalletBox(box);
+                  const palletChildren = getPalletChildBoxes(box);
 
                   return (
                     <div key={getBoxId(box) || index} className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
                       <div className="p-3">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                          <p className="font-medium text-gray-900">{getBoxTitle(box, index)}{getBoxSize(box) ? ` - ${getBoxSize(box).toLowerCase()}` : ""}</p>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="font-medium text-gray-900">{getBoxPalletLabel(box, index)}{!isPallet && getBoxSize(box) ? ` - ${getBoxSize(box).toLowerCase()}` : ""}</p>
+                            {isPallet ? (
+                              <span className="rounded-full bg-[#fff7ed] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#ff6900]">Pallet</span>
+                            ) : null}
+                          </div>
                           <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${labelReady ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`}>
-                            {labelReady ? "FBA Label Ready" : "FBA Label Missing"}
+                            {isPallet ? (labelReady ? "Pallet Label Ready" : "Pallet Label Missing") : (labelReady ? "FBA Label Ready" : "FBA Label Missing")}
                           </span>
                         </div>
 
                         <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
-                          {[
-                            { label: "Status", value: getBoxDisplayStatus(box, viewStatus) },
-                            { label: "Dimensions", value: dimensions },
-                            { label: "Weight", value: `${boxWeight || 0} kg` },
-                            { label: "SKU", value: boxSku || "Pending" },
-                            { label: "Qty", value: totalQty !== "" ? totalQty : "Pending" },
-                          ].map((meta) => (
+                          {(isPallet
+                            ? [
+                                { label: "Status", value: getBoxDisplayStatus(box, viewStatus) },
+                                { label: "Pallet Dimensions", value: dimensions },
+                                { label: "Pallet Weight", value: `${boxWeight || 0} kg` },
+                                { label: "Boxes Inside", value: `${palletChildren.length} box${palletChildren.length !== 1 ? "es" : ""}` },
+                                { label: "Pallet FBA Label", value: labelReady ? "Uploaded" : "Missing" },
+                              ]
+                            : [
+                                { label: "Status", value: getBoxDisplayStatus(box, viewStatus) },
+                                { label: "Dimensions", value: dimensions },
+                                { label: "Weight", value: `${boxWeight || 0} kg` },
+                                { label: "SKU", value: boxSku || "Pending" },
+                                { label: "Qty", value: totalQty !== "" ? totalQty : "Pending" },
+                              ]).map((meta) => (
                             <div key={meta.label} className="rounded-md border border-[#dfe7f3] bg-white px-3 py-2">
                               <p className="text-[10px] font-semibold uppercase tracking-wide text-[#94a3b8]">{meta.label}</p>
                               <p className="mt-1 break-words font-semibold text-[#132347]">{meta.value}</p>
@@ -7475,7 +7504,47 @@ const ShipmentsStaff = () => {
                           ))}
                         </div>
 
-                        {displayRows.length ? (
+                        {isPallet ? (
+                          <div className="mt-3 rounded-md border border-[#dfe7f3] bg-white p-3">
+                            <div className="mb-2 flex items-center justify-between gap-3">
+                              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Boxes in pallet</p>
+                              <span className="rounded-full bg-[#f8fafc] px-2 py-0.5 text-[10px] font-semibold text-[#64748b]">
+                                {palletChildren.length} box{palletChildren.length !== 1 ? "es" : ""}
+                              </span>
+                            </div>
+                            {palletChildren.length ? (
+                              <div className="space-y-2">
+                                {palletChildren.map((childBox, childIndex) => {
+                                  const childDimensions = getBoxDimensions(childBox);
+                                  const childWeight = getBoxWeight(childBox);
+                                  const childRows = getBoxRowsForViewItem(childBox, childIndex, lineItem);
+                                  const childSummary = getBoxRowsSummary(childRows);
+                                  const childLabelReady = isBoxFbaLabelUploaded(childBox, viewShipmentFiles);
+
+                                  return (
+                                    <div key={getBoxRecordId(childBox) || getBoxId(childBox) || childIndex} className="rounded-md border border-[#e8eef7] bg-[#f8fbff] px-3 py-2">
+                                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                        <div className="min-w-0">
+                                          <p className="text-sm font-semibold text-[#132347]">{getBoxTitle(childBox, childIndex)}</p>
+                                          <p className="mt-1 text-xs text-[#64748b]">
+                                            {[childDimensions, childWeight ? `${childWeight} kg` : "", childSummary].filter(Boolean).join(" - ") || "Box details pending"}
+                                          </p>
+                                        </div>
+                                        <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${childLabelReady ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`}>
+                                          {childLabelReady ? "FBA Label Ready" : "FBA Label Missing"}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <div className="rounded-md border border-dashed border-[#d7e0ee] bg-[#f8fbff] px-3 py-4 text-center text-xs text-[#64748b]">
+                                No child boxes returned for this pallet.
+                              </div>
+                            )}
+                          </div>
+                        ) : displayRows.length ? (
                           <div className="mt-3 rounded-md border border-gray-200 bg-white">
                             {displayRows.map((row, rowIndex) => (
                               <div key={row?.id || row?.shipmentItemId || rowIndex} className="flex items-center justify-between gap-3 border-b border-gray-100 px-3 py-2 text-xs last:border-b-0">
@@ -7620,6 +7689,7 @@ const ShipmentsStaff = () => {
                               const labelFileUrl = labelFile ? resolveFileUrl(getFileUrl(labelFile)) : "";
                               const labelFileIsImage = Boolean(labelFile && labelFileUrl && isImageFile(labelFile));
                               const itemOutboundBoxes = getBoxesForViewItem(item);
+                              const itemOutboundPallets = getPalletsForViewItem(item);
                               const itemBundleSize = getViewItemBundleSize(item, viewBundleSizeEntries);
                               const itemBundleSizeDisplay = itemBundleSize || "-";
 
@@ -7701,6 +7771,17 @@ const ShipmentsStaff = () => {
                                         </div>
                                       ) : (
                                         <p className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">No outbound boxes linked to this item.</p>
+                                      )}
+                                    </div>
+
+                                    <div>
+                                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Outbound Pallets</p>
+                                      {itemOutboundPallets.length ? (
+                                        <div className="space-y-2">
+                                          {itemOutboundPallets.map(({ box, boxIndex }) => renderViewBoxCard(box, boxIndex, item))}
+                                        </div>
+                                      ) : (
+                                        <p className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">No outbound pallets linked to this item.</p>
                                       )}
                                     </div>
 
