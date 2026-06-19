@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle, RefreshCw, Tags, X } from 'lucide-react';
+import { CheckCircle, RefreshCw, Search, Tags, X } from 'lucide-react';
 import Layout from './adminlayout/Layout';
 import { getSession } from '../../utils/auth';
 import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
+import { fetchAwaitingFbaLabels } from '../../utils/awaitingFbaLabels';
 import {
   getLineItemId as getMappedLineItemId,
   getShipmentItems as getMappedShipmentItems,
@@ -882,9 +883,12 @@ const getBoxFbaLabelFileId = (box = {}) =>
   );
 
 const getBoxTitle = (box = {}, index = 0) => {
+  const typeLabel = String(box?.box_type || box?.boxType || '').toLowerCase() === 'pallet' ? 'Pallet' : 'Box';
+  const palletNumber = typeLabel === 'Pallet' ? String(firstPresent(box?.palletNumber, box?.pallet_number) || '').trim() : '';
+  if (palletNumber) return palletNumber;
+
   const rawTitle = firstPresent(box?.name, box?.label, box?.reference, box?.boxNumber, box?.box_number);
   const title = String(rawTitle || '').trim();
-  const typeLabel = String(box?.box_type || box?.boxType || '').toLowerCase() === 'pallet' ? 'Pallet' : 'Box';
 
   if (/^\d+$/.test(title)) return `${typeLabel} ${title}`;
   return title || `${typeLabel} #${index + 1}`;
@@ -1822,6 +1826,19 @@ const isBoxLabelReady = (box = {}, filesByBox = {}) =>
       getBoxLabelFile(box, filesByBox)
   );
 
+const isPalletLabelOptional = (box = {}) =>
+  getBoxType(box) === 'pallet' &&
+  String(firstPresent(box?.labelStatus, box?.label_status)).trim().toLowerCase() === 'missing_optional';
+
+const getAwaitingFbaLabelStatusText = (box = {}, labelReady = false) => {
+  if (getBoxType(box) === 'pallet') {
+    if (labelReady) return 'Pallet Label Uploaded';
+    return isPalletLabelOptional(box) ? 'Pallet Label Missing (optional)' : 'Pallet Label Missing';
+  }
+
+  return labelReady ? 'Label Uploaded' : 'Label Missing';
+};
+
 const openOrDownloadFile = (file = {}) => {
   const fileUrl = resolveFileUrl(getFileUrl(file));
   if (!fileUrl) return false;
@@ -2380,9 +2397,54 @@ const prepareFileForUpload = async (file, label = 'file') => {
 const formatStatus = (value = '') =>
   String(value || '-').replaceAll('_', ' ');
 
+const AWAITING_FBA_STATUS_OPTIONS = [
+  { value: 'all', label: 'All statuses' },
+  { value: 'submitted', label: 'Submitted' },
+  { value: 'pending_arrival', label: 'Pending Arrival' },
+  { value: 'received', label: 'Received' },
+  { value: 'in_progress', label: 'In Progress' },
+  { value: 'prepped', label: 'Prepped' },
+];
+
+const AWAITING_FBA_PAGE_SIZE = 50;
+
+const getAwaitingFbaClientOption = (shipment = {}) => {
+  const clientId = getShipmentClientId(shipment);
+  const clientName = getShipmentClientName(shipment);
+  const clientEmail = getShipmentClientEmail(shipment);
+
+  if (!clientId) return null;
+
+  return {
+    id: clientId,
+    label: [clientName, clientEmail].filter(Boolean).join(' - ') || clientId,
+  };
+};
+
+const mergeAwaitingFbaClientOptions = (...optionGroups) => {
+  const options = new Map();
+  optionGroups.flat().filter(Boolean).forEach((option) => {
+    if (!option?.id || options.has(option.id)) return;
+    options.set(option.id, option);
+  });
+  return [...options.values()].sort((first, second) => first.label.localeCompare(second.label));
+};
+
 const AwaitingFbaLabels = () => {
   const [rows, setRows] = useState([]);
   const [filesByBox, setFilesByBox] = useState({});
+  const [clientOptions, setClientOptions] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [clientFilter, setClientFilter] = useState('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [listMeta, setListMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: AWAITING_FBA_PAGE_SIZE,
+    pendingBoxCount: 0,
+  });
   const [isLoading, setIsLoading] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [uploadingKey, setUploadingKey] = useState('');
@@ -2406,9 +2468,12 @@ const AwaitingFbaLabels = () => {
   );
 
   const pendingBoxCount = useMemo(
-    () => visibleRows.reduce((sum, row) => sum + row.boxes.length, 0),
-    [visibleRows]
+    () => Number(listMeta.pendingBoxCount || 0) || visibleRows.reduce((sum, row) => sum + row.boxes.length, 0),
+    [listMeta.pendingBoxCount, visibleRows]
   );
+  const totalPages = Math.max(1, Math.ceil(Number(listMeta.total || 0) / Math.max(1, Number(listMeta.limit || AWAITING_FBA_PAGE_SIZE))));
+  const canGoPrevious = currentPage > 1;
+  const canGoNext = currentPage < totalPages;
   const isInitialLoading = isLoading && !hasLoaded;
 
   const batchFbaUploadOptions = useMemo(() => {
@@ -2446,81 +2511,31 @@ const AwaitingFbaLabels = () => {
       setError('');
       if (clearMessage) setMessage('');
 
-      const clientRows = await fetchClientRows();
-      const sourceShipments = (await fetchEligibleShipmentRows()).map((shipment) =>
-        withClientDetails(normalizeShipment(shipment), clientRows)
-      );
-      const candidateShipments = sourceShipments.filter(isShipmentEligibleForFbaLabels);
-
-      if (!candidateShipments.length) {
-        setRows([]);
-        setFilesByBox({});
-        return;
-      }
-
-      const shipmentResults = await Promise.allSettled(
-        candidateShipments.map(async (shipment) => {
-          const lookupCandidates = getShipmentLookupCandidates(shipment);
-          const detail = await fetchShipmentDetail(lookupCandidates).catch(() => ({}));
-          const mergedShipment = withClientDetails(
-            normalizeShipment({
-              ...shipment,
-              ...detail,
-              id: getShipmentRecordId(detail) || getShipmentRecordId(shipment) || getShipmentId(shipment),
-              reference: getShipmentReference(detail) || getShipmentReference(shipment),
-              clientId: getShipmentClientId(detail) || getShipmentClientId(shipment) || shipment?.clientId || shipment?.client_id,
-              client_id: getShipmentClientId(detail) || getShipmentClientId(shipment) || shipment?.client_id || shipment?.clientId,
-              clientRecord:
-                detail?.clientRecord ||
-                detail?.client_record ||
-                detail?.rawClient ||
-                detail?.raw_client ||
-                (detail?.client && typeof detail.client === 'object' ? detail.client : null) ||
-                (detail?.clients && typeof detail.clients === 'object' ? detail.clients : null) ||
-                shipment?.clientRecord ||
-                shipment?.client_record ||
-                shipment?.rawClient ||
-                shipment?.raw_client ||
-                (shipment?.client && typeof shipment.client === 'object' ? shipment.client : null) ||
-                (shipment?.clients && typeof shipment.clients === 'object' ? shipment.clients : null),
-              lineItems: getLineItems(detail).length ? getLineItems(detail) : getLineItems(shipment),
-              shipment_line_items: getLineItems(detail).length ? getLineItems(detail) : getLineItems(shipment),
-            }),
-            clientRows
-          );
-
-          const resolvedLookupCandidates = getShipmentLookupCandidates(mergedShipment, detail, shipment);
-          const [boxesResult, subShipmentBoxesResult] = await Promise.allSettled([
-            fetchBoxesForShipment(resolvedLookupCandidates),
-            fetchSubShipmentBoxesForShipment(resolvedLookupCandidates),
-          ]);
-
-          const boxesResultRows = boxesResult.status === 'fulfilled' ? boxesResult.value : [];
-          const subShipmentBoxes = subShipmentBoxesResult.status === 'fulfilled' ? subShipmentBoxesResult.value : [];
-          const loadedBoxes = mergeBoxLists(
-            boxesResultRows,
-            subShipmentBoxes,
-            extractBoxes(detail),
-            extractBoxes(shipment)
-          );
-          const boxes = await enrichBoxesWithItems(loadedBoxes, getLineItems(mergedShipment));
-
-          return { shipment: mergedShipment, boxes, filesByBox: {} };
-        })
-      );
-
-      const nextFilesByBox = {};
-      const nextRows = shipmentResults.flatMap((result) => {
-        if (result.status !== 'fulfilled') return [];
-        Object.assign(nextFilesByBox, result.value.filesByBox);
-        const boxes = result.value.boxes || [];
-        return boxes.length ? [{ shipment: result.value.shipment, boxes }] : [];
+      const awaitingPayload = await fetchAwaitingFbaLabels({
+        apiBaseUrl: API_BASE_URL,
+        headers: buildHeaders(),
+        parseResponse,
+        page: currentPage,
+        limit: AWAITING_FBA_PAGE_SIZE,
+        search: debouncedSearchQuery,
+        clientId: clientFilter === 'all' ? '' : clientFilter,
+        status: statusFilter,
       });
 
-      const hydratedFilesByBox = await hydrateBoxFilesForRows(nextRows);
-      const nextHydratedFilesByBox = { ...nextFilesByBox, ...hydratedFilesByBox };
-      setFilesByBox(nextHydratedFilesByBox);
-      setRows(nextRows);
+      setFilesByBox(awaitingPayload.filesByBox || {});
+      setRows(awaitingPayload.rows || []);
+      setListMeta({
+        total: awaitingPayload.total,
+        page: awaitingPayload.page,
+        limit: awaitingPayload.limit,
+        pendingBoxCount: awaitingPayload.pendingBoxCount,
+      });
+      setClientOptions((currentOptions) =>
+        mergeAwaitingFbaClientOptions(
+          currentOptions,
+          (awaitingPayload.rows || []).map((row) => getAwaitingFbaClientOption(row.shipment))
+        )
+      );
     } catch (requestError) {
       if (showLoader) {
         setRows([]);
@@ -2540,7 +2555,25 @@ const AwaitingFbaLabels = () => {
         }, 0);
       }
     }
-  }, []);
+  }, [clientFilter, currentPage, debouncedSearchQuery, statusFilter]);
+
+  useEffect(() => {
+    const searchTimer = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery.trim());
+    }, 300);
+
+    return () => window.clearTimeout(searchTimer);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [clientFilter, debouncedSearchQuery, statusFilter]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   useEffect(() => {
     loadAwaitingFbaLabelsRef.current = loadAwaitingFbaLabels;
@@ -3003,6 +3036,54 @@ const AwaitingFbaLabels = () => {
         {message ? <p className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">{message}</p> : null}
         {error ? <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
 
+        <div className="mb-4 grid gap-3 rounded-xl border border-[#e2e8f0] bg-white p-4 shadow-sm md:grid-cols-[minmax(0,1fr)_220px_220px_auto]">
+          <div className="relative">
+            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#94a3b8]" />
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search shipment, client, box, SKU..."
+              className="w-full rounded-lg border border-[#dbe3ef] bg-white py-2.5 pl-9 pr-3 text-sm text-[#132347] outline-none focus:border-[#ff9d3a] focus:ring-2 focus:ring-[#ffedd5]"
+            />
+          </div>
+
+          <select
+            value={clientFilter}
+            onChange={(event) => setClientFilter(event.target.value)}
+            className="rounded-lg border border-[#dbe3ef] bg-white px-3 py-2.5 text-sm font-medium text-[#132347] outline-none focus:border-[#ff9d3a] focus:ring-2 focus:ring-[#ffedd5]"
+          >
+            <option value="all">All clients</option>
+            {clientOptions.map((client) => (
+              <option key={client.id} value={client.id}>
+                {client.label}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            className="rounded-lg border border-[#dbe3ef] bg-white px-3 py-2.5 text-sm font-medium text-[#132347] outline-none focus:border-[#ff9d3a] focus:ring-2 focus:ring-[#ffedd5]"
+          >
+            {AWAITING_FBA_STATUS_OPTIONS.map((statusOption) => (
+              <option key={statusOption.value} value={statusOption.value}>
+                {statusOption.label}
+              </option>
+            ))}
+          </select>
+
+          <button
+            type="button"
+            onClick={() => loadAwaitingFbaLabels({ clearMessage: true, showLoader: false })}
+            disabled={isLoading}
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#dbe3ef] bg-white px-4 py-2.5 text-sm font-semibold text-[#64748b] hover:bg-[#f8fafc] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
+
         {isInitialLoading ? (
           <div className="rounded-xl border border-gray-200 bg-white px-5 py-12 text-center shadow-sm">
             <RefreshCw size={28} className="mx-auto mb-3 animate-spin text-[#ff8c2f]" />
@@ -3060,7 +3141,6 @@ const AwaitingFbaLabels = () => {
                             const boxUnits = getBoxTotalQuantity(box, shipment, originalIndex);
                             const boxSize = getBoxSize(box);
                             const isPallet = getBoxType(box) === 'pallet';
-                            const boxType = isPallet ? 'Pallet' : 'Box';
                             const palletChildren = getPalletChildBoxes(box);
                             const palletChildCount = getPalletChildCount(box);
                             const palletDimensions = getBoxDimensions(box);
@@ -3093,7 +3173,7 @@ const AwaitingFbaLabels = () => {
 
                                 <div className="min-w-0">
                                   <p className="text-sm font-medium text-[#132347]">
-                                    {boxType} #{box?.box_number || originalIndex + 1}
+                                    {getBoxTitle(box, originalIndex)}
                                     {!isPallet && boxSize ? ` - ${boxSize}` : ''}
                                   </p>
                                   {box.__subShipmentReference ? (
@@ -3133,7 +3213,7 @@ const AwaitingFbaLabels = () => {
                                     labelReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
                                   }`}>
                                     {labelReady ? <CheckCircle size={13} /> : null}
-                                    {isPallet ? (labelReady ? 'Pallet Label Uploaded' : 'Pallet Label Missing') : (labelReady ? 'Label Uploaded' : 'Label Missing')}
+                                    {getAwaitingFbaLabelStatusText(box, labelReady)}
                                   </span>
                                 </div>
 
@@ -3182,6 +3262,32 @@ const AwaitingFbaLabels = () => {
                 </div>
               );
             })}
+            <div className="flex flex-col gap-3 rounded-xl border border-[#e2e8f0] bg-white px-4 py-3 text-sm text-[#64748b] shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <span>
+                Showing {visibleRows.length} of {Number(listMeta.total || visibleRows.length)} shipment row{Number(listMeta.total || visibleRows.length) === 1 ? '' : 's'}.
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                  disabled={!canGoPrevious || isLoading}
+                  className="rounded-lg border border-[#dbe3ef] px-3 py-1.5 text-xs font-semibold text-[#64748b] hover:bg-[#f8fafc] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="px-2 text-xs font-semibold text-[#132347]">
+                  Page {currentPage} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                  disabled={!canGoNext || isLoading}
+                  className="rounded-lg border border-[#dbe3ef] px-3 py-1.5 text-xs font-semibold text-[#64748b] hover:bg-[#f8fafc] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
           </div>
         ) : (
           <div className="rounded-xl border border-gray-200 bg-white px-5 py-12 text-center shadow-sm">
@@ -3242,7 +3348,9 @@ const AwaitingFbaLabels = () => {
                         const contentSummary = getBoxContentsSummary(box, batchFbaUpload.shipment, index);
                         const boxUnits = getBoxTotalQuantity(box, batchFbaUpload.shipment, index);
                         const boxNumber = firstPresent(box?.box_number, box?.boxNumber, index + 1);
-                        const boxType = getBoxType(box) === 'pallet' ? 'Pallet' : 'Box';
+                        const isPallet = getBoxType(box) === 'pallet';
+                        const boxTitle = getBoxTitle(box, index);
+                        const boxSize = getBoxSize(box);
 
                         return (
                           <label key={boxId} className="flex cursor-pointer items-center gap-3 border-b border-[#f1f5f9] px-4 py-3 last:border-b-0">
@@ -3258,7 +3366,7 @@ const AwaitingFbaLabels = () => {
                             </span>
                             <span className="min-w-0">
                               <span className="block text-sm font-semibold text-[#132347]">
-                                {boxType} #{boxNumber}{getBoxSize(box) ? ` - ${getBoxSize(box)}` : ''}
+                                {boxTitle}{!isPallet && boxSize ? ` - ${boxSize}` : ''}
                               </span>
                               {contentSummary ? <span className="block text-xs text-[#64748b]">Contents: {contentSummary}</span> : null}
                               {boxUnits !== '' ? <span className="block text-xs text-[#64748b]">Units: {boxUnits}</span> : null}
@@ -3306,7 +3414,6 @@ const AwaitingFbaLabels = () => {
               const labelReady = isBoxLabelReady(box, filesByBox);
               const dimensions = getBoxDimensions(box);
               const weight = getBoxWeight(box);
-              const boxNumber = firstPresent(box?.box_number, box?.boxNumber, boxIndex + 1);
               const isPallet = getBoxType(box) === 'pallet';
               const palletChildren = getPalletChildBoxes(box);
               const palletChildCount = getPalletChildCount(box);
@@ -3317,9 +3424,7 @@ const AwaitingFbaLabels = () => {
                 <>
                   <div className="flex items-start justify-between gap-4 border-b border-[#e2e8f0] px-6 py-4">
                     <div>
-                      <h3 className="text-lg font-semibold text-[#132347]">
-                        {getBoxType(box) === 'pallet' ? 'Pallet' : 'Box'} #{boxNumber}
-                      </h3>
+                      <h3 className="text-lg font-semibold text-[#132347]">{getBoxTitle(box, boxIndex)}</h3>
                       <p className="mt-1 text-xs text-[#6b7280]">{shipment?.reference || getShipmentId(shipment)}</p>
                       <p className="mt-1 text-xs font-semibold text-[#132347]">
                         Client: {clientName || '-'}{clientEmail ? ` (${clientEmail})` : ''}
@@ -3373,7 +3478,7 @@ const AwaitingFbaLabels = () => {
                             labelReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
                           }`}
                         >
-                          {isPallet ? (labelReady ? 'Pallet Label Uploaded' : 'Pallet Label Missing') : (labelReady ? 'Label Uploaded' : 'Label Missing')}
+                          {getAwaitingFbaLabelStatusText(box, labelReady)}
                         </span>
                       </div>
 

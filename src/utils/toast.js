@@ -1,12 +1,40 @@
 export const TOAST_EVENT_NAME = 'pickpackpro-toast';
 export const API_MUTATION_EVENT_NAME = 'pickpackpro-api-mutated';
 
+const getFriendlyBackendMessage = (message = '') => {
+  const text = String(message || '').trim();
+  if (!text) return '';
+
+  const normalizedText = text.toLowerCase();
+
+  if (
+    normalizedText.includes('invoices_dispatch_source_check') ||
+    (
+      normalizedText.includes('new row for relation') &&
+      normalizedText.includes('invoices') &&
+      normalizedText.includes('violates check constraint')
+    ) ||
+    (
+      normalizedText.includes('prisma.sub_shipments.deletemany') &&
+      normalizedText.includes('invoices')
+    )
+  ) {
+    return 'This shipment cannot be deleted because it has linked invoice/sub-shipment billing records. Please cancel or resolve the related invoice first, then try again.';
+  }
+
+  if (normalizedText.includes('prisma.') && normalizedText.includes('invocation')) {
+    return 'The request could not be completed because related backend records blocked this action.';
+  }
+
+  return text;
+};
+
 export const formatToastMessage = (value, fallback = 'Something went wrong.') => {
   if (value instanceof Error) return formatToastMessage(value.message, fallback);
 
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    return trimmed || fallback;
+    return getFriendlyBackendMessage(trimmed) || fallback;
   }
 
   if (value === 0 || value === false) return String(value);
@@ -58,6 +86,18 @@ const isAuthRefreshUrl = (url = '') =>
 const shouldToastApiAction = (input, init = {}) => {
   if (init?.skipApiToast) return false;
 
+  const method = getRequestMethod(input, init);
+  const url = getRequestUrl(input);
+
+  if (!['POST', 'PATCH', 'PUT', 'DELETE'].includes(method)) return false;
+  if (!url.includes('/api/')) return false;
+  if (url.includes('/api/auth/login') || url.includes('/api/auth/me')) return false;
+  if (isAuthRefreshUrl(url)) return false;
+
+  return true;
+};
+
+const shouldEmitApiMutation = (input, init = {}) => {
   const method = getRequestMethod(input, init);
   const url = getRequestUrl(input);
 
@@ -123,20 +163,23 @@ export const installApiActionToasts = () => {
     const method = getRequestMethod(input, init);
     const url = getRequestUrl(input);
     const shouldToast = shouldToastApiAction(input, init);
+    const shouldEmitMutation = shouldEmitApiMutation(input, init);
 
     try {
       const response = await originalFetch(input, init);
+      const responseMessage = shouldToast ? await parseResponseMessage(response) : '';
+
+      if (response.ok && shouldEmitMutation) {
+        window.dispatchEvent(
+          new CustomEvent(API_MUTATION_EVENT_NAME, {
+            detail: { method, url },
+          })
+        );
+      }
 
       if (shouldToast) {
-        const responseMessage = await parseResponseMessage(response);
-
         if (response.ok) {
           showToast('success', getSuccessMessage(method, url, responseMessage));
-          window.dispatchEvent(
-            new CustomEvent(API_MUTATION_EVENT_NAME, {
-              detail: { method, url },
-            })
-          );
         } else {
           showToast('error', responseMessage || `Request failed with status ${response.status}`);
         }

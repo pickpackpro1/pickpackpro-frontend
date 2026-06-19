@@ -158,6 +158,90 @@ export const getProductWeightText = (product = {}) => {
   return /\b(kg|g|lb|lbs)\b/i.test(text) ? text : `${text} kg`;
 };
 
+export const getProductDefaultFnskuLabelFile = (product = {}) => {
+  const directFile = firstPresent(
+    product?.defaultFnskuLabelFile,
+    product?.default_fnsku_label_file,
+    product?.defaultFNSKULabelFile,
+    product?.default_fnsku_label_file,
+    product?.fnskuLabelFile,
+    product?.fnsku_label_file
+  );
+
+  return directFile && typeof directFile === 'object' ? directFile : null;
+};
+
+export const getProductDefaultFnskuLabelFileId = (product = {}) => {
+  const file = getProductDefaultFnskuLabelFile(product) || {};
+
+  return firstPresent(
+    product?.defaultFnskuLabelFileId,
+    product?.default_fnsku_label_file_id,
+    product?.defaultFNSKULabelFileId,
+    product?.default_fnsku_label_file_id,
+    file?.fileId,
+    file?.file_id,
+    file?.id,
+    file?.uuid
+  );
+};
+
+export const getProductDefaultFnskuLabelFileName = (product = {}) => {
+  const file = getProductDefaultFnskuLabelFile(product) || {};
+
+  return firstPresent(
+    file?.fileName,
+    file?.file_name,
+    file?.originalFilename,
+    file?.original_filename,
+    file?.name,
+    product?.defaultFnskuLabelFileName,
+    product?.default_fnsku_label_file_name
+  );
+};
+
+export const getProductDefaultFnskuLabelFileUrl = (product = {}) => {
+  const file = getProductDefaultFnskuLabelFile(product) || {};
+
+  return firstPresent(
+    product?.defaultFnskuLabelFileUrl,
+    product?.default_fnsku_label_file_url,
+    product?.defaultFNSKULabelFileUrl,
+    file?.url,
+    file?.publicUrl,
+    file?.public_url,
+    file?.signedUrl,
+    file?.signed_url,
+    file?.downloadUrl,
+    file?.download_url
+  );
+};
+
+export const getProductDefaultFnskuLabelState = (product = {}) => {
+  const defaultFnskuLabelFile = getProductDefaultFnskuLabelFile(product);
+  const defaultFnskuLabelFileId = getProductDefaultFnskuLabelFileId(product);
+  const defaultFnskuLabelFileName = getProductDefaultFnskuLabelFileName(product);
+  const defaultFnskuLabelFileUrl = getProductDefaultFnskuLabelFileUrl(product);
+  const hasDefaultFnskuLabel = Boolean(
+    defaultFnskuLabelFile ||
+      defaultFnskuLabelFileId ||
+      defaultFnskuLabelFileName ||
+      defaultFnskuLabelFileUrl
+  );
+
+  return {
+    defaultFnskuLabelFileId,
+    default_fnsku_label_file_id: defaultFnskuLabelFileId,
+    defaultFnskuLabelFile,
+    default_fnsku_label_file: defaultFnskuLabelFile,
+    defaultFnskuLabelFileName,
+    default_fnsku_label_file_name: defaultFnskuLabelFileName,
+    defaultFnskuLabelFileUrl,
+    default_fnsku_label_file_url: defaultFnskuLabelFileUrl,
+    usesProductDefaultFnskuLabel: hasDefaultFnskuLabel,
+  };
+};
+
 const truthyValue = (value) => {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value > 0;

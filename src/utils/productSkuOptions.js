@@ -1,3 +1,10 @@
+import {
+  getProductDefaultFnskuLabelFile,
+  getProductDefaultFnskuLabelFileId,
+  getProductDefaultFnskuLabelFileName,
+  getProductDefaultFnskuLabelFileUrl,
+} from './productFields';
+
 const isPresent = (value) => {
   if (value === 0 || value === false) return true;
   return value !== undefined && value !== null && String(value).trim() !== '';
@@ -126,6 +133,14 @@ export const normalizeSkuProduct = (product = {}) => ({
   needs_bundling: getProductNeedsBundling(product),
   bundleSize: String(getProductBundleSize(product) || '').trim(),
   bundle_size: String(getProductBundleSize(product) || '').trim(),
+  defaultFnskuLabelFileId: getProductDefaultFnskuLabelFileId(product),
+  default_fnsku_label_file_id: getProductDefaultFnskuLabelFileId(product),
+  defaultFnskuLabelFile: getProductDefaultFnskuLabelFile(product),
+  default_fnsku_label_file: getProductDefaultFnskuLabelFile(product),
+  defaultFnskuLabelFileName: getProductDefaultFnskuLabelFileName(product),
+  default_fnsku_label_file_name: getProductDefaultFnskuLabelFileName(product),
+  defaultFnskuLabelFileUrl: getProductDefaultFnskuLabelFileUrl(product),
+  default_fnsku_label_file_url: getProductDefaultFnskuLabelFileUrl(product),
   clientId: String(getProductClientId(product) || '').trim(),
   raw: product,
 });

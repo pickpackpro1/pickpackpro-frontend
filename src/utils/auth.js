@@ -1,4 +1,8 @@
 export const AUTH_STORAGE_KEY = "pickpackpro-auth";
+const LARGE_LOCAL_CACHE_KEY_PREFIXES = [
+  "pickpackpro-api-get-cache",
+  "pickpackpro-client-shipments-cache",
+];
 
 const firstPresent = (...values) =>
   values.find((value) => value !== null && value !== undefined && String(value).trim() !== "") || "";
@@ -100,6 +104,16 @@ export const clearSession = () => {
   localStorage.removeItem(AUTH_STORAGE_KEY);
 };
 
+const clearLargeLocalCaches = () => {
+  try {
+    Object.keys(localStorage)
+      .filter((key) => LARGE_LOCAL_CACHE_KEY_PREFIXES.some((prefix) => key.startsWith(prefix)))
+      .forEach((key) => localStorage.removeItem(key));
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+};
+
 export const getDashboardPath = (role) => {
   switch (String(role || "").toLowerCase()) {
     case "staff":
@@ -151,5 +165,12 @@ export const saveSession = (session) => {
     return;
   }
 
-  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(normalizeSession(session)));
+  const serializedSession = JSON.stringify(normalizeSession(session));
+
+  try {
+    localStorage.setItem(AUTH_STORAGE_KEY, serializedSession);
+  } catch (error) {
+    clearLargeLocalCaches();
+    localStorage.setItem(AUTH_STORAGE_KEY, serializedSession);
+  }
 };

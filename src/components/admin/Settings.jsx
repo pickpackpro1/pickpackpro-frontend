@@ -594,6 +594,7 @@ const Settings = () => {
   const [pricingForm, setPricingForm] = useState({
     clientId: '',
     serviceType: 'fnsku_label',
+    customServiceType: '',
     pricePerUnit: '',
     tier: 'silver',
     effectiveFrom: '',
@@ -642,6 +643,7 @@ const Settings = () => {
     const mergedOptions = [
       ...catalogOptions,
       ...defaultServiceTypeOptions,
+      { value: 'OTHER', label: 'Others' },
       pricingForm.serviceType
         ? {
             value: normalizeServiceCode(pricingForm.serviceType),
@@ -662,6 +664,7 @@ const Settings = () => {
       return true;
     });
   }, [pricingCatalog, pricingForm.serviceType]);
+  const isPricingOtherServiceSelected = String(pricingForm.serviceType || '').trim().toUpperCase() === 'OTHER';
 
   const pricingClientOptions = useMemo(
     () =>
@@ -1297,7 +1300,11 @@ const Settings = () => {
       setPricingError('');
       setPricingMessage('');
 
-      if (!pricingForm.serviceType.trim()) {
+      const selectedServiceType = isPricingOtherServiceSelected
+        ? pricingForm.customServiceType.trim()
+        : pricingForm.serviceType.trim();
+
+      if (!selectedServiceType) {
         throw new Error('Service type is required.');
       }
 
@@ -1307,7 +1314,7 @@ const Settings = () => {
 
       const pricingPayload = {
         clientId: pricingForm.clientId.trim() || undefined,
-        serviceType: normalizeServiceCode(pricingForm.serviceType.trim()),
+        serviceType: normalizeServiceCode(selectedServiceType),
         tier: pricingForm.tier,
         pricePerUnit: Number(pricingForm.pricePerUnit || 0),
         notes: pricingForm.notes.trim() || undefined,
@@ -2469,7 +2476,11 @@ const Settings = () => {
                         {pricingMessage}
                       </div>
                     ) : null}
-                    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(280px,1.4fr)_170px_160px_160px]">
+                    <div className={`grid grid-cols-1 items-start gap-4 ${
+                      isPricingOtherServiceSelected
+                        ? 'lg:grid-cols-[minmax(280px,1.4fr)_170px_minmax(190px,1fr)_160px_160px]'
+                        : 'lg:grid-cols-[minmax(280px,1.4fr)_170px_160px_160px]'
+                    }`}>
                       <div ref={pricingClientDropdownRef} className="relative">
                         <button
                           type="button"
@@ -2543,7 +2554,14 @@ const Settings = () => {
                       </div>
                       <select
                         value={pricingForm.serviceType}
-                        onChange={(e) => setPricingForm({ ...pricingForm, serviceType: normalizeServiceCode(e.target.value) })}
+                        onChange={(e) => {
+                          const nextServiceType = normalizeServiceCode(e.target.value);
+                          setPricingForm({
+                            ...pricingForm,
+                            serviceType: nextServiceType,
+                            customServiceType: String(nextServiceType || '').toUpperCase() === 'OTHER' ? pricingForm.customServiceType : '',
+                          });
+                        }}
                         className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm focus:border-[#ff9900] focus:outline-none focus:ring-2 focus:ring-orange-100"
                         aria-label="Service Type"
                       >
@@ -2554,6 +2572,16 @@ const Settings = () => {
                           </option>
                         ))}
                       </select>
+                      {isPricingOtherServiceSelected ? (
+                        <input
+                          type="text"
+                          value={pricingForm.customServiceType}
+                          onChange={(e) => setPricingForm({ ...pricingForm, customServiceType: e.target.value })}
+                          className="rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-[#ff9900] focus:outline-none focus:ring-2 focus:ring-orange-100"
+                          placeholder="Other service name"
+                          aria-label="Other service name"
+                        />
+                      ) : null}
                       <select
                         value={pricingForm.tier}
                         onChange={(e) => setPricingForm({ ...pricingForm, tier: e.target.value })}
@@ -2575,7 +2603,7 @@ const Settings = () => {
                       <textarea
                         value={pricingForm.notes}
                         onChange={(e) => setPricingForm({ ...pricingForm, notes: e.target.value })}
-                        className="min-h-20 rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-[#ff9900] focus:outline-none focus:ring-2 focus:ring-orange-100 lg:col-span-4"
+                        className={`min-h-20 rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-[#ff9900] focus:outline-none focus:ring-2 focus:ring-orange-100 ${isPricingOtherServiceSelected ? 'lg:col-span-5' : 'lg:col-span-4'}`}
                         placeholder="Special rate agreed with client"
                       />
                     </div>

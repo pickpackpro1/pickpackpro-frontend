@@ -11,11 +11,17 @@ const LoadingState = ({
   size = 'md',
   className = '',
   labelClassName = 'text-sm text-gray-500',
-  delay = 200,
+  delay = 120,
+  visible = true,
 }) => {
   const [shouldRender, setShouldRender] = useState(false);
 
   useEffect(() => {
+    if (!visible) {
+      setShouldRender(false);
+      return undefined;
+    }
+
     if (!delay) {
       setShouldRender(true);
       return undefined;
@@ -26,9 +32,9 @@ const LoadingState = ({
     }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [delay]);
+  }, [delay, visible]);
 
-  if (!shouldRender) return null;
+  if (!visible || !shouldRender) return null;
 
   return (
     <span className={`inline-flex items-center justify-center gap-2 ${className}`} role="status" aria-live="polite">

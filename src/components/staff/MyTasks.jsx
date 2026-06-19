@@ -5,6 +5,7 @@ import LayoutStaff from "./stafflayout/LayoutStaff";
 import LoadingState from "../common/LoadingState";
 import FullPageLoader from "../common/FullPageLoader";
 import { getSession } from "../../utils/auth";
+import { fetchShipmentServicesBatch, getBatchServicesForShipment, isUuidValue } from "../../utils/shipmentServicesBatch";
 
 const API_BASE_URL = '';
 
@@ -607,13 +608,48 @@ const MyTasks = () => {
       const enrichedShipmentRows = shipmentDetailResults.map((result, index) =>
         result.status === "fulfilled" ? result.value : shipmentRows[index]
       );
+      const serviceLookups = enrichedShipmentRows.map((shipment, index) => {
+        const normalizedShipment = normalizeShipment(shipment);
+        const existingServices = extractServiceTasks(shipment);
+        const lookupCandidates = existingServices.length || !normalizedShipment.id
+          ? []
+          : getShipmentLookupCandidates(shipment, normalizedShipment);
+
+        return {
+          existingServices,
+          lookupCandidates,
+          batchLookupId: lookupCandidates.find(isUuidValue) || "",
+          originalIndex: index,
+        };
+      });
+      const batchShipmentIds = serviceLookups.map((lookup) => lookup.batchLookupId).filter(Boolean);
+      let batchServices = null;
+
+      if (batchShipmentIds.length) {
+        try {
+          batchServices = await fetchShipmentServicesBatch({
+            apiBaseUrl: API_BASE_URL,
+            headers: buildHeaders(),
+            parseResponse,
+            shipmentIds: batchShipmentIds,
+          });
+        } catch {
+          batchServices = null;
+        }
+      }
+
       const serviceResults = await Promise.allSettled(
         enrichedShipmentRows.map(async (shipment, index) => {
           const normalizedShipment = normalizeShipment(shipment);
-          const existingServices = extractServiceTasks(shipment);
+          const existingServices = serviceLookups[index]?.existingServices || extractServiceTasks(shipment);
           if (existingServices.length || !normalizedShipment.id) return existingServices;
 
-          const lookupCandidates = getShipmentLookupCandidates(shipment, normalizedShipment);
+          const lookupCandidates = serviceLookups[index]?.lookupCandidates || getShipmentLookupCandidates(shipment, normalizedShipment);
+          const batchLookupId = serviceLookups[index]?.batchLookupId || "";
+
+          if (batchServices && batchLookupId) {
+            return getBatchServicesForShipment(batchServices, batchLookupId);
+          }
 
           for (const lookupId of lookupCandidates) {
             try {

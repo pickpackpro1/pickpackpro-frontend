@@ -69,6 +69,33 @@ const InvoicesClient = lazyWithChunkReload(() => import("./components/clientspan
 const ProductsClient = lazyWithChunkReload(() => import("./components/clientspannel/ProductsClient"));
 const Account = lazyWithChunkReload(() => import("./components/clientspannel/Account"));
 
+const ROLE_CHUNK_PREFETCHERS = {
+  admin: [
+    () => import("./components/admin/Dashboard"),
+    () => import("./components/admin/Shipments"),
+    () => import("./components/admin/ShipmentDetail"),
+    () => import("./components/admin/AwaitingFbaLabels"),
+    () => import("./components/admin/Billing"),
+    () => import("./components/admin/Products"),
+    () => import("./components/admin/Dispatch"),
+    () => import("./components/admin/Receiving"),
+  ],
+  client: [
+    () => import("./components/clientspannel/ClientDashboard"),
+    () => import("./components/clientspannel/ClientShipments"),
+    () => import("./components/clientspannel/InvoicesClient"),
+    () => import("./components/clientspannel/ProductsClient"),
+    () => import("./components/clientspannel/Account"),
+  ],
+  staff: [
+    () => import("./components/staff/MyTasks"),
+    () => import("./components/staff/ShipmentsStaff"),
+    () => import("./components/staff/DispatchStaff"),
+    () => import("./components/staff/ReceivingStaff"),
+    () => import("./components/admin/ShipmentDetail"),
+  ],
+};
+
 const API_BASE_URL = '';
 
 const getSessionUserId = (session) =>
@@ -319,6 +346,9 @@ function VerifiedSessionRoute({ children, allowedRoles, roleComponents }) {
           rawUser: user,
         };
         saveSession(verifiedSession);
+        if (typeof window !== "undefined" && typeof window.__PICKPACKPRO_PREFETCH_ROLE_API__ === "function") {
+          window.__PICKPACKPRO_PREFETCH_ROLE_API__(verifiedRole);
+        }
         setState({ session: verifiedSession, invalid: false, verifying: false });
       } catch (error) {
         if (!isMounted) return;
@@ -398,10 +428,30 @@ function DefaultRedirect() {
 }
 
 function App() {
+  useEffect(() => {
+    const role = String(getSession()?.role || "").toLowerCase();
+    const prefetchers = ROLE_CHUNK_PREFETCHERS[role] || [];
+    if (!prefetchers.length) return undefined;
+
+    const prefetchChunks = () => {
+      prefetchers.forEach((prefetch) => {
+        prefetch().catch(() => {});
+      });
+    };
+
+    if (typeof window.requestIdleCallback === "function") {
+      const idleId = window.requestIdleCallback(prefetchChunks, { timeout: 3000 });
+      return () => window.cancelIdleCallback(idleId);
+    }
+
+    const timer = window.setTimeout(prefetchChunks, 1500);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   return (
     <BrowserRouter>
       <ToastHost />
-      <Suspense fallback={<FullPageLoader show delay={300} label="Loading page..." />}>
+      <Suspense fallback={<FullPageLoader show delay={800} label="Loading page..." />}>
         <Routes>
           <Route
             path="/"

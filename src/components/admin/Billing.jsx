@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
@@ -470,8 +470,15 @@ const getInvoiceSourceReference = (invoice = {}) => {
   return '';
 };
 
-const getInvoiceSourceDisplay = (invoice = {}) => {
-  return firstPresent(getInvoiceSourceReference(invoice), getInvoiceSourceId(invoice), '-');
+const getInvoiceSourceFallbackDisplay = (invoice = {}) => {
+  const directReference = getInvoiceSourceReference(invoice);
+  if (directReference) return directReference;
+
+  const invoiceType = getInvoiceTypeValue(invoice);
+  if (invoiceType === 'shipment' && getInvoiceShipmentId(invoice)) return 'Shipment';
+  if ((invoiceType === 'sub_shipment' || invoiceType === 'sub-shipment') && getInvoiceSubShipmentId(invoice)) return 'Sub-shipment';
+  if (invoiceType === 'monthly' || invoiceType === 'ad_hoc' || invoiceType === 'ad-hoc') return 'Manual / Monthly';
+  return getInvoiceSourceId(invoice) ? formatStatusLabel(invoiceType) : 'Manual / Monthly';
 };
 
 const normalizeInvoice = (invoice) => {
@@ -487,7 +494,7 @@ const normalizeInvoice = (invoice) => {
     subShipmentId: getInvoiceSubShipmentId(invoice),
     sourceId: getInvoiceSourceId(invoice),
     sourceReference: getInvoiceSourceReference(invoice),
-    source: getInvoiceSourceDisplay(invoice),
+    source: getInvoiceSourceFallbackDisplay(invoice),
     clientId: getInvoiceClientId(invoice),
     client: getInlineInvoiceClientDisplay(invoice) || '-',
     date: firstPresent(invoice?.invoiceDate, invoice?.invoice_date, invoice?.date, invoice?.createdAt, invoice?.created_at),
@@ -1031,48 +1038,6 @@ const fetchSubShipmentReference = async (subShipmentId = '', shipmentId = '', ca
   return getSubShipmentReferenceValue(matchedSubShipment);
 };
 
-const fetchInvoiceDetailSourceReference = async (invoice = {}, cache) => {
-  const invoiceId = getInvoiceRouteId(invoice);
-  if (!invoiceId) return '';
-
-  const payload = await fetchSourcePayload(`${API_BASE_URL}/api/invoices/${encodeURIComponent(invoiceId)}`, cache);
-  const detailPayload = getInvoiceDetailPayload(payload);
-  return getInvoiceSourceReference({
-    ...(invoice.raw || {}),
-    ...invoice,
-    ...(detailPayload || {}),
-  });
-};
-
-const enrichInvoiceSourceReference = async (invoice = {}, cache = new Map()) => {
-  if (!invoice?.sourceId) return invoice;
-  if (invoice.sourceReference && invoice.source === invoice.sourceReference) return invoice;
-
-  const invoiceType = getInvoiceTypeValue(invoice);
-  let sourceReference =
-    invoiceType === 'shipment'
-      ? await fetchShipmentReference(invoice.shipmentId || invoice.sourceId, cache)
-      : invoiceType === 'sub_shipment' || invoiceType === 'sub-shipment'
-        ? await fetchSubShipmentReference(invoice.subShipmentId || invoice.sourceId, invoice.shipmentId, cache)
-        : '';
-
-  if (!sourceReference) {
-    sourceReference = await fetchInvoiceDetailSourceReference(invoice, cache);
-  }
-
-  if (!sourceReference) return invoice;
-  return {
-    ...invoice,
-    sourceReference,
-    source: sourceReference,
-  };
-};
-
-const enrichInvoicesWithSourceReferences = async (invoiceRows = []) => {
-  const cache = new Map();
-  return Promise.all(invoiceRows.map((invoice) => enrichInvoiceSourceReference(invoice, cache)));
-};
-
 const Billing = () => {
   const location = useLocation();
   const [invoicePage, setInvoicePage] = useState(1);
@@ -1086,11 +1051,17 @@ const Billing = () => {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isInvoiceDetailLoading, setIsInvoiceDetailLoading] = useState(false);
   const [invoiceActionKey, setInvoiceActionKey] = useState('');
   const [lineActionKey, setLineActionKey] = useState('');
   const [openedInvoiceQuery, setOpenedInvoiceQuery] = useState('');
   const [invoiceSearchTerm, setInvoiceSearchTerm] = useState('');
+  const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('all');
   const [sendInvoiceTarget, setSendInvoiceTarget] = useState(null);
+  const [deleteInvoiceTarget, setDeleteInvoiceTarget] = useState(null);
+  const [deletedInvoiceKeys, setDeletedInvoiceKeys] = useState([]);
+  const [sourceReferenceLookup, setSourceReferenceLookup] = useState({ shipments: {}, subShipments: {} });
+  const pendingSourceReferenceRequests = useRef(new Set());
 
   const clientLookup = useMemo(() => {
     const lookup = new Map();
@@ -1124,7 +1095,28 @@ const Billing = () => {
     return inlineDisplay || 'Unnamed Client';
   };
 
-  const loadInvoices = async () => {
+  const resolveInvoiceSourceReference = (invoice = {}) => {
+    const directReference = cleanDisplayValue(invoice.sourceReference) || cleanDisplayValue(getInvoiceSourceReference(invoice.raw || invoice));
+    if (directReference) return directReference;
+
+    const invoiceType = getInvoiceTypeValue(invoice);
+    if (invoiceType === 'shipment') {
+      const shipmentId = String(invoice.shipmentId || invoice.sourceId || '').trim();
+      return shipmentId ? sourceReferenceLookup.shipments[shipmentId] || '' : '';
+    }
+
+    if (invoiceType === 'sub_shipment' || invoiceType === 'sub-shipment') {
+      const subShipmentId = String(invoice.subShipmentId || invoice.sourceId || '').trim();
+      return subShipmentId ? sourceReferenceLookup.subShipments[subShipmentId] || '' : '';
+    }
+
+    return '';
+  };
+
+  const resolveInvoiceSourceDisplay = (invoice = {}) =>
+    resolveInvoiceSourceReference(invoice) || getInvoiceSourceFallbackDisplay(invoice.raw || invoice);
+
+  const loadInvoices = async (extraDeletedKeys = []) => {
     try {
       setIsLoading(true);
       setError('');
@@ -1133,8 +1125,11 @@ const Billing = () => {
         headers: buildHeaders(),
       });
       const payload = await parseResponse(response);
-      const normalizedInvoices = extractInvoices(payload).map(normalizeInvoice);
-      setInvoices(await enrichInvoicesWithSourceReferences(normalizedInvoices));
+      const deletedKeySet = new Set([...deletedInvoiceKeys, ...extraDeletedKeys]);
+      const normalizedInvoices = extractInvoices(payload)
+        .map(normalizeInvoice)
+        .filter((invoice) => !getInvoiceLookupCandidates(invoice).some((key) => deletedKeySet.has(key)));
+      setInvoices(normalizedInvoices);
     } catch (requestError) {
       setError(requestError.message);
       setInvoices([]);
@@ -1178,18 +1173,39 @@ const Billing = () => {
 
   const displayInvoices = useMemo(
     () =>
-      invoices.map((invoice) => ({
-        ...invoice,
-        client: resolveInvoiceClientDisplay(invoice),
-      })),
-    [invoices, clientLookup]
+      invoices.map((invoice) => {
+        const sourceReference = resolveInvoiceSourceReference(invoice);
+        return {
+          ...invoice,
+          client: resolveInvoiceClientDisplay(invoice),
+          sourceReference,
+          source: sourceReference || resolveInvoiceSourceDisplay(invoice),
+        };
+      }),
+    [invoices, clientLookup, sourceReferenceLookup]
   );
+  const invoiceStatusOptions = useMemo(() => {
+    const hiddenStatusFilters = new Set(['cancelled', 'canceled', 'void', 'voided']);
+    const baseStatuses = ['draft', 'sent', 'paid', 'overdue'];
+    const statuses = new Set(baseStatuses);
+
+    displayInvoices.forEach((invoice) => {
+      const status = getInvoiceStatusValue(invoice);
+      if (status && !hiddenStatusFilters.has(status)) statuses.add(status);
+    });
+
+    return [...statuses];
+  }, [displayInvoices]);
   const filteredInvoices = useMemo(() => {
     const term = String(invoiceSearchTerm || '').trim().toLowerCase();
-    if (!term) return displayInvoices;
+    const statusFilter = String(invoiceStatusFilter || 'all').trim().toLowerCase();
 
-    return displayInvoices.filter((invoice) =>
-      [
+    return displayInvoices.filter((invoice) => {
+      const matchesStatus = statusFilter === 'all' || getInvoiceStatusValue(invoice) === statusFilter;
+      if (!matchesStatus) return false;
+      if (!term) return true;
+
+      return [
         invoice.ref,
         invoice.client,
         invoice.invoiceTypeLabel,
@@ -1201,9 +1217,9 @@ const Billing = () => {
         invoice.subShipmentId,
       ]
         .map((value) => String(value || '').toLowerCase())
-        .some((value) => value.includes(term))
-    );
-  }, [displayInvoices, invoiceSearchTerm]);
+        .some((value) => value.includes(term));
+    });
+  }, [displayInvoices, invoiceSearchTerm, invoiceStatusFilter]);
   const invoiceTotalPages = Math.max(1, Math.ceil(filteredInvoices.length / BILLING_PAGE_SIZE));
   const invoicePaginationPages = useMemo(
     () => getPaginationPages(invoicePage, invoiceTotalPages),
@@ -1217,18 +1233,82 @@ const Billing = () => {
   const invoicePaginationEnd = Math.min(invoicePage * BILLING_PAGE_SIZE, filteredInvoices.length);
 
   useEffect(() => {
+    let isCancelled = false;
+    const sourceRequestCache = new Map();
+    const nextShipments = {};
+    const nextSubShipments = {};
+    const requests = [];
+    const hasOwn = (source, key) => Object.prototype.hasOwnProperty.call(source || {}, key);
+
+    paginatedInvoices.forEach((invoice) => {
+      if (resolveInvoiceSourceReference(invoice)) return;
+
+      const invoiceType = getInvoiceTypeValue(invoice);
+      if (invoiceType === 'shipment') {
+        const shipmentId = String(invoice.shipmentId || invoice.sourceId || '').trim();
+        const pendingKey = `shipment:${shipmentId}`;
+        if (!shipmentId || hasOwn(sourceReferenceLookup.shipments, shipmentId) || pendingSourceReferenceRequests.current.has(pendingKey)) return;
+
+        pendingSourceReferenceRequests.current.add(pendingKey);
+        requests.push(
+          fetchShipmentReference(shipmentId, sourceRequestCache)
+            .then((reference) => {
+              nextShipments[shipmentId] = cleanDisplayValue(reference);
+            })
+            .finally(() => {
+              pendingSourceReferenceRequests.current.delete(pendingKey);
+            })
+        );
+        return;
+      }
+
+      if (invoiceType === 'sub_shipment' || invoiceType === 'sub-shipment') {
+        const subShipmentId = String(invoice.subShipmentId || invoice.sourceId || '').trim();
+        const pendingKey = `subShipment:${subShipmentId}`;
+        if (!subShipmentId || hasOwn(sourceReferenceLookup.subShipments, subShipmentId) || pendingSourceReferenceRequests.current.has(pendingKey)) return;
+
+        pendingSourceReferenceRequests.current.add(pendingKey);
+        requests.push(
+          fetchSubShipmentReference(subShipmentId, invoice.shipmentId, sourceRequestCache)
+            .then((reference) => {
+              nextSubShipments[subShipmentId] = cleanDisplayValue(reference);
+            })
+            .finally(() => {
+              pendingSourceReferenceRequests.current.delete(pendingKey);
+            })
+        );
+      }
+    });
+
+    if (!requests.length) return undefined;
+
+    Promise.allSettled(requests).then(() => {
+      if (isCancelled || (!Object.keys(nextShipments).length && !Object.keys(nextSubShipments).length)) return;
+      setSourceReferenceLookup((current) => ({
+        shipments: { ...current.shipments, ...nextShipments },
+        subShipments: { ...current.subShipments, ...nextSubShipments },
+      }));
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [paginatedInvoices, sourceReferenceLookup]);
+
+  useEffect(() => {
     setInvoicePage((page) => Math.min(Math.max(page, 1), invoiceTotalPages));
   }, [invoiceTotalPages]);
 
   useEffect(() => {
     setInvoicePage(1);
-  }, [invoiceSearchTerm]);
+  }, [invoiceSearchTerm, invoiceStatusFilter]);
 
 
   const selectedInvoiceView = selectedInvoice
     ? {
         ...selectedInvoice,
         client: resolveInvoiceClientDisplay(selectedInvoice),
+        lineItems: Array.isArray(selectedInvoice.lineItems) ? selectedInvoice.lineItems : [],
       }
     : null;
 
@@ -1289,9 +1369,12 @@ const Billing = () => {
       setError('');
       setMessage('');
       setSelectedInvoice(typeof invoice === 'object' ? invoice : { id: invoice, ref: invoice });
+      setIsInvoiceDetailLoading(true);
       setSelectedInvoice(await fetchInvoiceDetail(invoice));
     } catch (requestError) {
       setError(requestError.message);
+    } finally {
+      setIsInvoiceDetailLoading(false);
     }
   };
 
@@ -1366,6 +1449,56 @@ const Billing = () => {
       const matchesSelected = getInvoiceLookupCandidates(currentSelected).some((key) => getInvoiceLookupCandidates(updatedInvoice).includes(key));
       return matchesSelected ? { ...currentSelected, ...updatedInvoice } : currentSelected;
     });
+  };
+
+  const removeInvoiceFromState = (invoice = {}) => {
+    const removedKeys = getInvoiceLookupCandidates(invoice);
+
+    setInvoices((currentInvoices) =>
+      currentInvoices.filter(
+        (currentInvoice) => !getInvoiceLookupCandidates(currentInvoice).some((key) => removedKeys.includes(key))
+      )
+    );
+
+    setSelectedInvoice((currentSelected) => {
+      if (!currentSelected) return currentSelected;
+      const matchesSelected = getInvoiceLookupCandidates(currentSelected).some((key) => removedKeys.includes(key));
+      return matchesSelected ? null : currentSelected;
+    });
+  };
+
+  const handleDeleteInvoice = async (invoice) => {
+    const invoiceId = getInvoiceRouteId(invoice);
+
+    try {
+      setError('');
+      setMessage('');
+      if (!invoiceId) throw new Error('Invoice identifier is missing.');
+      setInvoiceActionKey(`${invoiceId}:delete`);
+
+      const response = await fetch(`${API_BASE_URL}/api/invoices/${encodeURIComponent(invoiceId)}`, {
+        method: 'DELETE',
+        headers: buildHeaders(),
+      });
+      const payload = await parseResponse(response);
+      const deletedInvoice = normalizeInvoice({
+        ...(invoice?.raw || {}),
+        ...invoice,
+        ...(payload?.data?.invoice || payload?.invoice || {}),
+      });
+
+      const removedKeys = getInvoiceLookupCandidates(deletedInvoice);
+      setDeletedInvoiceKeys((currentKeys) => [...new Set([...currentKeys, ...removedKeys])]);
+      removeInvoiceFromState(deletedInvoice);
+      setDeleteInvoiceTarget(null);
+      resetManualLineForm();
+      setMessage(`Invoice ${deletedInvoice.ref || invoice?.ref || invoiceId} deleted.`);
+      await loadInvoices(removedKeys);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setInvoiceActionKey('');
+    }
   };
 
   const handleSendInvoice = async (invoice) => {
@@ -1608,6 +1741,19 @@ const Billing = () => {
               <p className="mt-1 text-xs text-gray-500">Shipment and sub-shipment invoices are created from dispatch events.</p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <select
+                value={invoiceStatusFilter}
+                onChange={(event) => setInvoiceStatusFilter(event.target.value)}
+                aria-label="Filter invoices by status"
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 outline-none transition-colors focus:border-[#ff6900] sm:w-40"
+              >
+                <option value="all">All statuses</option>
+                {invoiceStatusOptions.map((status) => (
+                  <option key={status} value={status}>
+                    {formatStatusLabel(status)}
+                  </option>
+                ))}
+              </select>
               <label className="relative block">
                 <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
@@ -1689,6 +1835,16 @@ const Billing = () => {
                           {canMarkPaid ? (
                             <button type="button" onClick={() => handleUpdateInvoiceStatus(invoice, 'paid')} disabled={isActionPending} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-green-600 disabled:cursor-not-allowed disabled:opacity-50" title="Mark paid" aria-label={`Mark ${invoice.ref} paid`}><CheckCircle size={16} /></button>
                           ) : null}
+                          <button
+                            type="button"
+                            onClick={() => setDeleteInvoiceTarget(invoice)}
+                            disabled={isActionPending}
+                            className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
+                            title="Delete invoice"
+                            aria-label={`Delete ${invoice.ref}`}
+                          >
+                            <Trash2 size={16} />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -1704,7 +1860,7 @@ const Billing = () => {
                 {!isLoading && !paginatedInvoices.length ? (
                   <tr>
                     <td colSpan="11" className="px-6 py-10 text-center text-sm text-gray-500">
-                      {invoiceSearchTerm.trim() ? 'No invoices match your search.' : 'No invoices found.'}
+                      {invoiceSearchTerm.trim() || invoiceStatusFilter !== 'all' ? 'No invoices match your filters.' : 'No invoices found.'}
                     </td>
                   </tr>
                 ) : null}
@@ -1717,6 +1873,7 @@ const Billing = () => {
                 Showing <span className="font-medium text-gray-900">{invoicePaginationStart}-{invoicePaginationEnd}</span> of{' '}
                 <span className="font-medium text-gray-900">{filteredInvoices.length}</span> invoices
                 {invoiceSearchTerm.trim() ? <span> matching "{invoiceSearchTerm.trim()}"</span> : null}
+                {invoiceStatusFilter !== 'all' ? <span> with status {formatStatusLabel(invoiceStatusFilter)}</span> : null}
               </p>
               <div className="flex items-center gap-2 text-sm">
                 <button type="button" onClick={() => setInvoicePage((page) => Math.max(1, page - 1))} disabled={invoicePage === 1} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50">Previous</button>
@@ -1787,6 +1944,74 @@ const Billing = () => {
           </div>
         ) : null}
 
+        {deleteInvoiceTarget ? (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 px-4 py-8">
+            <div className="w-full max-w-md rounded-xl bg-white shadow-2xl">
+              {(() => {
+                const invoiceId = getInvoiceRouteId(deleteInvoiceTarget);
+                const invoiceRef = deleteInvoiceTarget.ref || deleteInvoiceTarget.invoiceNumber || deleteInvoiceTarget.invoice_number || invoiceId;
+                const isDeletingInvoice = invoiceActionKey === `${invoiceId}:delete`;
+
+                return (
+                  <>
+                    <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-5 py-4">
+                      <div>
+                        <h3 className="text-base font-semibold text-gray-900">Delete Invoice</h3>
+                        <p className="mt-1 text-sm text-gray-500">
+                          Are you sure you want to delete invoice <span className="font-semibold text-gray-900">{invoiceRef}</span>? This will remove the invoice and its files.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteInvoiceTarget(null)}
+                        disabled={isDeletingInvoice}
+                        className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        aria-label="Close delete invoice confirmation"
+                      >
+                        <X size={18} />
+                      </button>
+                    </div>
+                    <div className="space-y-3 px-5 py-4 text-sm">
+                      <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-red-700">
+                        This action cannot be undone.
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Status</p>
+                          <p className="mt-1 font-semibold text-gray-900">{formatStatusLabel(deleteInvoiceTarget.status)}</p>
+                        </div>
+                        <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Total</p>
+                          <p className="mt-1 font-semibold text-gray-900">{formatCurrency(deleteInvoiceTarget.total)}</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-4">
+                      <button
+                        type="button"
+                        onClick={() => setDeleteInvoiceTarget(null)}
+                        disabled={isDeletingInvoice}
+                        className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteInvoice(deleteInvoiceTarget)}
+                        disabled={isDeletingInvoice}
+                        className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Trash2 size={16} />
+                        {isDeletingInvoice ? 'Deleting...' : 'Delete Invoice'}
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        ) : null}
+
         {selectedInvoiceView ? (
           <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-8">
             <div className="w-full max-w-6xl overflow-hidden rounded-xl bg-white shadow-2xl">
@@ -1806,6 +2031,14 @@ const Billing = () => {
                       <Send size={16} /> Send Invoice
                     </button>
                   ) : null}
+                  <button
+                    type="button"
+                    onClick={() => setDeleteInvoiceTarget(selectedInvoiceView)}
+                    disabled={invoiceActionKey.startsWith(`${getInvoiceRouteId(selectedInvoiceView)}:`)}
+                    className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Trash2 size={16} /> Delete Invoice
+                  </button>
                   <button
                     type="button"
                     onClick={() => {
@@ -1935,7 +2168,13 @@ const Billing = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {selectedInvoiceView.lineItems.length ? (
+                      {isInvoiceDetailLoading ? (
+                        <tr>
+                          <td colSpan="8" className="px-4 py-8 text-center text-sm text-gray-500">
+                            <LoadingState label="Loading line items..." />
+                          </td>
+                        </tr>
+                      ) : selectedInvoiceView.lineItems.length ? (
                         selectedInvoiceView.lineItems.map((item, index) => {
                           const lineSource = getInvoiceLineSource(item);
                           const isManual = isManualInvoiceLine(item);

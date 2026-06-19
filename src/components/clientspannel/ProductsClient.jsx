@@ -11,17 +11,23 @@ import {
   Edit3,
   Plus,
   RefreshCw,
+  Upload,
   X,
 } from 'lucide-react';
 import { getSession } from '../../utils/auth';
 import {
   getProductActiveStatus,
+  getProductDefaultFnskuLabelFile,
+  getProductDefaultFnskuLabelFileId,
+  getProductDefaultFnskuLabelFileName,
+  getProductDefaultFnskuLabelFileUrl,
   getProductDimensionParts,
   getProductDimensionsText,
   getProductFlags,
   getProductWeightText,
   getProductWeightValue,
 } from '../../utils/productFields';
+import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
 
 const API_BASE_URL = '';
 
@@ -39,6 +45,9 @@ const initialProductForm = {
   needsBundling: false,
   bundleSize: '1',
   active: true,
+  defaultFnskuLabelFile: null,
+  defaultFnskuLabelFileName: '',
+  defaultFnskuLabelUploadFile: null,
 };
 
 const buildHeaders = (includeJson = false) => {
@@ -175,12 +184,44 @@ const normalizeProduct = (product) => {
     needsBundling: Boolean(product?.needsBundling ?? product?.needs_bundling),
     bundleSize: product?.bundleSize ?? product?.bundle_size ?? '',
     defaultFnsku: product?.defaultFnsku || product?.defaultFNSKU || product?.default_fnsku || '',
+    defaultFnskuLabelFileId: getProductDefaultFnskuLabelFileId(product),
+    defaultFnskuLabelFile: getProductDefaultFnskuLabelFile(product),
+    defaultFnskuLabelFileName: getProductDefaultFnskuLabelFileName(product),
+    defaultFnskuLabelFileUrl: getProductDefaultFnskuLabelFileUrl(product),
     lengthCm: dimensions.length,
     widthCm: dimensions.width,
     heightCm: dimensions.height,
     dimensionsText: getProductDimensionsText(product),
     active: getProductActiveStatus(product),
   };
+};
+
+const getProductRecordIdFromPayload = (payload = {}, fallbackId = '') =>
+  String(
+    extractProductDetail(payload)?.id ||
+      extractProductDetail(payload)?.uuid ||
+      payload?.id ||
+      payload?.uuid ||
+      fallbackId ||
+      ''
+  ).trim();
+
+const uploadProductDefaultFnskuLabel = async ({ productId, file, buildHeaders, parseResponse }) => {
+  if (!productId || !file) return null;
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('entityType', 'product');
+  formData.append('entityId', productId);
+  formData.append('fileType', 'fnsku_label');
+
+  const response = await fetch(`${API_BASE_URL}/api/files`, {
+    method: 'POST',
+    headers: buildHeaders(),
+    body: formData,
+  });
+
+  return parseResponse(response);
 };
 
 const ProductsClient = () => {
@@ -204,6 +245,7 @@ const ProductsClient = () => {
         method: 'GET',
         headers: buildHeaders(),
         cache: 'no-store',
+        skipApiGetCache: true,
       });
       const payload = await parseResponse(response);
       setProducts(extractProducts(payload).map(normalizeProduct));
@@ -217,6 +259,27 @@ const ProductsClient = () => {
 
   useEffect(() => {
     loadProducts();
+  }, []);
+
+  useEffect(() => {
+    let refreshTimer = null;
+
+    const scheduleProductRefresh = (event) => {
+      const url = String(event?.detail?.url || '');
+      if (!url.includes('/api/products') && !url.includes('/api/shipments') && !url.includes('/api/files')) return;
+
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        loadProducts();
+      }, 500);
+    };
+
+    window.addEventListener(API_MUTATION_EVENT_NAME, scheduleProductRefresh);
+
+    return () => {
+      window.clearTimeout(refreshTimer);
+      window.removeEventListener(API_MUTATION_EVENT_NAME, scheduleProductRefresh);
+    };
   }, []);
 
   const filteredProducts = useMemo(
@@ -263,6 +326,7 @@ const ProductsClient = () => {
           method: 'GET',
           headers: buildHeaders(),
           cache: 'no-store',
+          skipApiGetCache: true,
         });
         const payload = await parseResponse(response);
         productForEdit = normalizeProduct({
@@ -280,6 +344,9 @@ const ProductsClient = () => {
       productName: productForEdit.productName,
       sku: productForEdit.sku,
       defaultFnsku: productForEdit.defaultFnsku,
+      defaultFnskuLabelFile: productForEdit.defaultFnskuLabelFile || null,
+      defaultFnskuLabelFileName: productForEdit.defaultFnskuLabelFileName || '',
+      defaultFnskuLabelUploadFile: null,
       lengthCm: toFormNumberValue(productForEdit.lengthCm),
       widthCm: toFormNumberValue(productForEdit.widthCm),
       heightCm: toFormNumberValue(productForEdit.heightCm),
@@ -292,6 +359,17 @@ const ProductsClient = () => {
       active: productForEdit.active,
     });
     setShowFormModal(true);
+  };
+
+  const handleDefaultFnskuLabelFileChange = (file) => {
+    if (!file) return;
+
+    setProductFormError('');
+    setProductForm((currentForm) => ({
+      ...currentForm,
+      defaultFnskuLabelUploadFile: file,
+      defaultFnskuLabelFileName: file.name,
+    }));
   };
 
   const handleSaveProduct = async () => {
@@ -332,7 +410,22 @@ const ProductsClient = () => {
           body: JSON.stringify(toPayload(productForm, { includeSku: !editingProductId })),
         }
       );
-      await parseResponse(response);
+      const savedProductPayload = await parseResponse(response);
+      const savedProductId = getProductRecordIdFromPayload(savedProductPayload, editingProductId);
+
+      if (productForm.defaultFnskuLabelUploadFile) {
+        if (!savedProductId) {
+          throw new Error('Product saved, but default FNSKU label could not be uploaded because product id was not returned.');
+        }
+
+        await uploadProductDefaultFnskuLabel({
+          productId: savedProductId,
+          file: productForm.defaultFnskuLabelUploadFile,
+          buildHeaders,
+          parseResponse,
+        });
+      }
+
       setShowFormModal(false);
       setProductForm(initialProductForm);
       setEditingProductId('');
@@ -601,6 +694,25 @@ const ProductsClient = () => {
                 <p className="text-xs text-gray-500 mb-1">Default FNSKU</p>
                 <p className="font-medium text-gray-900">{selectedProduct.defaultFnsku || '-'}</p>
               </div>
+              <div className="col-span-2">
+                <p className="text-xs text-gray-500 mb-1">Default FNSKU Label File</p>
+                {selectedProduct.defaultFnskuLabelFileName ? (
+                  selectedProduct.defaultFnskuLabelFileUrl ? (
+                    <a
+                      href={selectedProduct.defaultFnskuLabelFileUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-medium text-[#ff6900] hover:text-[#e55d00]"
+                    >
+                      {selectedProduct.defaultFnskuLabelFileName}
+                    </a>
+                  ) : (
+                    <p className="font-medium text-gray-900">{selectedProduct.defaultFnskuLabelFileName}</p>
+                  )
+                ) : (
+                  <p className="font-medium text-gray-900">No default label uploaded</p>
+                )}
+              </div>
               <div>
                 <p className="text-xs text-gray-500 mb-1">Weight</p>
                 <p className="font-medium text-gray-900">{selectedProduct.weightText || 'Not added'}</p>
@@ -706,6 +818,28 @@ const ProductsClient = () => {
                     className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
                     placeholder="Default FNSKU"
                   />
+                </label>
+                <label className="block md:col-span-2">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">Default FNSKU Label File</span>
+                  <input
+                    type="file"
+                    accept=".pdf,.csv,application/pdf,text/csv,application/vnd.ms-excel,image/*"
+                    onChange={(event) => {
+                      handleDefaultFnskuLabelFileChange(event.target.files?.[0] || null);
+                      event.target.value = '';
+                    }}
+                    className="w-full rounded-lg border border-dashed border-gray-300 px-3 py-2.5 text-sm text-gray-600 file:mr-3 file:rounded-md file:border-0 file:bg-[#fff7ed] file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-[#ff6900] hover:border-[#ffb37a]"
+                  />
+                  <p className="mt-2 flex items-center gap-1.5 text-xs text-gray-500">
+                    <Upload size={13} />
+                    <span>
+                      {productForm.defaultFnskuLabelUploadFile
+                        ? `Selected: ${productForm.defaultFnskuLabelUploadFile.name}. It will upload after the product is saved.`
+                        : productForm.defaultFnskuLabelFileName
+                          ? `Current default label: ${productForm.defaultFnskuLabelFileName}`
+                          : 'Upload a PDF, CSV, PNG, JPG, or other FNSKU label file. New products upload this after the product is created.'}
+                    </span>
+                  </p>
                 </label>
 
                 <label className="block">

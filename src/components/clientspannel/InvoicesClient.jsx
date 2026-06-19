@@ -1227,7 +1227,13 @@ const InvoicesClient = () => {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#edf2f7]">
-                        {selectedInvoice.lineItems?.length ? (
+                        {isInvoiceDetailLoading ? (
+                          <tr>
+                            <td colSpan="4" className="px-4 py-6 text-center text-sm text-[#64748b]">
+                              <LoadingState label="Loading line items..." />
+                            </td>
+                          </tr>
+                        ) : selectedInvoice.lineItems?.length ? (
                           selectedInvoice.lineItems.map((item, index) => (
                             <tr key={item?.id || item?.uuid || index}>
                               <td className="px-4 py-3 font-medium text-[#132347]">
