@@ -3004,6 +3004,21 @@ const getAvailabilityExpectedQty = (item = {}) =>
 const getAvailabilityReceivedQty = (item = {}) =>
   firstPresent(item?.receivedQty, item?.received_qty, item?.qtyReceived, item?.qty_received, 0);
 
+const getAvailabilityDifferenceQty = (item = {}) => {
+  const expectedNumber = Number(getAvailabilityExpectedQty(item) ?? 0);
+  const receivedNumber = Number(getAvailabilityReceivedQty(item) ?? 0);
+  const expectedQty = Number.isFinite(expectedNumber) ? expectedNumber : 0;
+  const receivedQty = Number.isFinite(receivedNumber) ? receivedNumber : 0;
+
+  return receivedQty - expectedQty;
+};
+
+const formatAvailabilityDifferenceQty = (value) => {
+  const quantity = Number(value);
+  if (!Number.isFinite(quantity) || quantity === 0) return "0";
+  return quantity > 0 ? `+${formatQuantityValue(quantity)}` : formatQuantityValue(quantity);
+};
+
 const getAvailabilityAssignedQty = (item = {}) =>
   firstPresent(item?.assignedQty, item?.assigned_qty, item?.assigned, 0);
 
@@ -6596,12 +6611,13 @@ const ShipmentsStaff = () => {
                       Availability
                     </div>
                     <div className="overflow-x-auto">
-                      <table className="w-full min-w-[720px] text-sm">
+                      <table className="w-full min-w-[820px] text-sm">
                         <thead className="bg-white">
                           <tr className="border-b border-[#edf2f7] text-left text-[11px] font-semibold uppercase tracking-wide text-[#7f8ea6]">
                             <th className="px-4 py-3">Product / SKU</th>
                             <th className="px-4 py-3">Expected</th>
                             <th className="px-4 py-3">Received</th>
+                            <th className="px-4 py-3">Difference</th>
                             <th className="px-4 py-3">Assigned</th>
                             <th className="px-4 py-3">Remaining</th>
                             <th className="px-4 py-3">Prepared</th>
@@ -6611,6 +6627,13 @@ const ShipmentsStaff = () => {
                           {subShipmentAvailabilityRows.map((availabilityItem, index) => {
                             const prepared = getSubShipmentAvailabilityPrepared(availabilityItem);
                             const remainingQty = getAvailabilityRemainingQty(availabilityItem);
+                            const differenceQty = getAvailabilityDifferenceQty(availabilityItem);
+                            const differenceClassName =
+                              differenceQty > 0
+                                ? "text-emerald-700"
+                                : differenceQty < 0
+                                  ? "text-red-600"
+                                  : "text-[#132347]";
 
                             return (
                               <tr key={getAvailabilityItemId(availabilityItem) || getAvailabilitySku(availabilityItem) || index}>
@@ -6620,6 +6643,9 @@ const ShipmentsStaff = () => {
                                 </td>
                                 <td className="px-4 py-3 text-[#132347]">{formatQuantityValue(getAvailabilityExpectedQty(availabilityItem))}</td>
                                 <td className="px-4 py-3 text-[#132347]">{formatQuantityValue(getAvailabilityReceivedQty(availabilityItem))}</td>
+                                <td className={`px-4 py-3 font-semibold ${differenceClassName}`}>
+                                  {formatAvailabilityDifferenceQty(differenceQty)}
+                                </td>
                                 <td className="px-4 py-3 text-[#132347]">{formatQuantityValue(getAvailabilityAssignedQty(availabilityItem))}</td>
                                 <td className="px-4 py-3 text-[#132347]">{formatQuantityValue(remainingQty)}</td>
                                 <td className="px-4 py-3">
