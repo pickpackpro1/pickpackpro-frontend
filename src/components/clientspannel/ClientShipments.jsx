@@ -169,18 +169,11 @@ const isOtherServiceValue = isOtherServiceCode;
 const formatServiceLabel = getServiceDisplayName;
 const normalizeServiceKey = getServiceKey;
 const STANDARD_SERVICE_KEYS = STANDARD_CATALOG_SERVICE_KEYS;
-const AUTO_DEFAULT_SERVICE_KEYS = new Set(['fnsku_label', 'polybag', 'bubble_wrap', 'bundling']);
 
-const stripAutoDefaultServiceBundle = (services = []) => {
-  const serviceList = (Array.isArray(services) ? services : [])
+const normalizeServiceDisplayList = (services = []) => {
+  return (Array.isArray(services) ? services : [])
     .map((service) => String(service || '').trim())
     .filter(Boolean);
-  const serviceKeys = new Set(serviceList.map((service) => normalizeServiceKey(service)).filter(Boolean));
-  const hasAutoDefaultBundle = [...AUTO_DEFAULT_SERVICE_KEYS].every((serviceKey) => serviceKeys.has(serviceKey));
-
-  if (!hasAutoDefaultBundle) return serviceList;
-
-  return serviceList.filter((service) => !AUTO_DEFAULT_SERVICE_KEYS.has(normalizeServiceKey(service)));
 };
 
 const getClientIdFromSession = () => {
@@ -1046,7 +1039,7 @@ const getItemServices = (item = {}) => {
     ...toLabelList(item?.services_selected),
   ];
 
-  return stripAutoDefaultServiceBundle([
+  return normalizeServiceDisplayList([
     ...new Set(services.map((service) => String(service).trim()).filter(isDisplayServiceLabel)),
   ]);
 };
@@ -1336,12 +1329,22 @@ const getLineItemExplicitOrder = (item = {}) => {
 const PRODUCT_SEQUENCE_PREFIXES = ['product', 'prod', 'pp', 'p'];
 const SKU_SEQUENCE_PREFIXES = ['sku', 'product', 'prod', 'pp', 'p'];
 const FNSKU_SEQUENCE_PREFIXES = ['fnsku', 'f', 'sku', 'product', 'prod', 'pp', 'p'];
+const PRODUCT_SEQUENCE_REGEX = new RegExp(`^(?:${PRODUCT_SEQUENCE_PREFIXES.join('|')})[\\s_-]*0*(\\d+)$`, 'i');
+const SKU_SEQUENCE_REGEX = new RegExp(`^(?:${SKU_SEQUENCE_PREFIXES.join('|')})[\\s_-]*0*(\\d+)$`, 'i');
+const FNSKU_SEQUENCE_REGEX = new RegExp(`^(?:${FNSKU_SEQUENCE_PREFIXES.join('|')})[\\s_-]*0*(\\d+)$`, 'i');
+const SEQUENCE_REGEX_BY_PREFIXES = new Map([
+  [PRODUCT_SEQUENCE_PREFIXES, PRODUCT_SEQUENCE_REGEX],
+  [SKU_SEQUENCE_PREFIXES, SKU_SEQUENCE_REGEX],
+  [FNSKU_SEQUENCE_PREFIXES, FNSKU_SEQUENCE_REGEX],
+]);
+
+const getSequenceRegexForPrefixes = (prefixes = []) =>
+  SEQUENCE_REGEX_BY_PREFIXES.get(prefixes) || new RegExp(`^(?:${prefixes.join('|')})[\\s_-]*0*(\\d+)$`, 'i');
 
 const parsePrefixedSequence = (value = '', prefixes = []) => {
   const text = String(value || '').trim();
   if (!text) return null;
-  const prefixPattern = prefixes.join('|');
-  const match = text.match(new RegExp(`^(?:${prefixPattern})[\\s_-]*0*(\\d+)$`, 'i'));
+  const match = text.match(getSequenceRegexForPrefixes(prefixes));
   if (!match) return null;
   const order = Number(match[1]);
   return Number.isFinite(order) ? order : null;
@@ -1468,9 +1471,9 @@ const buildSelectedShipmentFallback = (shipment = {}, shipmentId = '') => {
   };
 };
 
-const buildShipmentPreview = (shipment = {}, shipmentId = '') => {
+const buildShipmentPreview = (shipment = {}, shipmentId = '', draftCache = readDraftCache()) => {
   const fallback = buildSelectedShipmentFallback(shipment, shipmentId);
-  const cachedDraft = getCachedDraft(fallback, shipment, shipmentId);
+  const cachedDraft = getCachedDraftFromCache(draftCache, fallback, shipment, shipmentId);
   const cachedItems = cachedDraft?.productItems || [];
   const fallbackItems = sortLineItemsForDisplay(getLineItems(fallback), cachedItems);
   const selectedItems = applyBundleSizesFromNotes(
@@ -4813,8 +4816,8 @@ const getDraftCacheKeys = (...shipments) =>
 const draftHasPositiveBundleSize = (draft = {}) =>
   toArray(draft?.productItems).some((item) => isPositiveBundleSize(getItemBundleSize(item)));
 
-const getCachedDraft = (...shipments) => {
-  const cache = readDraftCache();
+const getCachedDraftFromCache = (draftCache = readDraftCache(), ...shipments) => {
+  const cache = draftCache || {};
   const exactMatches = getDraftCacheKeys(...shipments).map((key) => cache[key]).filter(Boolean);
   const exactMatchWithBundleSize = exactMatches.find(draftHasPositiveBundleSize);
   if (exactMatchWithBundleSize) return exactMatchWithBundleSize;
@@ -4822,13 +4825,23 @@ const getCachedDraft = (...shipments) => {
   return exactMatches[0] || null;
 };
 
-const getEditableDraftSnapshot = (...shipments) => {
-  const cachedDraft = getCachedDraft(...shipments);
+const getCachedDraft = (...shipments) =>
+  getCachedDraftFromCache(readDraftCache(), ...shipments);
+
+const getEditableDraftSnapshotFromCache = (draftCache = readDraftCache(), ...shipments) => {
+  const cachedDraft = getCachedDraftFromCache(draftCache, ...shipments);
   return cachedDraft?.isDraft === true || cachedDraft?.status === 'draft' ? cachedDraft : null;
+};
+
+const getEditableDraftSnapshot = (...shipments) => {
+  return getEditableDraftSnapshotFromCache(readDraftCache(), ...shipments);
 };
 
 const canEditDraftShipment = (shipment = {}) =>
   String(shipment?.status || '').toLowerCase() === 'draft' || Boolean(getEditableDraftSnapshot(shipment));
+
+const canEditDraftShipmentFromCache = (draftCache = readDraftCache(), shipment = {}) =>
+  String(shipment?.status || '').toLowerCase() === 'draft' || Boolean(getEditableDraftSnapshotFromCache(draftCache, shipment));
 
 const writeCachedDraft = (shipments, draftData) => {
   const keys = getDraftCacheKeys(...shipments);
@@ -5129,6 +5142,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   const [forceVisibleShipmentKeys, setForceVisibleShipmentKeys] = useState([]);
   const deletingShipmentRef = useRef('');
   const recentShipmentRowsRef = useRef([]);
+  const draftCacheRef = useRef(readDraftCache());
 
   const showToast = (type, toastMessage) => {
     setToast({ type, message: toastMessage });
@@ -5869,7 +5883,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
 
       const loadedRows = loadedPayloads
         .map(normalizeShipment)
-        .map((shipment) => (getEditableDraftSnapshot(shipment) ? { ...shipment, backendStatus: shipment.status, status: 'draft' } : shipment))
+        .map((shipment) => (getEditableDraftSnapshotFromCache(draftCacheRef.current, shipment) ? { ...shipment, backendStatus: shipment.status, status: 'draft' } : shipment))
         .filter(isValidShipmentForList)
         .filter(doesShipmentBelongToCurrentClient)
         .filter((shipment) => !isExcludedShipment(shipment));
@@ -6077,7 +6091,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       const shouldSaveDraftLocallyOnly = Boolean(
         editingShipmentId &&
           isDraft &&
-          getEditableDraftSnapshot(existingShipmentForEdit, editingShipmentId) &&
+          getEditableDraftSnapshotFromCache(draftCacheRef.current, existingShipmentForEdit, editingShipmentId) &&
           backendStatusForEdit &&
           backendStatusForEdit !== 'draft'
       );
@@ -6413,6 +6427,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         ],
         draftSnapshot
       );
+      draftCacheRef.current = readDraftCache();
 
       const successMessage = [
         isDraft ? 'Draft saved' : 'Shipment submitted successfully.',
@@ -6478,7 +6493,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     const selectedFallback = buildSelectedShipmentFallback(fallbackShipment || {}, resolvedShipmentId);
     const bundleRawItems = extractShipmentDetailLineItems(detailViewBundle, bundleShipment);
     const bundleItems = mergeLineItemGroups(bundleRawItems, deriveLineItemsFromDetailBundle(detailViewBundle, bundleShipment));
-    const cachedDraft = getCachedDraft(selectedFallback, bundleShipment, resolvedShipmentId);
+    const cachedDraft = getCachedDraftFromCache(draftCacheRef.current, selectedFallback, bundleShipment, resolvedShipmentId);
     const cachedItems = cachedDraft?.productItems || [];
     const selectedItems = applyBundleSizesFromNotes(
       cachedItems.length ? mergeLineItemGroups(cachedItems, bundleItems) : mergeLineItemGroups(bundleItems),
@@ -6621,7 +6636,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       ? buildSelectedShipmentFallback(shipment)
       : buildSelectedShipmentFallback({ id: shipment }, shipment);
     const shipmentId = getShipmentId(fallbackShipment);
-    const previewShipment = buildShipmentPreview(fallbackShipment, shipmentId);
+    const previewShipment = buildShipmentPreview(fallbackShipment, shipmentId, draftCacheRef.current);
 
     try {
       setError('');
@@ -6686,7 +6701,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         ? buildSelectedShipmentFallback(shipment)
         : {};
       const shipmentId = getShipmentId(fallbackShipment) || shipment;
-      const cachedBeforeFetch = getCachedDraft(fallbackShipment, shipmentId);
+      const cachedBeforeFetch = getCachedDraftFromCache(draftCacheRef.current, fallbackShipment, shipmentId);
 
       let detail = {};
       try {
@@ -6719,7 +6734,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         },
         shipmentId
       );
-      const cachedDraft = getCachedDraft(fallbackShipment, detail, draft, shipmentId) || cachedBeforeFetch;
+      const cachedDraft = getCachedDraftFromCache(draftCacheRef.current, fallbackShipment, detail, draft, shipmentId) || cachedBeforeFetch;
       const notes = firstPresent(serverDraftPayload?.notes, draft?.notes, draft?.client_notes);
       const expectedArrivalDate =
         serverDraftPayload?.expectedArrivalDate ||
@@ -9174,7 +9189,10 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                         <LoadingState label="Loading shipments..." />
                       </td>
                     </tr>
-                  ) : paginatedShipments.length ? paginatedShipments.map((shipment) => (
+                  ) : paginatedShipments.length ? paginatedShipments.map((shipment) => {
+                    const canEditDraft = canEditDraftShipmentFromCache(draftCacheRef.current, shipment);
+
+                    return (
                     <tr key={shipment.id} className="border-b border-gray-50 hover:bg-gray-50/30 transition-colors last:border-b-0">
                       <td className="py-4 px-6 text-sm font-semibold text-blue-600">{shipment.reference}</td>
                       <td className="py-4 px-6 text-sm text-gray-700">{shipment.created}</td>
@@ -9201,8 +9219,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                           <button
                             type="button"
                             onClick={() => handleEditDraft(shipment)}
-                            disabled={!canEditDraftShipment(shipment)}
-                            title={canEditDraftShipment(shipment) ? 'Edit draft' : 'Only draft shipments can be edited'}
+                            disabled={!canEditDraft}
+                            title={canEditDraft ? 'Edit draft' : 'Only draft shipments can be edited'}
                             aria-label="Edit shipment"
                             className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-[#d5dee9] text-[#475569] hover:bg-[#f8fafc] disabled:cursor-not-allowed disabled:opacity-40"
                           >
@@ -9228,7 +9246,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                         </div>
                       </td>
                     </tr>
-                  )) : (
+                    );
+                  }) : (
                     <tr>
                       <td colSpan="8" className="px-6 py-10 text-center text-sm text-gray-500">
                         No shipments found.

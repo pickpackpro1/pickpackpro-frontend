@@ -200,18 +200,11 @@ const normalizeServiceType = normalizeServiceCode;
 const formatServiceLabel = getServiceDisplayName;
 const normalizeServiceKey = getServiceKey;
 const STANDARD_SERVICE_KEYS = STANDARD_CATALOG_SERVICE_KEYS;
-const AUTO_DEFAULT_SERVICE_KEYS = new Set(['fnsku_label', 'polybag', 'bubble_wrap', 'bundling']);
 
-const stripAutoDefaultServiceBundle = (services = []) => {
-  const serviceList = (Array.isArray(services) ? services : [])
+const normalizeServiceDisplayList = (services = []) => {
+  return (Array.isArray(services) ? services : [])
     .map((service) => String(service || '').trim())
     .filter(Boolean);
-  const serviceKeys = new Set(serviceList.map((service) => normalizeServiceKey(service)).filter(Boolean));
-  const hasAutoDefaultBundle = [...AUTO_DEFAULT_SERVICE_KEYS].every((serviceKey) => serviceKeys.has(serviceKey));
-
-  if (!hasAutoDefaultBundle) return serviceList;
-
-  return serviceList.filter((service) => !AUTO_DEFAULT_SERVICE_KEYS.has(normalizeServiceKey(service)));
 };
 
 const buildHeaders = (includeJson = false) => {
@@ -262,7 +255,9 @@ const parseResponse = async (response) => {
 };
 
 const logAdminViewGetResponse = (label, payload) => {
-  console.log('[PickPackPro][Admin View GET]', label, payload);
+  if (import.meta.env.DEV) {
+    console.log('[PickPackPro][Admin View GET]', label, payload);
+  }
   return payload;
 };
 
@@ -703,8 +698,8 @@ const getDraftCacheKeys = (...shipments) =>
     .map((value) => String(value || '').trim())
     .filter(Boolean);
 
-const getBundleSizeEntriesFromDraftCache = (shipment = {}, items = []) => {
-  const cache = readDraftCache();
+const getBundleSizeEntriesFromDraftCache = (shipment = {}, items = [], draftCache = readDraftCache()) => {
+  const cache = draftCache || {};
   const itemList = Array.isArray(items) ? items : [];
   const drafts = getDraftCacheKeys(shipment).map((key) => cache[key]).filter(Boolean);
 
@@ -725,9 +720,9 @@ const getBundleSizeEntriesFromDraftCache = (shipment = {}, items = []) => {
   );
 };
 
-const applyBundleSizesFromNotes = (items = [], shipment = {}) => {
+const applyBundleSizesFromNotes = (items = [], shipment = {}, draftCache = readDraftCache()) => {
   const entries = getBundleSizeEntriesFromNotes(getRawShipmentNotes(shipment));
-  const resolvedEntries = entries.length ? entries : getBundleSizeEntriesFromDraftCache(shipment, items);
+  const resolvedEntries = entries.length ? entries : getBundleSizeEntriesFromDraftCache(shipment, items, draftCache);
   if (!resolvedEntries.length) return items;
 
   return (Array.isArray(items) ? items : []).map((item) => {
@@ -762,11 +757,22 @@ const getLineItemDisplayOrder = (item = {}) => {
 const PRODUCT_SEQUENCE_PREFIXES = ['product', 'prod', 'pp', 'p'];
 const SKU_SEQUENCE_PREFIXES = ['sku', 'product', 'prod', 'pp', 'p'];
 const FNSKU_SEQUENCE_PREFIXES = ['fnsku', 'f', 'sku', 'product', 'prod', 'pp', 'p'];
+const PRODUCT_SEQUENCE_REGEX = new RegExp(`^(?:${PRODUCT_SEQUENCE_PREFIXES.join('|')})[\\s_-]*0*(\\d+)$`, 'i');
+const SKU_SEQUENCE_REGEX = new RegExp(`^(?:${SKU_SEQUENCE_PREFIXES.join('|')})[\\s_-]*0*(\\d+)$`, 'i');
+const FNSKU_SEQUENCE_REGEX = new RegExp(`^(?:${FNSKU_SEQUENCE_PREFIXES.join('|')})[\\s_-]*0*(\\d+)$`, 'i');
+const SEQUENCE_REGEX_BY_PREFIXES = new Map([
+  [PRODUCT_SEQUENCE_PREFIXES, PRODUCT_SEQUENCE_REGEX],
+  [SKU_SEQUENCE_PREFIXES, SKU_SEQUENCE_REGEX],
+  [FNSKU_SEQUENCE_PREFIXES, FNSKU_SEQUENCE_REGEX],
+]);
+
+const getSequenceRegexForPrefixes = (prefixes = []) =>
+  SEQUENCE_REGEX_BY_PREFIXES.get(prefixes) || new RegExp(`^(?:${prefixes.join('|')})[\\s_-]*0*(\\d+)$`, 'i');
 
 const parseLineItemSequenceOrder = (value = '', prefixes = []) => {
   const text = String(value || '').trim();
   if (!text) return null;
-  const match = text.match(new RegExp(`^(?:${prefixes.join('|')})[\\s_-]*0*(\\d+)$`, 'i'));
+  const match = text.match(getSequenceRegexForPrefixes(prefixes));
   if (!match) return null;
   const order = Number(match[1]);
   return Number.isFinite(order) ? order : null;
@@ -830,7 +836,7 @@ const toServiceLabels = (value) => {
     .filter(Boolean);
 };
 
-const getLineItemServiceLabels = (item = {}) => stripAutoDefaultServiceBundle([
+const getLineItemServiceLabels = (item = {}) => normalizeServiceDisplayList([
   ...new Set([
     ...toServiceLabels(item?.services),
     ...toServiceLabels(item?.selectedServices),
@@ -3585,6 +3591,7 @@ const getBlockingInvoiceStatus = (invoice = {}) =>
   firstPresent(invoice?.status, invoice?.state, '-');
 
 const Shipments = () => {
+  const draftCacheRef = useRef(readDraftCache());
   const [shipments, setShipments] = useState(() =>
     mergeShipmentRows(readRecentShipmentRows(ADMIN_RECENT_SHIPMENTS_CACHE_KEY))
   );
@@ -3932,7 +3939,7 @@ const Shipments = () => {
     const isCurrentRequest = () => quickViewRequestIdRef.current === requestId;
     const previewShipment = normalizeShipment(shipment || {});
     setQuickViewShipment(previewShipment);
-    setQuickViewItems(sortLineItemsForDisplay(applyBundleSizesFromNotes(getShipmentLineItems(shipment), shipment)));
+    setQuickViewItems(sortLineItemsForDisplay(applyBundleSizesFromNotes(getShipmentLineItems(shipment), shipment, draftCacheRef.current)));
     setQuickViewServices([]);
     setQuickViewDiscrepancies([]);
     setQuickViewBoxes([]);
@@ -3982,7 +3989,8 @@ const Shipments = () => {
       const itemsForView = sortLineItemsForDisplay(
         applyBundleSizesFromNotes(
           bundleItems.length ? bundleItems : getShipmentLineItems(shipment),
-          { ...shipment, ...bundleShipment }
+          { ...shipment, ...bundleShipment },
+          draftCacheRef.current
         )
       );
       const bundleBoxes = [
@@ -4114,7 +4122,7 @@ const Shipments = () => {
 
       if (responseData?.shipment && typeof responseData.shipment === 'object') {
         const updatedShipment = normalizeShipment(responseData.shipment);
-        const updatedItems = sortLineItemsForDisplay(applyBundleSizesFromNotes(getShipmentLineItems(updatedShipment), updatedShipment));
+        const updatedItems = sortLineItemsForDisplay(applyBundleSizesFromNotes(getShipmentLineItems(updatedShipment), updatedShipment, draftCacheRef.current));
         setQuickViewShipment(updatedShipment);
         if (updatedItems.length) setQuickViewItems(updatedItems);
       }

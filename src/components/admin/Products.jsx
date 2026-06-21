@@ -414,6 +414,7 @@ const Products = () => {
   const [products, setProducts] = useState([]);
   const [clients, setClients] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [clientFilter, setClientFilter] = useState('');
   const [clientFilterSearch, setClientFilterSearch] = useState('');
@@ -645,10 +646,17 @@ const Products = () => {
     };
   }, [clientLookup]);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
+
   const filteredProducts = useMemo(
     () =>
       products.filter((product) => {
-        const term = searchTerm.toLowerCase();
+        const term = debouncedSearchTerm.toLowerCase();
         const clientDisplay = getProductClientDisplay(product);
 
         return (
@@ -659,14 +667,14 @@ const Products = () => {
           product.clientId.toLowerCase().includes(term)
         );
       }),
-    [products, searchTerm, getProductClientDisplay]
+    [products, debouncedSearchTerm, getProductClientDisplay]
   );
 
   const totalProductPages = Math.max(1, Math.ceil(filteredProducts.length / PRODUCTS_PER_PAGE));
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, clientFilter, statusFilter]);
+  }, [debouncedSearchTerm, clientFilter, statusFilter]);
 
   useEffect(() => {
     setCurrentPage((page) => Math.min(Math.max(page, 1), totalProductPages));

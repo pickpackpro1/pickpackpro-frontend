@@ -227,6 +227,7 @@ const uploadProductDefaultFnskuLabel = async ({ productId, file, buildHeaders, p
 const ProductsClient = () => {
   const [products, setProducts] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [showViewModal, setShowViewModal] = useState(false);
   const [showFormModal, setShowFormModal] = useState(false);
@@ -282,16 +283,23 @@ const ProductsClient = () => {
     };
   }, []);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
   const filteredProducts = useMemo(
     () =>
       products.filter((product) => {
-        const term = searchQuery.toLowerCase();
+        const term = debouncedSearchQuery.toLowerCase();
         return (
           product.sku.toLowerCase().includes(term) ||
           product.productName.toLowerCase().includes(term)
         );
       }),
-    [products, searchQuery]
+    [products, debouncedSearchQuery]
   );
 
   const handleViewProduct = (product) => {

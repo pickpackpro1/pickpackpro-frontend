@@ -47,6 +47,9 @@ const normalizeProductName = (item = {}) =>
 const normalizeFnskuLabel = (item = {}) =>
   String(firstPresent(item?.fnskuLabel, item?.fnsku_label, item?.fnsku, item?.defaultFnsku, item?.default_fnsku) || '').trim();
 
+const normalizeItemServices = (item = {}) =>
+  normalizeServiceList(item?.services, item?.selectedServices, item?.selected_services, item?.servicesSelected, item?.services_selected);
+
 export const buildDraftShipmentItems = (items = []) =>
   ensureDraftItemIds(items).map((item, index) => {
     const needsBundling = Boolean(item?.needsBundling || item?.needs_bundling);
@@ -78,9 +81,14 @@ export const buildSubmittedShipmentItems = (items = []) => {
     const expectedQty = toPositiveNumber(firstPresent(item?.expectedQty, item?.expected_qty, item?.qtyExpected, item?.qty_expected));
     const needsBundling = Boolean(item?.needsBundling || item?.needs_bundling);
     const bundleSize = toPositiveNumber(firstPresent(item?.bundleSize, item?.bundle_size));
+    const services = normalizeItemServices(item);
 
     if (!sku || !productName || expectedQty <= 0) {
       throw new Error(`Line ${index + 1} needs product, SKU, and qty expected before submitting.`);
+    }
+
+    if (!services.length) {
+      throw new Error(`Line ${index + 1} needs at least one service before submitting.`);
     }
 
     if (needsBundling && bundleSize <= 0) {
@@ -97,7 +105,7 @@ export const buildSubmittedShipmentItems = (items = []) => {
         fnskuLabel: normalizeFnskuLabel(item),
         needsBundling,
         ...(needsBundling ? { bundleSize } : {}),
-        services: normalizeServiceList(item?.services),
+        services,
         displayOrder: index,
         itemIndex: index,
       },

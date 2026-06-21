@@ -1,7 +1,8 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { lazy, Suspense, useEffect, useState } from "react";
 import FullPageLoader from "./components/common/FullPageLoader";
 import ToastHost from "./components/common/ToastHost";
+import { AUTH_REQUIRED_EVENT_NAME } from "./utils/apiAuth";
 import { clearSession, getAuthToken, getDashboardPath, getRefreshToken, getSession, saveSession } from "./utils/auth";
 
 const CHUNK_RELOAD_STORAGE_KEY = "pickpackpro-chunk-reload-v1";
@@ -427,6 +428,21 @@ function DefaultRedirect() {
   return <Navigate to={getInviteRedirectPath() || getDashboardPath(getSession()?.role)} replace />;
 }
 
+function AuthRequiredRedirect() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const handleAuthRequired = () => {
+      navigate(getInviteRedirectPath() || "/login", { replace: true });
+    };
+
+    window.addEventListener(AUTH_REQUIRED_EVENT_NAME, handleAuthRequired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT_NAME, handleAuthRequired);
+  }, [navigate]);
+
+  return null;
+}
+
 function App() {
   useEffect(() => {
     const role = String(getSession()?.role || "").toLowerCase();
@@ -450,6 +466,7 @@ function App() {
 
   return (
     <BrowserRouter>
+      <AuthRequiredRedirect />
       <ToastHost />
       <Suspense fallback={<FullPageLoader show delay={800} label="Loading page..." />}>
         <Routes>

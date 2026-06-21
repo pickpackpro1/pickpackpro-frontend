@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App.jsx";
+import { getAccessTokenForProtectedRequest, getFreshSessionOnce, handleProtectedAuthFailure } from "./utils/apiAuth.js";
 import { API_MUTATION_EVENT_NAME, installApiActionToasts } from "./utils/toast.js";
 // import { ToastContainer } from "react-toastify";
 // import "react-toastify/dist/ReactToastify.css";
@@ -57,6 +58,55 @@ if (typeof window !== "undefined" && !window.__PICKPACKPRO_API_GET_CACHE__) {
       return new Request(requestUrl, input);
     }
     return input;
+  };
+
+  const readStoredAuthToken = () => {
+    try {
+      const session = JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "null") || {};
+      return String(session?.token || "").trim();
+    } catch {
+      return "";
+    }
+  };
+
+  const getRequestHeaders = (input, init = {}) => {
+    const sourceHeaders =
+      init?.headers ||
+      (typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined);
+    return new Headers(sourceHeaders || {});
+  };
+
+  const hasAuthorizationHeader = (input, init = {}) => getRequestHeaders(input, init).has("Authorization");
+
+  const shouldSkipAuthRetry = (requestUrl = "", init = {}) => {
+    if (init?.skipAuthRefresh) return true;
+    if (!requestUrl.includes("/api/")) return true;
+
+    const excludedPaths = [
+      "/api/auth/login",
+      "/api/auth/refresh",
+      "/api/auth/refresh-token",
+      "/api/auth/token/refresh",
+    ];
+
+    return excludedPaths.some((path) => requestUrl.includes(path));
+  };
+
+  const shouldHandleProtectedAuth = (fetchInput, init = {}, requestUrl = "") => {
+    if (shouldSkipAuthRetry(requestUrl, init)) return false;
+    return hasAuthorizationHeader(fetchInput, init) || Boolean(readStoredAuthToken());
+  };
+
+  const buildAuthRetryInit = (fetchInput, init = {}, token = "") => {
+    const headers = getRequestHeaders(fetchInput, init);
+
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    } else {
+      headers.delete("Authorization");
+    }
+
+    return { ...init, headers };
   };
 
   const getSessionCacheKey = () => {
@@ -292,6 +342,38 @@ if (typeof window !== "undefined" && !window.__PICKPACKPRO_API_GET_CACHE__) {
 
   window.addEventListener(API_MUTATION_EVENT_NAME, clearApiGetCache);
 
+  const fetchWithAuthRetry = async (fetchInput, init = {}, requestUrl = "") => {
+    if (!shouldHandleProtectedAuth(fetchInput, init, requestUrl)) {
+      return originalFetch(fetchInput, init);
+    }
+
+    const token = await getAccessTokenForProtectedRequest();
+    const requestInit = token ? buildAuthRetryInit(fetchInput, init, token) : init;
+    let response = await originalFetch(fetchInput, requestInit);
+
+    if (response.status !== 401) {
+      return response;
+    }
+
+    const freshSession = await getFreshSessionOnce();
+    const freshToken = freshSession?.access_token || "";
+
+    if (!freshToken) {
+      clearApiGetCache();
+      handleProtectedAuthFailure();
+      return response;
+    }
+
+    response = await originalFetch(fetchInput, buildAuthRetryInit(fetchInput, init, freshToken));
+
+    if (response.status === 401) {
+      clearApiGetCache();
+      handleProtectedAuthFailure();
+    }
+
+    return response;
+  };
+
   window.fetch = async (input, init = {}) => {
     const originalRequestUrl = typeof input === "string" || input instanceof URL ? String(input) : input?.url || "";
     const requestUrl = getSameOriginApiUrl(originalRequestUrl);
@@ -355,10 +437,10 @@ if (typeof window !== "undefined" && !window.__PICKPACKPRO_API_GET_CACHE__) {
     // FIX: For file requests, skip the promise tracking to avoid caching issues
     if (isFileRequest) {
       if (shouldLogGetRequests()) console.log("[FILE Request - No Cache]", requestUrl);
-      return originalFetch(fetchInput, init);
+      return fetchWithAuthRetry(fetchInput, init, requestUrl);
     }
 
-    const responsePromise = originalFetch(fetchInput, init);
+    const responsePromise = fetchWithAuthRetry(fetchInput, init, requestUrl);
 
     if (shouldTrackGetRequest) {
       inFlightGetRequests.set(cacheKey, responsePromise);

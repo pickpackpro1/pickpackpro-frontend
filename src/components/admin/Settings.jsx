@@ -571,6 +571,7 @@ const Settings = () => {
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isSettingsLoading, setIsSettingsLoading] = useState(false);
   const [usersSearchQuery, setUsersSearchQuery] = useState('');
+  const [debouncedUsersSearchQuery, setDebouncedUsersSearchQuery] = useState('');
   const [missingClientEmail, setMissingClientEmail] = useState('');
   const [showClientEmailRequiredPopup, setShowClientEmailRequiredPopup] = useState(false);
   const [workingDays, setWorkingDays] = useState(initialWorkingDays);
@@ -587,6 +588,7 @@ const Settings = () => {
   const [pricingClientPrices, setPricingClientPrices] = useState([]);
   const [pricingClients, setPricingClients] = useState([]);
   const [pricingClientSearch, setPricingClientSearch] = useState('');
+  const [debouncedPricingClientSearch, setDebouncedPricingClientSearch] = useState('');
   const [isPricingClientDropdownOpen, setIsPricingClientDropdownOpen] = useState(false);
   const [pricingLoading, setPricingLoading] = useState(false);
   const [pricingError, setPricingError] = useState('');
@@ -616,6 +618,20 @@ const Settings = () => {
 
   const canShowPermanentDelete = (user) =>
     Boolean(isCurrentUserAdmin && getUserIdentityId(user) && !isCurrentUser(user));
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedUsersSearchQuery(usersSearchQuery);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [usersSearchQuery]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedPricingClientSearch(pricingClientSearch);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [pricingClientSearch]);
 
   const serviceTypeOptions = useMemo(() => {
     const normalizedPricingCatalog = Array.isArray(pricingCatalog)
@@ -681,7 +697,7 @@ const Settings = () => {
   );
 
   const filteredPricingClientOptions = useMemo(() => {
-    const query = pricingClientSearch.trim().toLowerCase();
+    const query = debouncedPricingClientSearch.trim().toLowerCase();
     if (!query) return pricingClientOptions;
 
     return pricingClientOptions.filter((client) =>
@@ -690,7 +706,7 @@ const Settings = () => {
         .toLowerCase()
         .includes(query)
     );
-  }, [pricingClientOptions, pricingClientSearch]);
+  }, [pricingClientOptions, debouncedPricingClientSearch]);
 
   const selectedPricingClient = useMemo(
     () => pricingClientOptions.find((client) => client.value === pricingForm.clientId) || null,
@@ -1338,7 +1354,7 @@ const Settings = () => {
   };
 
   const filteredUsers = useMemo(() => {
-    const query = usersSearchQuery.trim().toLowerCase();
+    const query = debouncedUsersSearchQuery.trim().toLowerCase();
 
     if (!query) {
       return users;
@@ -1350,7 +1366,7 @@ const Settings = () => {
         user.email.toLowerCase().includes(query) ||
         user.role.toLowerCase().includes(query)
     );
-  }, [users, usersSearchQuery]);
+  }, [users, debouncedUsersSearchQuery]);
 
   const openCreateModal = () => {
     setUsersMessage('');

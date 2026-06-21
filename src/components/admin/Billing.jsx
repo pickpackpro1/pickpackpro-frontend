@@ -1056,6 +1056,7 @@ const Billing = () => {
   const [lineActionKey, setLineActionKey] = useState('');
   const [openedInvoiceQuery, setOpenedInvoiceQuery] = useState('');
   const [invoiceSearchTerm, setInvoiceSearchTerm] = useState('');
+  const [debouncedInvoiceSearchTerm, setDebouncedInvoiceSearchTerm] = useState('');
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('all');
   const [sendInvoiceTarget, setSendInvoiceTarget] = useState(null);
   const [deleteInvoiceTarget, setDeleteInvoiceTarget] = useState(null);
@@ -1171,6 +1172,13 @@ const Billing = () => {
     loadSettings();
   }, []);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedInvoiceSearchTerm(invoiceSearchTerm);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [invoiceSearchTerm]);
+
   const displayInvoices = useMemo(
     () =>
       invoices.map((invoice) => {
@@ -1197,7 +1205,7 @@ const Billing = () => {
     return [...statuses];
   }, [displayInvoices]);
   const filteredInvoices = useMemo(() => {
-    const term = String(invoiceSearchTerm || '').trim().toLowerCase();
+    const term = String(debouncedInvoiceSearchTerm || '').trim().toLowerCase();
     const statusFilter = String(invoiceStatusFilter || 'all').trim().toLowerCase();
 
     return displayInvoices.filter((invoice) => {
@@ -1219,7 +1227,7 @@ const Billing = () => {
         .map((value) => String(value || '').toLowerCase())
         .some((value) => value.includes(term));
     });
-  }, [displayInvoices, invoiceSearchTerm, invoiceStatusFilter]);
+  }, [displayInvoices, debouncedInvoiceSearchTerm, invoiceStatusFilter]);
   const invoiceTotalPages = Math.max(1, Math.ceil(filteredInvoices.length / BILLING_PAGE_SIZE));
   const invoicePaginationPages = useMemo(
     () => getPaginationPages(invoicePage, invoiceTotalPages),
@@ -1301,7 +1309,7 @@ const Billing = () => {
 
   useEffect(() => {
     setInvoicePage(1);
-  }, [invoiceSearchTerm, invoiceStatusFilter]);
+  }, [debouncedInvoiceSearchTerm, invoiceStatusFilter]);
 
 
   const selectedInvoiceView = selectedInvoice
@@ -1860,7 +1868,7 @@ const Billing = () => {
                 {!isLoading && !paginatedInvoices.length ? (
                   <tr>
                     <td colSpan="11" className="px-6 py-10 text-center text-sm text-gray-500">
-                      {invoiceSearchTerm.trim() || invoiceStatusFilter !== 'all' ? 'No invoices match your filters.' : 'No invoices found.'}
+                      {debouncedInvoiceSearchTerm.trim() || invoiceStatusFilter !== 'all' ? 'No invoices match your filters.' : 'No invoices found.'}
                     </td>
                   </tr>
                 ) : null}
@@ -1872,7 +1880,7 @@ const Billing = () => {
               <p className="text-sm text-gray-500">
                 Showing <span className="font-medium text-gray-900">{invoicePaginationStart}-{invoicePaginationEnd}</span> of{' '}
                 <span className="font-medium text-gray-900">{filteredInvoices.length}</span> invoices
-                {invoiceSearchTerm.trim() ? <span> matching "{invoiceSearchTerm.trim()}"</span> : null}
+                {debouncedInvoiceSearchTerm.trim() ? <span> matching "{debouncedInvoiceSearchTerm.trim()}"</span> : null}
                 {invoiceStatusFilter !== 'all' ? <span> with status {formatStatusLabel(invoiceStatusFilter)}</span> : null}
               </p>
               <div className="flex items-center gap-2 text-sm">
