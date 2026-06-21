@@ -164,7 +164,7 @@ const toastStyles = {
 };
 
 const SERVICE_OPTIONS = SERVICE_SELECT_OPTIONS;
-const SELECTABLE_SERVICE_OPTIONS = SERVICE_OPTIONS.filter((option) => !isBundlingService(option.value));
+const SELECTABLE_SERVICE_OPTIONS = SERVICE_OPTIONS;
 const isOtherServiceValue = isOtherServiceCode;
 const formatServiceLabel = getServiceDisplayName;
 const normalizeServiceKey = getServiceKey;

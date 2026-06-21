@@ -3919,7 +3919,7 @@ const Shipments = () => {
 
       const normalizedRows = shipmentRows.map(normalizeShipment).filter((shipment) => !isExcludedShipment(shipment));
       const visiblePinnedRows = pinnedRows.filter((shipment) => !isExcludedShipment(shipment));
-      setShipments(mergeShipmentRows(normalizedRows, visiblePinnedRows));
+      setShipments(mergeShipmentRows(visiblePinnedRows, normalizedRows));
     } catch (requestError) {
       setError(requestError.message);
       showToast('error', requestError.message || 'Failed to load shipments.');
