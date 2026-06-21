@@ -31,7 +31,7 @@ import {
 } from '../../utils/productFields';
 
 const API_BASE_URL = '';
-const PRODUCTS_PER_PAGE = 20;
+const PRODUCTS_PER_PAGE = 25;
 
 const initialProductForm = {
   clientId: '',
@@ -113,6 +113,10 @@ const extractProducts = (payload) => {
     return payload.data.products;
   }
 
+  if (Array.isArray(payload?.data?.items)) {
+    return payload.data.items;
+  }
+
   if (Array.isArray(payload?.data?.rows)) {
     return payload.data.rows;
   }
@@ -134,6 +138,41 @@ const extractProducts = (payload) => {
   }
 
   return [];
+};
+
+const extractProductPagination = (payload, fallbackRows = []) => {
+  const data = payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+    ? payload.data
+    : payload || {};
+  const limit = Math.max(1, Number(data.limit || PRODUCTS_PER_PAGE) || PRODUCTS_PER_PAGE);
+  const total = Math.max(0, Number(data.total ?? fallbackRows.length) || 0);
+
+  return {
+    total,
+    page: Math.max(1, Number(data.page || 1) || 1),
+    limit,
+    totalPages: Math.max(1, Number(data.totalPages ?? data.total_pages ?? Math.ceil(total / limit)) || 1),
+  };
+};
+
+const formatProductImportResult = (payload = {}) => {
+  const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+  const imported = Number(data.imported ?? data.created ?? 0) || 0;
+  const updated = Number(data.updated ?? 0) || 0;
+  const errors = Array.isArray(data.errors) ? data.errors : [];
+  const baseMessage = data.message || 'Product import completed';
+  const countParts = [
+    `${imported} imported`,
+    updated ? `${updated} updated` : '',
+  ].filter(Boolean);
+  const warningText = errors.length
+    ? ` ${errors.length} row warning${errors.length === 1 ? '' : 's'}: ${errors
+        .slice(0, 3)
+        .map((error) => `row ${error.row || '?'} ${error.message || 'could not be imported'}`)
+        .join('; ')}${errors.length > 3 ? `; +${errors.length - 3} more` : ''}`
+    : '';
+
+  return `${baseMessage}${countParts.length ? ` (${countParts.join(', ')})` : ''}.${warningText}`;
 };
 
 const extractProductDetail = (payload) => {
@@ -422,6 +461,12 @@ const Products = () => {
   const [formClientSearch, setFormClientSearch] = useState('');
   const [isFormClientOpen, setIsFormClientOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [productListMeta, setProductListMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: PRODUCTS_PER_PAGE,
+    totalPages: 1,
+  });
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [selectedProductIds, setSelectedProductIds] = useState([]);
   const [showViewModal, setShowViewModal] = useState(false);
@@ -469,18 +514,19 @@ const Products = () => {
     try {
       setIsLoading(true);
       setError('');
-      const query = new URLSearchParams();
+      const query = new URLSearchParams({
+        page: String(currentPage),
+        limit: String(PRODUCTS_PER_PAGE),
+        status: statusFilter || 'all',
+      });
+
+      const trimmedSearch = debouncedSearchTerm.trim();
+      if (trimmedSearch) {
+        query.set('search', trimmedSearch);
+      }
 
       if (clientFilter.trim()) {
         query.set('clientId', clientFilter.trim());
-      }
-
-      if (statusFilter === 'active') {
-        query.set('active', 'true');
-      }
-
-      if (statusFilter === 'inactive') {
-        query.set('active', 'false');
       }
 
       const response = await fetch(
@@ -493,10 +539,18 @@ const Products = () => {
         }
       );
       const payload = await parseResponse(response);
-      setProducts(extractProducts(payload).map(normalizeProduct));
+      const productRows = extractProducts(payload).map(normalizeProduct);
+      setProducts(productRows);
+      setProductListMeta(extractProductPagination(payload, productRows));
     } catch (requestError) {
       setError(requestError.message);
       setProducts([]);
+      setProductListMeta({
+        total: 0,
+        page: 1,
+        limit: PRODUCTS_PER_PAGE,
+        totalPages: 1,
+      });
     } finally {
       setIsLoading(false);
     }
@@ -504,7 +558,7 @@ const Products = () => {
 
   useEffect(() => {
     loadProducts();
-  }, [clientFilter, statusFilter]);
+  }, [clientFilter, currentPage, debouncedSearchTerm, statusFilter]);
 
   useEffect(() => {
     let refreshTimer = null;
@@ -525,7 +579,7 @@ const Products = () => {
       window.clearTimeout(refreshTimer);
       window.removeEventListener(API_MUTATION_EVENT_NAME, scheduleProductRefresh);
     };
-  }, [clientFilter, statusFilter]);
+  }, [clientFilter, currentPage, debouncedSearchTerm, statusFilter]);
 
   useEffect(() => {
     loadClients();
@@ -649,28 +703,12 @@ const Products = () => {
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearchTerm(searchTerm);
-    }, 250);
+    }, 300);
     return () => clearTimeout(timer);
   }, [searchTerm]);
 
-  const filteredProducts = useMemo(
-    () =>
-      products.filter((product) => {
-        const term = debouncedSearchTerm.toLowerCase();
-        const clientDisplay = getProductClientDisplay(product);
-
-        return (
-          product.productName.toLowerCase().includes(term) ||
-          product.sku.toLowerCase().includes(term) ||
-          clientDisplay.primary.toLowerCase().includes(term) ||
-          clientDisplay.secondary.toLowerCase().includes(term) ||
-          product.clientId.toLowerCase().includes(term)
-        );
-      }),
-    [products, debouncedSearchTerm, getProductClientDisplay]
-  );
-
-  const totalProductPages = Math.max(1, Math.ceil(filteredProducts.length / PRODUCTS_PER_PAGE));
+  const filteredProducts = products;
+  const totalProductPages = Math.max(1, Number(productListMeta.totalPages || 1) || 1);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -680,10 +718,7 @@ const Products = () => {
     setCurrentPage((page) => Math.min(Math.max(page, 1), totalProductPages));
   }, [totalProductPages]);
 
-  const paginatedProducts = useMemo(() => {
-    const startIndex = (currentPage - 1) * PRODUCTS_PER_PAGE;
-    return filteredProducts.slice(startIndex, startIndex + PRODUCTS_PER_PAGE);
-  }, [filteredProducts, currentPage]);
+  const paginatedProducts = filteredProducts;
 
   const visibleProductIds = useMemo(
     () => paginatedProducts.map((product) => String(product.id || '').trim()).filter(Boolean),
@@ -698,8 +733,8 @@ const Products = () => {
   ).length;
   const allVisibleProductsSelected =
     visibleProductIds.length > 0 && selectedVisibleProductCount === visibleProductIds.length;
-  const paginationStart = filteredProducts.length ? (currentPage - 1) * PRODUCTS_PER_PAGE + 1 : 0;
-  const paginationEnd = Math.min(currentPage * PRODUCTS_PER_PAGE, filteredProducts.length);
+  const paginationStart = productListMeta.total ? (currentPage - 1) * PRODUCTS_PER_PAGE + 1 : 0;
+  const paginationEnd = Math.min((currentPage - 1) * PRODUCTS_PER_PAGE + paginatedProducts.length, productListMeta.total);
   const paginationPages = useMemo(() => {
     const maxVisiblePages = 5;
     const firstPage = Math.max(1, currentPage - 2);
@@ -715,6 +750,10 @@ const Products = () => {
       return currentIds.filter((productId) => availableIds.has(productId));
     });
   }, [products]);
+
+  useEffect(() => {
+    setSelectedProductIds([]);
+  }, [clientFilter, currentPage, debouncedSearchTerm, statusFilter]);
 
   const toggleProductSelection = (productId) => {
     const normalizedProductId = String(productId || '').trim();
@@ -739,17 +778,7 @@ const Products = () => {
     });
   };
 
-  const resolvedExportClientId = useMemo(() => {
-    if (clientFilter.trim()) {
-      return clientFilter.trim();
-    }
-
-    const uniqueClientIds = [
-      ...new Set(filteredProducts.map((product) => product.clientId).filter(Boolean)),
-    ];
-
-    return uniqueClientIds.length === 1 ? uniqueClientIds[0] : '';
-  }, [clientFilter, filteredProducts]);
+  const resolvedExportClientId = useMemo(() => clientFilter.trim(), [clientFilter]);
 
   const openCreateModal = () => {
     setEditingProductId('');
@@ -1011,21 +1040,21 @@ const Products = () => {
       setMessage('');
       setIsBulkDeleting(true);
 
-      const deleteResults = await Promise.allSettled(
-        productIds.map(async (productId) => {
-          const response = await fetch(`${API_BASE_URL}/api/products/${encodeURIComponent(productId)}`, {
-            method: 'DELETE',
-            headers: buildHeaders(),
-            skipApiToast: true,
-          });
-          await parseResponse(response);
-          return productId;
-        })
-      );
-      const deletedIds = deleteResults
-        .filter((result) => result.status === 'fulfilled')
-        .map((result) => result.value);
-      const failedResults = deleteResults.filter((result) => result.status === 'rejected');
+      const response = await fetch(`${API_BASE_URL}/api/products/bulk-delete`, {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify({ productIds }),
+        skipApiToast: true,
+      });
+      const payload = await parseResponse(response);
+      const resultData = payload?.data || payload || {};
+      const deletedIds = Array.isArray(resultData.deletedIds)
+        ? resultData.deletedIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : productIds;
+      const skippedIds = Array.isArray(resultData.skippedIds)
+        ? resultData.skippedIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+      const deletedCount = Number(resultData.deletedCount ?? deletedIds.length) || deletedIds.length;
 
       if (deletedIds.length) {
         setSelectedProductIds((currentIds) => currentIds.filter((productId) => !deletedIds.includes(productId)));
@@ -1038,20 +1067,15 @@ const Products = () => {
 
       setBulkDeleteProducts([]);
 
-      if (failedResults.length) {
-        const firstError = failedResults[0]?.reason?.message;
-        setError(
-          `${failedResults.length} product${failedResults.length === 1 ? '' : 's'} could not be deleted.${
-            firstError ? ` ${firstError}` : ''
-          }`
-        );
-        if (deletedIds.length) {
-          setMessage(`${deletedIds.length} product${deletedIds.length === 1 ? '' : 's'} soft-deleted successfully.`);
+      if (skippedIds.length) {
+        setError(`${skippedIds.length} product${skippedIds.length === 1 ? '' : 's'} could not be deleted.`);
+        if (deletedCount) {
+          setMessage(`${deletedCount} product${deletedCount === 1 ? '' : 's'} soft-deleted successfully.`);
         }
         return;
       }
 
-      setMessage(`${deletedIds.length} product${deletedIds.length === 1 ? '' : 's'} soft-deleted successfully.`);
+      setMessage(`${deletedCount} product${deletedCount === 1 ? '' : 's'} soft-deleted successfully.`);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -1110,21 +1134,8 @@ const Products = () => {
   };
 
   const handleExport = async () => {
-    if (selectedProductsForBulkDelete.length) {
-      exportSelectedProductsCsv();
-      return;
-    }
-
     if (!resolvedExportClientId) {
-      const availableClientIds = [
-        ...new Set(filteredProducts.map((product) => product.clientId).filter(Boolean)),
-      ];
-
-      setError(
-        availableClientIds.length > 1
-          ? 'Please select product rows or choose one client before exporting.'
-          : 'Please select product rows, choose a client, or load products for one specific client before exporting.'
-      );
+      setError('Please select a client before exporting products.');
       return;
     }
 
@@ -1160,13 +1171,7 @@ const Products = () => {
   };
 
   const getClientRequiredMessage = (action = 'continue') => {
-    const availableClientIds = [
-      ...new Set(filteredProducts.map((product) => product.clientId).filter(Boolean)),
-    ];
-
-    return availableClientIds.length > 1
-      ? `Please select a client before ${action}, because the current list contains multiple clients.`
-      : `Please select a client first or load products for one specific client before ${action}.`;
+    return `Please select a client before ${action}.`;
   };
 
   const handleImportClick = () => {
@@ -1207,8 +1212,8 @@ const Products = () => {
         skipApiToast: true,
       });
 
-      await parseResponse(response);
-      setMessage('Products CSV imported successfully.');
+      const payload = await parseResponse(response);
+      setMessage(formatProductImportResult(payload));
       setImportFile(null);
       await loadProducts();
     } catch (requestError) {
@@ -1338,17 +1343,19 @@ const Products = () => {
             <button
               type="button"
               onClick={handleExport}
-              disabled={isExporting}
+              disabled={isExporting || !resolvedExportClientId}
               className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              title={!resolvedExportClientId ? 'Select a client before exporting products.' : 'Export selected client products'}
             >
               {isExporting ? <RefreshCw size={15} className="animate-spin" /> : <Download size={15} />}
-              {isExporting ? 'Exporting...' : selectedProductIds.length ? 'Export Selected CSV' : 'Export CSV'}
+              {isExporting ? 'Exporting...' : 'Export CSV'}
             </button>
             <button
               type="button"
               onClick={handleImportClick}
-              disabled={isImporting}
+              disabled={isImporting || !resolvedExportClientId}
               className="inline-flex items-center gap-2 rounded-lg bg-[#132347] px-4 py-2 text-sm font-medium text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:opacity-70"
+              title={!resolvedExportClientId ? 'Select a client before importing products.' : 'Import CSV for selected client'}
             >
               {isImporting ? <RefreshCw size={15} className="animate-spin" /> : <Upload size={15} />}
               {isImporting ? 'Importing...' : 'Import CSV'}
@@ -1366,6 +1373,12 @@ const Products = () => {
               }}
               className="hidden"
             />
+            <div className="max-w-3xl rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
+              CSV must include headers. Required: <span className="font-semibold">product_name, sku</span>. Optional:
+              default_fnsku, length_cm, width_cm, height_cm, weight_kg, hazmat_flag, expiry_tracked, lot_tracked,
+              needs_bundling, bundle_size, active. Column order does not matter. Boolean values can be true/false,
+              yes/no, or 1/0.
+            </div>
           </div>
         </div>
 
@@ -1515,7 +1528,7 @@ const Products = () => {
           <div className="border-t border-gray-200 px-6 py-3 flex items-center justify-between bg-gray-50">
             <p className="text-sm text-gray-500">
               Showing <span className="font-medium text-gray-900">{paginationStart}-{paginationEnd}</span> of{' '}
-              <span className="font-medium text-gray-900">{filteredProducts.length}</span> products
+              <span className="font-medium text-gray-900">{productListMeta.total}</span> products
             </p>
             <div className="flex items-center gap-2 text-sm">
               <button

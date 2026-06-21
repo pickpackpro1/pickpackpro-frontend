@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import LayoutClient from './clientlayout/LayoutClient';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
@@ -12,6 +12,8 @@ import {
   Plus,
   RefreshCw,
   Upload,
+  Download,
+  Trash2,
   X,
 } from 'lucide-react';
 import { getSession } from '../../utils/auth';
@@ -30,6 +32,7 @@ import {
 import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
 
 const API_BASE_URL = '';
+const PRODUCTS_PER_PAGE = 25;
 
 const initialProductForm = {
   productName: '',
@@ -100,11 +103,66 @@ const extractProducts = (payload) => {
     return payload.products;
   }
 
+  if (Array.isArray(payload?.items)) {
+    return payload.items;
+  }
+
+  if (Array.isArray(payload?.rows)) {
+    return payload.rows;
+  }
+
+  if (Array.isArray(payload?.data?.products)) {
+    return payload.data.products;
+  }
+
+  if (Array.isArray(payload?.data?.items)) {
+    return payload.data.items;
+  }
+
+  if (Array.isArray(payload?.data?.rows)) {
+    return payload.data.rows;
+  }
+
   if (Array.isArray(payload?.data)) {
     return payload.data;
   }
 
   return [];
+};
+
+const extractProductPagination = (payload, fallbackRows = []) => {
+  const data = payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+    ? payload.data
+    : payload || {};
+  const limit = Math.max(1, Number(data.limit || PRODUCTS_PER_PAGE) || PRODUCTS_PER_PAGE);
+  const total = Math.max(0, Number(data.total ?? fallbackRows.length) || 0);
+
+  return {
+    total,
+    page: Math.max(1, Number(data.page || 1) || 1),
+    limit,
+    totalPages: Math.max(1, Number(data.totalPages ?? data.total_pages ?? Math.ceil(total / limit)) || 1),
+  };
+};
+
+const formatProductImportResult = (payload = {}) => {
+  const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+  const imported = Number(data.imported ?? data.created ?? 0) || 0;
+  const updated = Number(data.updated ?? 0) || 0;
+  const errors = Array.isArray(data.errors) ? data.errors : [];
+  const baseMessage = data.message || 'Product import completed';
+  const countParts = [
+    `${imported} imported`,
+    updated ? `${updated} updated` : '',
+  ].filter(Boolean);
+  const warningText = errors.length
+    ? ` ${errors.length} row warning${errors.length === 1 ? '' : 's'}: ${errors
+        .slice(0, 3)
+        .map((error) => `row ${error.row || '?'} ${error.message || 'could not be imported'}`)
+        .join('; ')}${errors.length > 3 ? `; +${errors.length - 3} more` : ''}`
+    : '';
+
+  return `${baseMessage}${countParts.length ? ` (${countParts.join(', ')})` : ''}.${warningText}`;
 };
 
 const extractProductDetail = (payload) => {
@@ -228,31 +286,67 @@ const ProductsClient = () => {
   const [products, setProducts] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [productListMeta, setProductListMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: PRODUCTS_PER_PAGE,
+    totalPages: 1,
+  });
+  const [selectedProductIds, setSelectedProductIds] = useState([]);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [showViewModal, setShowViewModal] = useState(false);
   const [showFormModal, setShowFormModal] = useState(false);
+  const [deleteProduct, setDeleteProduct] = useState(null);
+  const [bulkDeleteProducts, setBulkDeleteProducts] = useState([]);
   const [productForm, setProductForm] = useState(initialProductForm);
   const [editingProductId, setEditingProductId] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [deletingProductId, setDeletingProductId] = useState('');
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importFile, setImportFile] = useState(null);
   const [productFormError, setProductFormError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const importInputRef = useRef(null);
 
   const loadProducts = async () => {
     try {
       setIsLoading(true);
       setError('');
-      const response = await fetch(`${API_BASE_URL}/api/products`, {
+      const query = new URLSearchParams({
+        page: String(currentPage),
+        limit: String(PRODUCTS_PER_PAGE),
+        status: statusFilter || 'all',
+      });
+      const trimmedSearch = debouncedSearchQuery.trim();
+      if (trimmedSearch) {
+        query.set('search', trimmedSearch);
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/products?${query.toString()}`, {
         method: 'GET',
         headers: buildHeaders(),
         cache: 'no-store',
         skipApiGetCache: true,
       });
       const payload = await parseResponse(response);
-      setProducts(extractProducts(payload).map(normalizeProduct));
+      const productRows = extractProducts(payload).map(normalizeProduct);
+      setProducts(productRows);
+      setProductListMeta(extractProductPagination(payload, productRows));
     } catch (requestError) {
       setError(requestError.message);
       setProducts([]);
+      setProductListMeta({
+        total: 0,
+        page: 1,
+        limit: PRODUCTS_PER_PAGE,
+        totalPages: 1,
+      });
     } finally {
       setIsLoading(false);
     }
@@ -260,7 +354,7 @@ const ProductsClient = () => {
 
   useEffect(() => {
     loadProducts();
-  }, []);
+  }, [currentPage, debouncedSearchQuery, statusFilter]);
 
   useEffect(() => {
     let refreshTimer = null;
@@ -281,26 +375,83 @@ const ProductsClient = () => {
       window.clearTimeout(refreshTimer);
       window.removeEventListener(API_MUTATION_EVENT_NAME, scheduleProductRefresh);
     };
-  }, []);
+  }, [currentPage, debouncedSearchQuery, statusFilter]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearchQuery(searchQuery);
-    }, 250);
+    }, 300);
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  const filteredProducts = useMemo(
-    () =>
-      products.filter((product) => {
-        const term = debouncedSearchQuery.toLowerCase();
-        return (
-          product.sku.toLowerCase().includes(term) ||
-          product.productName.toLowerCase().includes(term)
-        );
-      }),
-    [products, debouncedSearchQuery]
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearchQuery, statusFilter]);
+
+  const filteredProducts = products;
+  const totalProductPages = Math.max(1, Number(productListMeta.totalPages || 1) || 1);
+  const paginationStart = productListMeta.total ? (currentPage - 1) * PRODUCTS_PER_PAGE + 1 : 0;
+  const paginationEnd = Math.min((currentPage - 1) * PRODUCTS_PER_PAGE + products.length, productListMeta.total);
+  const paginationPages = useMemo(() => {
+    const maxVisiblePages = 5;
+    const firstPage = Math.max(1, currentPage - 2);
+    const lastPage = Math.min(totalProductPages, firstPage + maxVisiblePages - 1);
+    const adjustedFirstPage = Math.max(1, lastPage - maxVisiblePages + 1);
+
+    return Array.from({ length: lastPage - adjustedFirstPage + 1 }, (_, index) => adjustedFirstPage + index);
+  }, [currentPage, totalProductPages]);
+
+  useEffect(() => {
+    setCurrentPage((page) => Math.min(Math.max(page, 1), totalProductPages));
+  }, [totalProductPages]);
+
+  const visibleProductIds = useMemo(
+    () => products.map((product) => String(product.id || '').trim()).filter(Boolean),
+    [products]
   );
+  const selectedProductsForBulkDelete = useMemo(() => {
+    const selectedIds = new Set(selectedProductIds);
+    return products.filter((product) => selectedIds.has(String(product.id || '').trim()));
+  }, [products, selectedProductIds]);
+  const selectedVisibleProductCount = visibleProductIds.filter((productId) =>
+    selectedProductIds.includes(productId)
+  ).length;
+  const allVisibleProductsSelected =
+    visibleProductIds.length > 0 && selectedVisibleProductCount === visibleProductIds.length;
+
+  useEffect(() => {
+    setSelectedProductIds((currentIds) => {
+      const availableIds = new Set(visibleProductIds);
+      return currentIds.filter((productId) => availableIds.has(productId));
+    });
+  }, [visibleProductIds]);
+
+  useEffect(() => {
+    setSelectedProductIds([]);
+  }, [currentPage, debouncedSearchQuery, statusFilter]);
+
+  const toggleProductSelection = (productId) => {
+    const normalizedProductId = String(productId || '').trim();
+    if (!normalizedProductId) return;
+
+    setSelectedProductIds((currentIds) =>
+      currentIds.includes(normalizedProductId)
+        ? currentIds.filter((currentId) => currentId !== normalizedProductId)
+        : [...currentIds, normalizedProductId]
+    );
+  };
+
+  const toggleAllVisibleProducts = () => {
+    if (!visibleProductIds.length) return;
+
+    setSelectedProductIds((currentIds) => {
+      if (allVisibleProductsSelected) {
+        return currentIds.filter((productId) => !visibleProductIds.includes(productId));
+      }
+
+      return [...new Set([...currentIds, ...visibleProductIds])];
+    });
+  };
 
   const handleViewProduct = (product) => {
     setError('');
@@ -449,7 +600,197 @@ const ProductsClient = () => {
     }
   };
 
-  const totalProducts = products.length;
+  const openDeleteProductConfirm = (product) => {
+    const productId = String(product?.id || '').trim();
+
+    if (!productId) {
+      setError('Product id is missing, delete cannot continue.');
+      return;
+    }
+
+    setError('');
+    setMessage('');
+    setDeleteProduct(product);
+  };
+
+  const closeDeleteProductConfirm = () => {
+    if (deletingProductId) return;
+    setDeleteProduct(null);
+  };
+
+  const openBulkDeleteConfirm = () => {
+    if (!selectedProductIds.length) return;
+
+    const productsToDelete = selectedProductsForBulkDelete;
+
+    if (!productsToDelete.length) {
+      setSelectedProductIds([]);
+      return;
+    }
+
+    setError('');
+    setMessage('');
+    setBulkDeleteProducts(productsToDelete);
+  };
+
+  const closeBulkDeleteConfirm = () => {
+    if (isBulkDeleting) return;
+    setBulkDeleteProducts([]);
+  };
+
+  const handleDeleteProduct = async () => {
+    const productId = String(deleteProduct?.id || '').trim();
+
+    if (!productId) {
+      setError('Product id is missing, delete cannot continue.');
+      setDeleteProduct(null);
+      return;
+    }
+
+    try {
+      setError('');
+      setMessage('');
+      setDeletingProductId(productId);
+      const response = await fetch(`${API_BASE_URL}/api/products/${encodeURIComponent(productId)}`, {
+        method: 'DELETE',
+        headers: buildHeaders(),
+        skipApiToast: true,
+      });
+      await parseResponse(response);
+      setMessage('Product deleted successfully.');
+      setDeleteProduct(null);
+      setSelectedProductIds((currentIds) => currentIds.filter((currentId) => currentId !== productId));
+      if (selectedProduct && String(selectedProduct.id || '') === productId) {
+        setSelectedProduct(null);
+        setShowViewModal(false);
+      }
+      await loadProducts();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setDeletingProductId('');
+    }
+  };
+
+  const handleBulkDeleteProducts = async () => {
+    const productsToDelete = bulkDeleteProducts.length ? bulkDeleteProducts : selectedProductsForBulkDelete;
+    const productIds = productsToDelete
+      .map((product) => String(product?.id || '').trim())
+      .filter(Boolean);
+
+    if (!productIds.length) {
+      setBulkDeleteProducts([]);
+      setSelectedProductIds([]);
+      return;
+    }
+
+    try {
+      setError('');
+      setMessage('');
+      setIsBulkDeleting(true);
+      const response = await fetch(`${API_BASE_URL}/api/products/bulk-delete`, {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify({ productIds }),
+        skipApiToast: true,
+      });
+      const payload = await parseResponse(response);
+      const resultData = payload?.data || payload || {};
+      const deletedIds = Array.isArray(resultData.deletedIds)
+        ? resultData.deletedIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : productIds;
+      const skippedIds = Array.isArray(resultData.skippedIds)
+        ? resultData.skippedIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+      const deletedCount = Number(resultData.deletedCount ?? deletedIds.length) || deletedIds.length;
+
+      setSelectedProductIds((currentIds) => currentIds.filter((productId) => !deletedIds.includes(productId)));
+      if (selectedProduct && deletedIds.includes(String(selectedProduct.id || '').trim())) {
+        setSelectedProduct(null);
+        setShowViewModal(false);
+      }
+      setBulkDeleteProducts([]);
+      await loadProducts();
+
+      if (skippedIds.length) {
+        setError(`${skippedIds.length} product${skippedIds.length === 1 ? '' : 's'} could not be deleted.`);
+      }
+      setMessage(`${deletedCount} product${deletedCount === 1 ? '' : 's'} deleted successfully.`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsBulkDeleting(false);
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      setIsExporting(true);
+      setError('');
+      const response = await fetch(`${API_BASE_URL}/api/products/export`, {
+        method: 'GET',
+        headers: buildHeaders(),
+      });
+
+      if (!response.ok) {
+        await parseResponse(response);
+        return;
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'my-products.csv';
+      link.click();
+      window.URL.revokeObjectURL(url);
+      setMessage('Products CSV export download started.');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleImportClick = () => {
+    if (isImporting) return;
+    importInputRef.current?.click();
+  };
+
+  const handleImport = async (fileOverride = null) => {
+    const csvFile = fileOverride || importFile;
+
+    if (!csvFile) {
+      setError('Please select a CSV file first for import.');
+      return;
+    }
+
+    try {
+      setIsImporting(true);
+      setError('');
+      setMessage('');
+      const formData = new FormData();
+      formData.append('file', csvFile);
+
+      const response = await fetch(`${API_BASE_URL}/api/products/import`, {
+        method: 'POST',
+        headers: buildHeaders(),
+        body: formData,
+        skipApiToast: true,
+      });
+
+      const payload = await parseResponse(response);
+      setMessage(formatProductImportResult(payload));
+      setImportFile(null);
+      await loadProducts();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const totalProducts = productListMeta.total;
   const flaggedProducts = products.filter((product) => product.flags.length).length;
   const activeProducts = products.filter((product) => product.active).length;
 
@@ -534,39 +875,124 @@ const ProductsClient = () => {
             </button>
           </div>
 
-          <div className="flex items-center justify-between mb-6">
-            <div className="relative w-full max-w-sm">
-              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search products..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full rounded-lg border border-gray-200 pl-9 pr-4 py-2.5 text-sm text-[#132347] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
-              />
-            </div>
-          </div>
-
           {error ? (
             <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {error}
             </p>
           ) : null}
+          {message ? (
+            <p className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+              {message}
+            </p>
+          ) : null}
 
           <div className="bg-white rounded-2xl border border-[#dce5f1] overflow-hidden shadow-sm">
+            <div className="border-b border-gray-100 bg-white px-6 py-4">
+              <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
+                  <div className="relative w-full max-w-sm">
+                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="text"
+                      placeholder="Search products..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-4 text-sm text-[#132347] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                    />
+                  </div>
+                  <select
+                    value={statusFilter}
+                    onChange={(event) => setStatusFilter(event.target.value)}
+                    className="rounded-lg border border-gray-200 px-3 py-2.5 text-sm text-[#132347] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
+                  >
+                    <option value="all">All Status</option>
+                    <option value="active">Active Only</option>
+                    <option value="inactive">Inactive Only</option>
+                  </select>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleExport}
+                    disabled={isExporting}
+                    className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isExporting ? <RefreshCw size={15} className="animate-spin" /> : <Download size={15} />}
+                    {isExporting ? 'Exporting...' : 'Export CSV'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleImportClick}
+                    disabled={isImporting}
+                    className="inline-flex items-center gap-2 rounded-lg border border-[#132347] bg-[#132347] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:opacity-70"
+                  >
+                    {isImporting ? <RefreshCw size={15} className="animate-spin" /> : <Upload size={15} />}
+                    {isImporting ? 'Importing...' : 'Import CSV'}
+                  </button>
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={async (event) => {
+                      const input = event.currentTarget;
+                      const file = input.files?.[0] || null;
+                      setImportFile(file);
+                      if (file) await handleImport(file);
+                      input.value = '';
+                    }}
+                    className="hidden"
+                  />
+                </div>
+              </div>
+              <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
+                CSV must include headers. Required: <span className="font-semibold">product_name, sku</span>. Optional:
+                default_fnsku, length_cm, width_cm, height_cm, weight_kg, hazmat_flag, expiry_tracked, lot_tracked,
+                needs_bundling, bundle_size, active. Column order does not matter. Boolean values can be true/false,
+                yes/no, or 1/0.
+              </div>
+            </div>
+
+            {selectedProductIds.length ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-red-100 bg-red-50 px-6 py-3">
+                <p className="text-sm font-medium text-red-700">
+                  {selectedProductIds.length} product{selectedProductIds.length === 1 ? '' : 's'} selected
+                </p>
+                <button
+                  type="button"
+                  onClick={openBulkDeleteConfirm}
+                  disabled={isBulkDeleting}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  <Trash2 size={14} />
+                  Delete Selected
+                </button>
+              </div>
+            ) : null}
+
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[980px] table-fixed">
+              <table className="w-full min-w-[1060px] table-fixed">
                 <colgroup>
+                  <col className="w-[5%]" />
                   <col className="w-[10%]" />
                   <col className="w-[15%]" />
                   <col className="w-[13%]" />
                   <col className="w-[11%]" />
                   <col className="w-[10%]" />
-                  <col className="w-[29%]" />
+                  <col className="w-[24%]" />
                   <col className="w-[12%]" />
                 </colgroup>
                 <thead>
                   <tr className="border-b border-[#e8eef7] bg-[#f8fbff]">
+                    <th className="px-5 py-3 text-left">
+                      <input
+                        type="checkbox"
+                        checked={allVisibleProductsSelected}
+                        disabled={!visibleProductIds.length || isLoading}
+                        onChange={toggleAllVisibleProducts}
+                        aria-label="Select all visible products"
+                        className="h-4 w-4 rounded border-gray-300 text-[#ff6900] focus:ring-[#ff6900]"
+                      />
+                    </th>
                     <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">
                       SKU
                     </th>
@@ -593,15 +1019,28 @@ const ProductsClient = () => {
                 <tbody>
                   {isLoading ? (
                     <tr>
-                      <td colSpan="7" className="py-10 px-6 text-center text-sm text-gray-500">
+                      <td colSpan="8" className="py-10 px-6 text-center text-sm text-gray-500">
                         <LoadingState label="Loading products..." />
                       </td>
                     </tr>
-                  ) : filteredProducts.map((product) => (
+                  ) : filteredProducts.length ? filteredProducts.map((product) => {
+                    const productId = String(product.id || '').trim();
+                    const isSelected = selectedProductIds.includes(productId);
+
+                    return (
                     <tr
                       key={product.id}
-                      className="border-b border-gray-100 transition-colors last:border-b-0 hover:bg-gray-50/30"
+                      className={`border-b border-gray-100 transition-colors last:border-b-0 ${isSelected ? 'bg-orange-50/40 hover:bg-orange-50/70' : 'hover:bg-gray-50/30'}`}
                     >
+                      <td className="px-5 py-3 align-middle">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleProductSelection(productId)}
+                          aria-label={`Select ${product.productName}`}
+                          className="h-4 w-4 rounded border-gray-300 text-[#ff6900] focus:ring-[#ff6900]"
+                        />
+                      </td>
                       <td className="px-5 py-3 align-middle">
                         <span className="block truncate text-sm font-semibold text-blue-600">{product.sku}</span>
                       </td>
@@ -655,25 +1094,68 @@ const ProductsClient = () => {
                           >
                             <Edit3 size={14} />
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => openDeleteProductConfirm(product)}
+                            disabled={deletingProductId === String(product.id || '') || isBulkDeleting}
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-100 bg-white text-red-500 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            title="Delete product"
+                            aria-label={`Delete ${product.productName}`}
+                          >
+                            <Trash2 size={14} />
+                          </button>
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  }) : (
+                    <tr>
+                      <td colSpan="8" className="py-10 px-6 text-center text-sm text-gray-500">
+                        No products found.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
 
             <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 bg-gray-50/30">
               <p className="text-sm text-gray-500">
-                Showing <span className="font-medium text-gray-700">{filteredProducts.length}</span> of{' '}
-                <span className="font-medium text-gray-700">{products.length}</span> products
+                Showing <span className="font-medium text-gray-700">{paginationStart}-{paginationEnd}</span> of{' '}
+                <span className="font-medium text-gray-700">{productListMeta.total}</span> products
               </p>
-              <div className="flex items-center gap-2 text-xs text-gray-500">
-                <button type="button" className="rounded-md border border-[#d8e0ee] px-2 py-1">{'<'}</button>
-                <button type="button" className="rounded-md bg-[#ff8c2f] px-2 py-1 text-white">1</button>
-                <button type="button" className="rounded-md border border-[#d8e0ee] px-2 py-1">2</button>
-                <button type="button" className="rounded-md border border-[#d8e0ee] px-2 py-1">3</button>
-                <button type="button" className="rounded-md border border-[#d8e0ee] px-2 py-1">{'>'}</button>
+              <div className="flex items-center gap-2 text-sm">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                  disabled={currentPage === 1 || isLoading}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                {paginationPages.map((page) => (
+                  <button
+                    key={page}
+                    type="button"
+                    onClick={() => setCurrentPage(page)}
+                    disabled={isLoading}
+                    className={`min-w-8 rounded-lg px-3 py-1.5 font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${
+                      currentPage === page
+                        ? 'bg-[#ff6900] text-white'
+                        : 'border border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    {page}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((page) => Math.min(totalProductPages, page + 1))}
+                  disabled={currentPage === totalProductPages || isLoading}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
               </div>
             </div>
           </div>
@@ -764,6 +1246,121 @@ const ProductsClient = () => {
                   {selectedProduct.needsBundling ? `Yes (${selectedProduct.bundleSize})` : 'No'}
                 </p>
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {bulkDeleteProducts.length ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
+            <div className="flex items-start gap-4 border-b border-gray-100 px-6 py-5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-red-50 text-red-600">
+                <Trash2 size={20} />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-lg font-semibold text-[#132347]">Delete selected products?</h3>
+                <p className="mt-1 text-sm leading-6 text-gray-500">
+                  They will be removed from product lists and shipment selection, but existing shipment history will remain unchanged.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeBulkDeleteConfirm}
+                disabled={isBulkDeleting}
+                className="ml-auto rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label="Close bulk delete confirmation"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="px-6 py-4">
+              <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-gray-100 bg-gray-50 p-3 text-sm">
+                {bulkDeleteProducts.slice(0, 6).map((product) => (
+                  <div key={product.id || product.sku} className="rounded-md bg-white px-3 py-2">
+                    <p className="font-semibold text-gray-900">{product.productName || 'Unnamed Product'}</p>
+                    <p className="mt-0.5 text-xs text-gray-500">SKU: {product.sku || '-'}</p>
+                  </div>
+                ))}
+                {bulkDeleteProducts.length > 6 ? (
+                  <p className="px-2 py-1 text-xs font-medium text-gray-500">
+                    + {bulkDeleteProducts.length - 6} more selected products
+                  </p>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t border-gray-100 bg-gray-50 px-6 py-4">
+              <button
+                type="button"
+                onClick={closeBulkDeleteConfirm}
+                disabled={isBulkDeleting}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleBulkDeleteProducts}
+                disabled={isBulkDeleting}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isBulkDeleting ? 'Deleting...' : 'Delete Products'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteProduct ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
+            <div className="flex items-start gap-4 border-b border-gray-100 px-6 py-5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-red-50 text-red-600">
+                <Trash2 size={20} />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-lg font-semibold text-[#132347]">Delete this product?</h3>
+                <p className="mt-1 text-sm leading-6 text-gray-500">
+                  It will be removed from product lists and shipment selection, but existing shipment history will remain unchanged.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeDeleteProductConfirm}
+                disabled={Boolean(deletingProductId)}
+                className="ml-auto rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label="Close delete confirmation"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="px-6 py-4">
+              <div className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3 text-sm">
+                <p className="font-semibold text-gray-900">{deleteProduct.productName || 'Unnamed Product'}</p>
+                <p className="mt-1 text-gray-500">SKU: {deleteProduct.sku || '-'}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t border-gray-100 bg-gray-50 px-6 py-4">
+              <button
+                type="button"
+                onClick={closeDeleteProductConfirm}
+                disabled={Boolean(deletingProductId)}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteProduct}
+                disabled={Boolean(deletingProductId)}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {deletingProductId ? 'Deleting...' : 'Delete Product'}
+              </button>
             </div>
           </div>
         </div>
