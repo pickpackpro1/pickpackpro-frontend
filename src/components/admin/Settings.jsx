@@ -579,6 +579,7 @@ const Settings = () => {
 
   // General Settings
   const [companyDetails, setCompanyDetails] = useState(initialCompanyDetails);
+  const [savedCompanyDetails, setSavedCompanyDetails] = useState(initialCompanyDetails);
 
   const [emailConfig, setEmailConfig] = useState(initialEmailConfig);
 
@@ -988,7 +989,7 @@ const Settings = () => {
       payload ||
       {};
 
-    const address = settings?.companyAddress || settings?.address || {};
+    const address = settings?.companyAddress || settings?.company_address || settings?.address || {};
     const bankDetails = settings?.bankDetails || settings?.bank_details || {};
     const emailConfiguration =
       settings?.emailConfiguration ||
@@ -1003,25 +1004,30 @@ const Settings = () => {
     const backendWorkingDays = settings?.workingDays || settings?.working_days || {};
 
     const addressParts = [
-      address?.street,
+      address?.line1 || address?.street,
+      address?.line2,
       address?.city,
       address?.postcode,
       address?.country,
     ].filter(Boolean);
 
-    setCompanyDetails({
+    const nextCompanyDetails = {
       companyName: settings?.companyName || settings?.company_name || '',
       vatNumber: settings?.vatNumber || settings?.vat_number || '',
       companyAddress: addressParts.join(', '),
-      invoicePaymentTermsDays: String(
-        settings?.invoicePaymentTermsDays ||
-          settings?.invoice_payment_terms_days ||
-          ''
-      ),
+      invoicePaymentTermsDays: String(settings?.invoicePaymentTermsDays ?? settings?.invoice_payment_terms_days ?? ''),
       bankName: bankDetails?.bankName || bankDetails?.bank_name || '',
       sortCode: bankDetails?.sortCode || bankDetails?.sort_code || '',
-      accountNumber: bankDetails?.accountNumber || bankDetails?.account_number || '',
-    });
+      accountNumber:
+        bankDetails?.accountNo ||
+        bankDetails?.account_no ||
+        bankDetails?.accountNumber ||
+        bankDetails?.account_number ||
+        '',
+    };
+
+    setCompanyDetails(nextCompanyDetails);
+    setSavedCompanyDetails(nextCompanyDetails);
 
     setEmailConfig({
       fromName: emailConfiguration?.fromName || emailConfiguration?.from_name || '',
@@ -1111,29 +1117,72 @@ const Settings = () => {
     }
   };
 
-  const buildSettingsPayload = () => ({
-    companyName: companyDetails.companyName.trim() || undefined,
-    companyAddress: companyDetails.companyAddress.trim()
-      ? {
-          street: companyDetails.companyAddress.trim(),
+  const hasSettingChanged = (currentValue = '', savedValue = '') =>
+    String(currentValue ?? '').trim() !== String(savedValue ?? '').trim();
+
+  const buildCompanyDetailsPayload = () => {
+    const payload = {};
+
+    if (hasSettingChanged(companyDetails.companyName, savedCompanyDetails.companyName)) {
+      const companyName = companyDetails.companyName.trim();
+      if (companyName) payload.companyName = companyName;
+    }
+
+    if (hasSettingChanged(companyDetails.vatNumber, savedCompanyDetails.vatNumber)) {
+      const vatNumber = companyDetails.vatNumber.trim();
+      if (vatNumber) payload.vatNumber = vatNumber;
+    }
+
+    if (hasSettingChanged(companyDetails.companyAddress, savedCompanyDetails.companyAddress)) {
+      const companyAddress = companyDetails.companyAddress.trim();
+      if (companyAddress) {
+        payload.companyAddress = {
+          line1: companyAddress,
           city: '',
           postcode: '',
           country: '',
-        }
-      : undefined,
-    vatNumber: companyDetails.vatNumber.trim() || undefined,
-    bankDetails: {
-      bankName: companyDetails.bankName.trim() || undefined,
-      accountName: companyDetails.companyName.trim() || undefined,
-      sortCode: companyDetails.sortCode.trim() || undefined,
-      accountNumber: companyDetails.accountNumber.trim() || undefined,
+        };
+      }
+    }
+
+    if (hasSettingChanged(companyDetails.invoicePaymentTermsDays, savedCompanyDetails.invoicePaymentTermsDays)) {
+      const invoicePaymentTermsDays = Number(companyDetails.invoicePaymentTermsDays);
+      if (!Number.isFinite(invoicePaymentTermsDays) || invoicePaymentTermsDays < 1) {
+        throw new Error('Invoice payment terms must be at least 1 day.');
+      }
+      payload.invoicePaymentTermsDays = invoicePaymentTermsDays;
+    }
+
+    const bankChanged =
+      hasSettingChanged(companyDetails.bankName, savedCompanyDetails.bankName) ||
+      hasSettingChanged(companyDetails.sortCode, savedCompanyDetails.sortCode) ||
+      hasSettingChanged(companyDetails.accountNumber, savedCompanyDetails.accountNumber);
+
+    if (bankChanged) {
+      payload.bankDetails = {
+        bankName: companyDetails.bankName.trim(),
+        sortCode: companyDetails.sortCode.trim(),
+        accountNo: companyDetails.accountNumber.trim(),
+        accountName: companyDetails.companyName.trim(),
+      };
+    }
+
+    return payload;
+  };
+
+  const buildEmailConfigurationPayload = () => ({
+    emailConfiguration: {
+      fromName: emailConfig.fromName.trim() || undefined,
+      fromEmail: emailConfig.fromEmail.trim() || undefined,
+      replyToEmail: emailConfig.replyToEmail.trim() || undefined,
+      resendApiKey: emailConfig.resendApiKey.trim() || undefined,
     },
+  });
+
+  const buildNotificationSettingsPayload = () => ({
     workingDays,
     dispatchLeadTimeHours: dispatchLeadTimeHours
       ? Number(dispatchLeadTimeHours)
-      : undefined,
-    invoicePaymentTermsDays: companyDetails.invoicePaymentTermsDays
-      ? Number(companyDetails.invoicePaymentTermsDays)
       : undefined,
     notificationToggles: {
       shipmentReceived: Boolean(
@@ -1156,23 +1205,37 @@ const Settings = () => {
         triggers.find((trigger) => trigger.label === 'Invoice overdue reminder')?.emailEnabled
       ),
     },
-    emailConfiguration: {
-      fromName: emailConfig.fromName.trim() || undefined,
-      fromEmail: emailConfig.fromEmail.trim() || undefined,
-      replyToEmail: emailConfig.replyToEmail.trim() || undefined,
-      resendApiKey: emailConfig.resendApiKey.trim() || undefined,
-    },
   });
+
+  const buildSettingsPayload = (sourceLabel = 'Settings') => {
+    const normalizedLabel = String(sourceLabel || '').toLowerCase();
+
+    if (normalizedLabel.includes('company')) return buildCompanyDetailsPayload();
+    if (normalizedLabel.includes('email')) return buildEmailConfigurationPayload();
+    if (normalizedLabel.includes('notification')) return buildNotificationSettingsPayload();
+
+    return {
+      ...buildCompanyDetailsPayload(),
+      ...buildEmailConfigurationPayload(),
+      ...buildNotificationSettingsPayload(),
+    };
+  };
 
   const handleSaveSettings = async (sourceLabel = 'Settings') => {
     try {
       setIsSavingSettings(true);
+      const settingsPayload = buildSettingsPayload(sourceLabel);
+      if (!Object.keys(settingsPayload).length) {
+        showToast('success', `${sourceLabel} already up to date.`);
+        return;
+      }
       const response = await fetch(`${API_BASE_URL}/api/settings`, {
         method: 'PATCH',
         headers: buildHeaders(true),
-        body: JSON.stringify(buildSettingsPayload()),
+        body: JSON.stringify(settingsPayload),
       });
       await parseResponse(response);
+      await loadSettings();
       showToast('success', `${sourceLabel} updated successfully.`);
     } catch (error) {
       showToast('error', error.message || `Failed to update ${sourceLabel.toLowerCase()}.`);
@@ -1726,6 +1789,7 @@ const Settings = () => {
                           </label>
                           <input
                             type="number"
+                            min="1"
                             value={companyDetails.invoicePaymentTermsDays}
                             onChange={(e) =>
                               setCompanyDetails({

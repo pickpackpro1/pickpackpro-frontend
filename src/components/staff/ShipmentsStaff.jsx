@@ -328,17 +328,17 @@ const getShipmentOrderData = (shipment = {}) => {
       getNoteValue(notes, "Tracking:")
     ),
     boxes: firstPresent(
+      getNoteValue(notes, "Boxes:"),
+      getNoteValue(notes, "Boxes/Pallets:"),
       shipment?.boxCount,
       shipment?.box_count,
       shipment?.boxesPallets,
-      shipment?.boxes_pallets,
-      getNoteValue(notes, "Boxes:"),
-      getNoteValue(notes, "Boxes/Pallets:")
+      shipment?.boxes_pallets
     ),
     pallets: firstPresent(
+      getNoteValue(notes, "Pallets:"),
       shipment?.palletCount,
-      shipment?.pallet_count,
-      getNoteValue(notes, "Pallets:")
+      shipment?.pallet_count
     ),
   };
 };
