@@ -6,6 +6,7 @@ import { getSession } from '../../utils/auth';
 import { Check, Package, AlertCircle, RefreshCw } from 'lucide-react';
 
 const API_BASE_URL = '';
+const RECEIVING_PAGE_SIZE = 25;
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();
@@ -39,6 +40,8 @@ const extractShipments = (payload) =>
     ? payload
     : Array.isArray(payload?.shipments)
       ? payload.shipments
+      : Array.isArray(payload?.data?.shipments)
+        ? payload.data.shipments
       : Array.isArray(payload?.data?.rows)
         ? payload.data.rows
         : Array.isArray(payload?.data)
@@ -168,23 +171,32 @@ const Receiving = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [queueMeta, setQueueMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: RECEIVING_PAGE_SIZE,
+    totalPages: 1,
+  });
 
-  const loadPendingArrivals = async () => {
+  const loadPendingArrivals = async ({ page = currentPage } = {}) => {
     try {
       setIsLoading(true);
       setError('');
-      const responses = await Promise.all(
-        RECEIVING_QUEUE_STATUSES.map((status) =>
-          fetch(`${API_BASE_URL}/api/shipments?status=${encodeURIComponent(status)}&limit=100`, {
-            method: 'GET',
-            headers: buildHeaders(),
-          })
-        )
-      );
-      const payloads = await Promise.all(responses.map((response) => parseResponse(response)));
+      const query = new URLSearchParams({
+        page: String(page),
+        limit: String(RECEIVING_PAGE_SIZE),
+        status: 'all',
+      });
+      const response = await fetch(`${API_BASE_URL}/api/receiving/queue?${query.toString()}`, {
+        method: 'GET',
+        headers: buildHeaders(),
+        cache: 'no-store',
+      });
+      const payload = await parseResponse(response);
       const shipmentsById = new Map();
 
-      payloads.flatMap(extractShipments).forEach((shipment, index) => {
+      extractShipments(payload).forEach((shipment, index) => {
         const status = String(shipment?.status || '').toLowerCase();
         if (!RECEIVING_QUEUE_STATUSES.includes(status)) return;
 
@@ -193,6 +205,15 @@ const Receiving = () => {
       });
 
       setPendingArrivals([...shipmentsById.values()]);
+      const source = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+      const total = Number(source.total || shipmentsById.size || 0);
+      const limit = Number(source.limit || RECEIVING_PAGE_SIZE) || RECEIVING_PAGE_SIZE;
+      setQueueMeta({
+        total,
+        page: Number(source.page || page || 1) || 1,
+        limit,
+        totalPages: Number(source.totalPages || source.total_pages || Math.ceil(total / limit)) || 1,
+      });
     } catch (requestError) {
       setError(requestError.message);
       setPendingArrivals([]);
@@ -202,8 +223,8 @@ const Receiving = () => {
   };
 
   useEffect(() => {
-    loadPendingArrivals();
-  }, []);
+    loadPendingArrivals({ page: currentPage });
+  }, [currentPage]);
 
   const handleSelectShipment = async (shipment) => {
     try {
@@ -263,6 +284,16 @@ const Receiving = () => {
     }
   };
 
+  const totalPages = Math.max(1, Number(queueMeta.totalPages || 1) || 1);
+  const paginationStart = queueMeta.total ? (currentPage - 1) * RECEIVING_PAGE_SIZE + 1 : 0;
+  const paginationEnd = Math.min((currentPage - 1) * RECEIVING_PAGE_SIZE + pendingArrivals.length, queueMeta.total);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   return (
     <Layout>
       <FullPageLoader show={isLoading} label="Loading arrivals..." />
@@ -271,7 +302,7 @@ const Receiving = () => {
           <div>
             <h1 className="text-2xl font-semibold text-gray-900">Receiving</h1>
           </div>
-          <button onClick={loadPendingArrivals} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+          <button onClick={() => loadPendingArrivals()} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
             <RefreshCw size={15} />
             Refresh
           </button>
@@ -321,6 +352,28 @@ const Receiving = () => {
                 ))}
               </tbody>
             </table>
+          </div>
+          <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-6 py-4 text-sm text-gray-500 md:flex-row md:items-center md:justify-between">
+            <span>Showing {paginationStart}-{paginationEnd} of {queueMeta.total} arrivals</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                disabled={currentPage === 1 || isLoading}
+                className="rounded-lg border border-gray-200 px-3 py-1.5 font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Previous
+              </button>
+              <span className="text-xs font-semibold text-gray-500">Page {currentPage} of {totalPages}</span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                disabled={currentPage === totalPages || isLoading}
+                className="rounded-lg border border-gray-200 px-3 py-1.5 font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </div>
 

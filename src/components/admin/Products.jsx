@@ -1362,7 +1362,7 @@ const Products = () => {
                 {isImporting ? <RefreshCw size={15} className="animate-spin" /> : <Upload size={15} />}
                 {isImporting ? 'Importing...' : 'Import CSV'}
               </button>
-              <div className="pointer-events-none absolute left-[-90%] top-full z-50 mt-2 hidden w-[400px] -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-xs leading-5 text-slate-700 shadow-lg group-hover:block group-focus-within:block">
+              <div className="pointer-events-none absolute left-[80%] top-full z-50 mt-2 hidden w-[400px] -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-xs leading-5 text-slate-700 shadow-lg group-hover:block group-focus-within:block">
                 {CSV_IMPORT_TOOLTIP}
               </div>
             </div>

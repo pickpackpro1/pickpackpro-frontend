@@ -88,6 +88,14 @@ const extractClients = (payload) => {
     return payload.clients;
   }
 
+  if (Array.isArray(payload?.data?.clients)) {
+    return payload.data.clients;
+  }
+
+  if (Array.isArray(payload?.data?.rows)) {
+    return payload.data.rows;
+  }
+
   if (Array.isArray(payload?.data)) {
     return payload.data;
   }
@@ -467,6 +475,13 @@ const Clients = () => {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+  const [clientListMeta, setClientListMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: 10,
+    totalPages: 1,
+  });
   const pageSize = 10;
 
   const loadClients = async () => {
@@ -474,39 +489,41 @@ const Clients = () => {
       setIsLoading(true);
       setError('');
 
-      const buildClientUrl = (isActiveValue) => {
-        const query = new URLSearchParams();
+      const query = new URLSearchParams({
+        page: String(currentPage),
+        limit: String(pageSize),
+        status: statusFilter === 'inactive' ? 'suspended' : statusFilter,
+      });
 
-        if (tierFilter !== 'all') {
-          query.set('tier', tierFilter);
-        }
+      if (tierFilter !== 'all') query.set('tier', tierFilter);
+      if (debouncedSearchTerm.trim()) query.set('search', debouncedSearchTerm.trim());
 
-        if (isActiveValue !== null) {
-          query.set('isActive', isActiveValue);
-        }
-
-        return `${API_BASE_URL}/api/clients${query.toString() ? `?${query.toString()}` : ''}`;
-      };
-
-      const activeFilters =
-        statusFilter === 'all'
-          ? ['true', 'false']
-          : [statusFilter === 'active' ? 'true' : 'false'];
-      const clientGroups = await Promise.all(
-        activeFilters.map(async (isActiveValue) => {
-          const response = await fetch(buildClientUrl(isActiveValue), {
-            method: 'GET',
-            headers: buildHeaders(),
-          });
-          const payload = await parseResponse(response);
-          return extractClients(payload);
-        })
-      );
-
-      setClients(mergeClientsById(clientGroups).map(normalizeClient));
+      const response = await fetch(`${API_BASE_URL}/api/clients?${query.toString()}`, {
+        method: 'GET',
+        headers: buildHeaders(),
+        cache: 'no-store',
+      });
+      const payload = await parseResponse(response);
+      const rows = extractClients(payload).map(normalizeClient);
+      const source = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+      const total = Number(source.total || rows.length || 0);
+      const limit = Number(source.limit || pageSize) || pageSize;
+      setClients(rows);
+      setClientListMeta({
+        total,
+        page: Number(source.page || currentPage || 1) || 1,
+        limit,
+        totalPages: Number(source.totalPages || source.total_pages || Math.ceil(total / limit)) || 1,
+      });
     } catch (requestError) {
       setError(requestError.message);
       setClients([]);
+      setClientListMeta({
+        total: 0,
+        page: 1,
+        limit: pageSize,
+        totalPages: 1,
+      });
     } finally {
       setIsLoading(false);
     }
@@ -514,7 +531,15 @@ const Clients = () => {
 
   useEffect(() => {
     loadClients();
-  }, [tierFilter, statusFilter]);
+  }, [currentPage, debouncedSearchTerm, tierFilter, statusFilter]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm.trim());
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [searchTerm]);
 
   useEffect(() => {
     const handleOpenCreateClient = (event) => {
@@ -561,35 +586,13 @@ const Clients = () => {
     };
   }, []);
 
-  const filteredClients = useMemo(() => {
-    const query = searchTerm.trim().toLowerCase();
-
-    return clients.filter((client) => {
-      const matchesSearch =
-        !query ||
-        client.company.toLowerCase().includes(query) ||
-        client.email.toLowerCase().includes(query) ||
-        client.contactName.toLowerCase().includes(query);
-      const matchesStatus =
-        statusFilter === 'all' ||
-        (statusFilter === 'active'
-          ? isActiveClientStatus(client.status)
-          : !isActiveClientStatus(client.status));
-
-      return matchesSearch && matchesStatus;
-    });
-  }, [clients, searchTerm, statusFilter]);
-
-  const totalPages = Math.max(1, Math.ceil(filteredClients.length / pageSize));
-  const paginatedClients = useMemo(() => {
-    const safePage = Math.min(currentPage, totalPages);
-    const startIndex = (safePage - 1) * pageSize;
-    return filteredClients.slice(startIndex, startIndex + pageSize);
-  }, [currentPage, filteredClients, totalPages]);
+  const filteredClients = clients;
+  const totalPages = Math.max(1, Number(clientListMeta.totalPages || 1) || 1);
+  const paginatedClients = clients;
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, tierFilter, statusFilter]);
+  }, [debouncedSearchTerm, tierFilter, statusFilter]);
 
   useEffect(() => {
     if (currentPage > totalPages) {
@@ -908,7 +911,7 @@ const Clients = () => {
               <option value="all">All statuses</option>
             </select>
             <button
-              onClick={loadClients}
+              onClick={() => loadClients()}
               className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
             >
               <RefreshCw size={14} />
@@ -992,8 +995,8 @@ const Clients = () => {
           ) : !isLoading ? (
             <div className="flex items-center justify-between border-t border-gray-200 px-6 py-4 text-sm">
               <p className="text-gray-500">
-                Showing {filteredClients.length ? (currentPage - 1) * pageSize + 1 : 0} to{' '}
-                {Math.min(currentPage * pageSize, filteredClients.length)} of {filteredClients.length} clients
+                Showing {clientListMeta.total ? (currentPage - 1) * pageSize + 1 : 0} to{' '}
+                {Math.min((currentPage - 1) * pageSize + paginatedClients.length, clientListMeta.total)} of {clientListMeta.total} clients
               </p>
               <div className="flex items-center gap-2">
                 <button

@@ -36,7 +36,7 @@ import {
   normalizeShipment as normalizeMappedShipment,
   normalizeShipmentList as normalizeMappedShipmentList,
 } from "../../utils/shipmentMapper";
-import { fetchShipmentSummaryPages } from "../../utils/shipmentSummary";
+import { fetchShipmentSummaryPage } from "../../utils/shipmentSummary";
 import {
   STANDARD_SERVICE_KEYS as STANDARD_CATALOG_SERVICE_KEYS,
   getServiceDisplayName,
@@ -47,6 +47,7 @@ import {
 import { fetchBoxItemsBatch, getBatchItemsForBox } from "../../utils/boxItemsBatch";
 
 const API_BASE_URL = '';
+const STAFF_SHIPMENTS_PAGE_SIZE = 10;
 const SUPABASE_STORAGE_PUBLIC_BASE_URL = import.meta.env.VITE_SUPABASE_URL
   ? `${String(import.meta.env.VITE_SUPABASE_URL).replace(/\/+$/, "")}/storage/v1/object/public`
   : "";
@@ -4390,7 +4391,15 @@ const ShipmentsStaff = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState("");
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
   const [shipments, setShipments] = useState([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [shipmentListMeta, setShipmentListMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: STAFF_SHIPMENTS_PAGE_SIZE,
+    totalPages: 1,
+  });
   const [viewShipment, setViewShipment] = useState(null);
   const [viewShipmentDetail, setViewShipmentDetail] = useState(null);
   const [viewShipmentBoxes, setViewShipmentBoxes] = useState([]);
@@ -4464,28 +4473,44 @@ const ShipmentsStaff = () => {
   const [error, setError] = useState("");
   const [dispatchConfirm, setDispatchConfirm] = useState(null);
 
-  const loadShipments = async () => {
+  const loadShipments = async ({ page = currentPage } = {}) => {
     try {
       setIsLoading(true);
       setError("");
       let shipmentRows = [];
+      let nextMeta = {
+        total: 0,
+        page,
+        limit: STAFF_SHIPMENTS_PAGE_SIZE,
+        totalPages: 1,
+      };
 
       try {
-        shipmentRows = await fetchShipmentSummaryPages({
+        const summaryResult = await fetchShipmentSummaryPage({
           apiBaseUrl: API_BASE_URL,
           headers: buildHeaders(),
           parseResponse,
-          params: searchTerm.trim() ? { search: searchTerm.trim() } : {},
+          page,
+          limit: STAFF_SHIPMENTS_PAGE_SIZE,
+          params: debouncedSearchTerm.trim() ? { search: debouncedSearchTerm.trim() } : {},
+          fetchOptions: { cache: "no-store" },
         });
+        shipmentRows = summaryResult.rows;
+        nextMeta = {
+          total: summaryResult.meta.total,
+          page: summaryResult.meta.page,
+          limit: summaryResult.meta.limit,
+          totalPages: summaryResult.meta.totalPages,
+        };
         setShipments(shipmentRows.map(normalizeShipment));
       } catch {
         const query = new URLSearchParams({
-          page: "1",
-          limit: "25",
+          page: String(page),
+          limit: String(STAFF_SHIPMENTS_PAGE_SIZE),
         });
 
-        if (searchTerm.trim()) {
-          query.set("search", searchTerm.trim());
+        if (debouncedSearchTerm.trim()) {
+          query.set("search", debouncedSearchTerm.trim());
         }
 
         const response = await fetch(`${API_BASE_URL}/api/shipments?${query.toString()}`, {
@@ -4494,48 +4519,19 @@ const ShipmentsStaff = () => {
         });
         const payload = await parseResponse(response);
         shipmentRows = extractShipments(payload);
+        const source = payload?.data && typeof payload.data === "object" ? payload.data : payload || {};
+        const total = Number(source.total || shipmentRows.length || 0);
+        const limit = Number(source.limit || STAFF_SHIPMENTS_PAGE_SIZE) || STAFF_SHIPMENTS_PAGE_SIZE;
+        nextMeta = {
+          total,
+          page: Number(source.page || page || 1) || 1,
+          limit,
+          totalPages: Number(source.totalPages || source.total_pages || Math.ceil(total / limit)) || 1,
+        };
         const normalizedRows = shipmentRows.map(normalizeShipment);
-        const detailResults = await Promise.allSettled(
-          normalizedRows.map(async (row, index) => {
-            if (Number(row.units || 0) > 0 || !row.id) return shipmentRows[index];
-
-            const lookupCandidates = getShipmentLookupCandidates(shipmentRows[index], row);
-
-            for (const lookupId of lookupCandidates) {
-              try {
-                const detailResponse = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(lookupId)}`, {
-                  method: "GET",
-                  headers: buildHeaders(),
-                  cache: "no-store",
-                });
-                const detail = extractShipmentDetail(await parseResponse(detailResponse));
-                const detailLineItems = sortLineItemsForDisplay(applyBundleMetadataFromNotes(getLineItems(detail), detail));
-                const rowLineItems = sortLineItemsForDisplay(getLineItems(shipmentRows[index]));
-                const detailUnits = getShipmentUnits(detail);
-                const rowUnits = getShipmentUnits(shipmentRows[index]);
-
-                return {
-                  ...shipmentRows[index],
-                  ...detail,
-                  id: getShipmentId(shipmentRows[index]) || getShipmentId(detail),
-                  reference: shipmentRows[index]?.reference || detail?.reference || row.reference,
-                  shipment_line_items: detailLineItems.length ? detailLineItems : rowLineItems,
-                  units: detailUnits || rowUnits,
-                };
-              } catch {
-                // Try the next identifier; some APIs accept UUIDs while others accept shipment references.
-              }
-            }
-
-            return shipmentRows[index];
-          })
-        );
-        setShipments(
-          detailResults.map((result, index) =>
-            normalizeShipment(result.status === "fulfilled" ? result.value : shipmentRows[index])
-          )
-        );
+        setShipments(normalizedRows);
       }
+      setShipmentListMeta(nextMeta);
     } catch (requestError) {
       setError(requestError.message);
       setShipments([]);
@@ -4641,8 +4637,20 @@ const ShipmentsStaff = () => {
   };
 
   useEffect(() => {
-    loadShipments();
-  }, []);
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm.trim());
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [searchTerm]);
+
+  useEffect(() => {
+    loadShipments({ page: currentPage });
+  }, [currentPage, debouncedSearchTerm]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearchTerm]);
 
   useEffect(() => {
     if (selectedShipmentId) {
@@ -4660,17 +4668,17 @@ const ShipmentsStaff = () => {
     }
   }, [selectedShipmentId]);
 
-  const filteredShipments = useMemo(() => {
-    const query = searchTerm.trim().toLowerCase();
-    if (!query) return shipments;
+  const filteredShipments = shipments;
+  const shipmentTotalPages = Math.max(1, Number(shipmentListMeta.totalPages || 1) || 1);
+  const shipmentPaginationStart = shipmentListMeta.total ? (currentPage - 1) * STAFF_SHIPMENTS_PAGE_SIZE + 1 : 0;
+  const shipmentPaginationEnd = Math.min((currentPage - 1) * STAFF_SHIPMENTS_PAGE_SIZE + filteredShipments.length, shipmentListMeta.total);
+  const shipmentPageNumbers = Array.from({ length: shipmentTotalPages }, (_, index) => index + 1);
 
-    return shipments.filter(
-      (shipment) =>
-        shipment.reference.toLowerCase().includes(query) ||
-        shipment.client.toLowerCase().includes(query) ||
-        shipment.status.toLowerCase().includes(query)
-    );
-  }, [searchTerm, shipments]);
+  useEffect(() => {
+    if (currentPage > shipmentTotalPages) {
+      setCurrentPage(shipmentTotalPages);
+    }
+  }, [currentPage, shipmentTotalPages]);
 
   const openShipmentDetail = (shipmentId) => {
     setSelectedShipmentId(shipmentId);
@@ -6415,7 +6423,7 @@ const ShipmentsStaff = () => {
                   </div>
                   <button
                     type="button"
-                    onClick={loadShipments}
+                    onClick={() => loadShipments()}
                     className="flex items-center gap-2 rounded-lg border bg-gray-50 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100"
                   >
                     <RefreshCw className="h-4 w-4" />
@@ -6493,6 +6501,45 @@ const ShipmentsStaff = () => {
                     )}
                   </tbody>
                 </table>
+              </div>
+              <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-6 py-4 text-sm text-gray-500 md:flex-row md:items-center md:justify-between">
+                <span>
+                  Showing {shipmentPaginationStart}-{shipmentPaginationEnd} of {shipmentListMeta.total} shipments
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                    disabled={currentPage === 1 || isLoading}
+                    className="rounded-lg border border-gray-200 px-3 py-1.5 font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Previous
+                  </button>
+                  {shipmentPageNumbers.map((pageNumber) => (
+                    <button
+                      key={pageNumber}
+                      type="button"
+                      onClick={() => setCurrentPage(pageNumber)}
+                      disabled={isLoading}
+                      className={`h-8 min-w-8 rounded-lg border px-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                        pageNumber === currentPage
+                          ? "border-[#ff6900] bg-[#ff6900] text-white"
+                          : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                      }`}
+                      aria-current={pageNumber === currentPage ? "page" : undefined}
+                    >
+                      {pageNumber}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage((page) => Math.min(shipmentTotalPages, page + 1))}
+                    disabled={currentPage === shipmentTotalPages || isLoading}
+                    className="rounded-lg border border-gray-200 px-3 py-1.5 font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Next
+                  </button>
+                </div>
               </div>
             </div>
           </>

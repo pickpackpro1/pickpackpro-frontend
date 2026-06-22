@@ -9,6 +9,7 @@ import { getServiceDisplayName, getServiceKey, isKnownServiceCode } from '../../
 
 const API_BASE_URL = '';
 const BACKEND_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app').replace(/\/+$/, '');
+const CLIENT_INVOICES_PAGE_SIZE = 10;
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();
@@ -699,6 +700,14 @@ const InvoicesClient = () => {
   const [isInvoiceDetailLoading, setIsInvoiceDetailLoading] = useState(false);
   const [downloadingInvoiceId, setDownloadingInvoiceId] = useState('');
   const [invoiceSearchTerm, setInvoiceSearchTerm] = useState('');
+  const [debouncedInvoiceSearchTerm, setDebouncedInvoiceSearchTerm] = useState('');
+  const [invoicePage, setInvoicePage] = useState(1);
+  const [invoiceListMeta, setInvoiceListMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: CLIENT_INVOICES_PAGE_SIZE,
+    totalPages: 1,
+  });
   const [clientTier, setClientTier] = useState(() => {
     const session = getSession();
     return getClientTierFromSources(session, session?.rawUser);
@@ -708,7 +717,13 @@ const InvoicesClient = () => {
     try {
       setIsLoading(true);
       setError('');
-      const response = await fetch(`${API_BASE_URL}/api/invoices`, {
+      const query = new URLSearchParams({
+        page: String(invoicePage),
+        limit: String(CLIENT_INVOICES_PAGE_SIZE),
+      });
+      if (debouncedInvoiceSearchTerm.trim()) query.set('search', debouncedInvoiceSearchTerm.trim());
+
+      const response = await fetch(`${API_BASE_URL}/api/invoices?${query.toString()}`, {
         method: 'GET',
         headers: buildHeaders(),
         cache: 'no-store',
@@ -717,10 +732,25 @@ const InvoicesClient = () => {
       const normalizedInvoices = extractInvoices(payload)
         .filter(isClientVisibleInvoice)
         .map((invoice, index) => normalizeInvoice(invoice, index));
-      setInvoices(await enrichInvoicesWithSourceReferences(normalizedInvoices));
+      const source = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+      const total = Number(source.total || normalizedInvoices.length || 0);
+      const limit = Number(source.limit || CLIENT_INVOICES_PAGE_SIZE) || CLIENT_INVOICES_PAGE_SIZE;
+      setInvoices(normalizedInvoices);
+      setInvoiceListMeta({
+        total,
+        page: Number(source.page || invoicePage || 1) || 1,
+        limit,
+        totalPages: Number(source.totalPages || source.total_pages || Math.ceil(total / limit)) || 1,
+      });
     } catch (requestError) {
       setError(requestError.message);
       setInvoices([]);
+      setInvoiceListMeta({
+        total: 0,
+        page: 1,
+        limit: CLIENT_INVOICES_PAGE_SIZE,
+        totalPages: 1,
+      });
     } finally {
       setIsLoading(false);
     }
@@ -759,9 +789,24 @@ const InvoicesClient = () => {
   };
 
   useEffect(() => {
-    loadInvoices();
     loadClientTier();
   }, []);
+
+  useEffect(() => {
+    loadInvoices();
+  }, [invoicePage, debouncedInvoiceSearchTerm]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedInvoiceSearchTerm(invoiceSearchTerm.trim());
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [invoiceSearchTerm]);
+
+  useEffect(() => {
+    setInvoicePage(1);
+  }, [debouncedInvoiceSearchTerm]);
 
   const stats = useMemo(() => {
     const outstandingInvoices = invoices.filter((invoice) => invoice.statusValue !== 'paid');
@@ -777,34 +822,20 @@ const InvoicesClient = () => {
     () => invoices.find((invoice) => invoice.statusValue !== 'paid' && invoice.total > 0),
     [invoices]
   );
-  const filteredInvoices = useMemo(() => {
-    const term = String(invoiceSearchTerm || '').trim().toLowerCase();
-    if (!term) return invoices;
-
-    return invoices.filter((invoice) =>
-      [
-        invoice.invoice,
-        invoice.invoiceTypeLabel,
-        invoice.invoiceType,
-        invoice.source,
-        invoice.sourceReference,
-        invoice.sourceId,
-        invoice.shipmentId,
-        invoice.subShipmentId,
-        invoice.status,
-        formatDate(invoice.date),
-        formatDate(invoice.due),
-        invoice.subtotal,
-        invoice.vat,
-        invoice.total,
-      ]
-        .map((value) => String(value || '').toLowerCase())
-        .some((value) => value.includes(term))
-    );
-  }, [invoices, invoiceSearchTerm]);
-  const invoiceSummaryText = filteredInvoices.length
-    ? `Showing ${filteredInvoices.length} of ${invoices.length} invoices${invoiceSearchTerm.trim() ? ` matching "${invoiceSearchTerm.trim()}"` : ''}`
+  const filteredInvoices = invoices;
+  const invoiceTotalPages = Math.max(1, Number(invoiceListMeta.totalPages || 1) || 1);
+  const invoicePaginationStart = invoiceListMeta.total ? (invoicePage - 1) * CLIENT_INVOICES_PAGE_SIZE + 1 : 0;
+  const invoicePaginationEnd = Math.min((invoicePage - 1) * CLIENT_INVOICES_PAGE_SIZE + filteredInvoices.length, invoiceListMeta.total);
+  const invoiceSummaryText = invoiceListMeta.total
+    ? `Showing ${invoicePaginationStart}-${invoicePaginationEnd} of ${invoiceListMeta.total} invoices${debouncedInvoiceSearchTerm.trim() ? ` matching "${debouncedInvoiceSearchTerm.trim()}"` : ''}`
     : 'No invoices found';
+
+  useEffect(() => {
+    if (invoicePage > invoiceTotalPages) {
+      setInvoicePage(invoiceTotalPages);
+    }
+  }, [invoicePage, invoiceTotalPages]);
+
   const tierLabel = clientTier || 'Tier unavailable';
   const tierBadgeLabel = clientTier ? `${clientTier} tier` : tierLabel;
 
@@ -1158,8 +1189,25 @@ const InvoicesClient = () => {
             <div className="flex items-center justify-between border-t border-[#edf2f7] px-6 py-4 text-sm text-[#64748b]">
               <span>{invoiceSummaryText}</span>
               <div className="flex items-center gap-2">
-                <button type="button" disabled className="rounded-md border border-[#d8e0ee] px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50">{'<'}</button>
-                <button type="button" disabled className="rounded-md border border-[#d8e0ee] px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50">{'>'}</button>
+                <button
+                  type="button"
+                  onClick={() => setInvoicePage((page) => Math.max(1, page - 1))}
+                  disabled={invoicePage === 1 || isLoading}
+                  className="rounded-md border border-[#d8e0ee] px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {'<'}
+                </button>
+                <span className="text-xs font-semibold text-[#64748b]">
+                  Page {invoicePage} of {invoiceTotalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setInvoicePage((page) => Math.min(invoiceTotalPages, page + 1))}
+                  disabled={invoicePage === invoiceTotalPages || isLoading}
+                  className="rounded-md border border-[#d8e0ee] px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {'>'}
+                </button>
               </div>
             </div>
           </div>

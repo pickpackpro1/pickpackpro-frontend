@@ -81,3 +81,47 @@ export const fetchShipmentSummaryPages = async ({
 
   return rows;
 };
+
+export const fetchShipmentSummaryPage = async ({
+  apiBaseUrl = '',
+  headers = {},
+  parseResponse,
+  params = {},
+  page = 1,
+  limit = SHIPMENT_SUMMARY_FALLBACK_PAGE_SIZE,
+  fetchOptions = {},
+} = {}) => {
+  if (typeof parseResponse !== 'function') {
+    throw new Error('parseResponse is required for shipment summary requests.');
+  }
+
+  const response = await fetch(
+    buildShipmentSummaryUrl(apiBaseUrl, {
+      ...params,
+      page,
+      limit,
+    }),
+    {
+      method: 'GET',
+      headers,
+      ...fetchOptions,
+    }
+  );
+  const payload = await parseResponse(response);
+  const rows = getShipmentSummaryRows(payload);
+  const meta = getShipmentSummaryMeta(payload);
+  const total = Number(meta.total || rows.length || 0);
+  const resolvedLimit = Number(meta.limit || limit || SHIPMENT_SUMMARY_FALLBACK_PAGE_SIZE) || SHIPMENT_SUMMARY_FALLBACK_PAGE_SIZE;
+
+  return {
+    rows,
+    meta: {
+      ...meta,
+      total,
+      page: Number(meta.page || page || 1) || 1,
+      limit: resolvedLimit,
+      totalPages: Number(payload?.data?.totalPages ?? payload?.data?.total_pages ?? payload?.totalPages ?? payload?.total_pages ?? Math.ceil(total / resolvedLimit)) || 1,
+    },
+    payload,
+  };
+};

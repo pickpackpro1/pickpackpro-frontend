@@ -1058,6 +1058,12 @@ const Billing = () => {
   const [invoiceSearchTerm, setInvoiceSearchTerm] = useState('');
   const [debouncedInvoiceSearchTerm, setDebouncedInvoiceSearchTerm] = useState('');
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('all');
+  const [invoiceListMeta, setInvoiceListMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: BILLING_PAGE_SIZE,
+    totalPages: 1,
+  });
   const [sendInvoiceTarget, setSendInvoiceTarget] = useState(null);
   const [deleteInvoiceTarget, setDeleteInvoiceTarget] = useState(null);
   const [deletedInvoiceKeys, setDeletedInvoiceKeys] = useState([]);
@@ -1121,9 +1127,17 @@ const Billing = () => {
     try {
       setIsLoading(true);
       setError('');
-      const response = await fetch(`${API_BASE_URL}/api/invoices`, {
+      const query = new URLSearchParams({
+        page: String(invoicePage),
+        limit: String(BILLING_PAGE_SIZE),
+      });
+      if (debouncedInvoiceSearchTerm.trim()) query.set('search', debouncedInvoiceSearchTerm.trim());
+      if (invoiceStatusFilter !== 'all') query.set('status', invoiceStatusFilter);
+
+      const response = await fetch(`${API_BASE_URL}/api/invoices?${query.toString()}`, {
         method: 'GET',
         headers: buildHeaders(),
+        cache: 'no-store',
       });
       const payload = await parseResponse(response);
       const deletedKeySet = new Set([...deletedInvoiceKeys, ...extraDeletedKeys]);
@@ -1131,9 +1145,24 @@ const Billing = () => {
         .map(normalizeInvoice)
         .filter((invoice) => !getInvoiceLookupCandidates(invoice).some((key) => deletedKeySet.has(key)));
       setInvoices(normalizedInvoices);
+      const source = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+      const total = Number(source.total || normalizedInvoices.length || 0);
+      const limit = Number(source.limit || BILLING_PAGE_SIZE) || BILLING_PAGE_SIZE;
+      setInvoiceListMeta({
+        total,
+        page: Number(source.page || invoicePage || 1) || 1,
+        limit,
+        totalPages: Number(source.totalPages || source.total_pages || Math.ceil(total / limit)) || 1,
+      });
     } catch (requestError) {
       setError(requestError.message);
       setInvoices([]);
+      setInvoiceListMeta({
+        total: 0,
+        page: 1,
+        limit: BILLING_PAGE_SIZE,
+        totalPages: 1,
+      });
     } finally {
       setIsLoading(false);
     }
@@ -1167,10 +1196,13 @@ const Billing = () => {
   };
 
   useEffect(() => {
-    loadInvoices();
     loadClients();
     loadSettings();
   }, []);
+
+  useEffect(() => {
+    loadInvoices();
+  }, [invoicePage, debouncedInvoiceSearchTerm, invoiceStatusFilter]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -1204,41 +1236,15 @@ const Billing = () => {
 
     return [...statuses];
   }, [displayInvoices]);
-  const filteredInvoices = useMemo(() => {
-    const term = String(debouncedInvoiceSearchTerm || '').trim().toLowerCase();
-    const statusFilter = String(invoiceStatusFilter || 'all').trim().toLowerCase();
-
-    return displayInvoices.filter((invoice) => {
-      const matchesStatus = statusFilter === 'all' || getInvoiceStatusValue(invoice) === statusFilter;
-      if (!matchesStatus) return false;
-      if (!term) return true;
-
-      return [
-        invoice.ref,
-        invoice.client,
-        invoice.invoiceTypeLabel,
-        invoice.invoiceType,
-        invoice.source,
-        invoice.sourceReference,
-        invoice.sourceId,
-        invoice.shipmentId,
-        invoice.subShipmentId,
-      ]
-        .map((value) => String(value || '').toLowerCase())
-        .some((value) => value.includes(term));
-    });
-  }, [displayInvoices, debouncedInvoiceSearchTerm, invoiceStatusFilter]);
-  const invoiceTotalPages = Math.max(1, Math.ceil(filteredInvoices.length / BILLING_PAGE_SIZE));
+  const filteredInvoices = displayInvoices;
+  const invoiceTotalPages = Math.max(1, Number(invoiceListMeta.totalPages || 1) || 1);
   const invoicePaginationPages = useMemo(
     () => getPaginationPages(invoicePage, invoiceTotalPages),
     [invoicePage, invoiceTotalPages]
   );
-  const paginatedInvoices = useMemo(() => {
-    const startIndex = (invoicePage - 1) * BILLING_PAGE_SIZE;
-    return filteredInvoices.slice(startIndex, startIndex + BILLING_PAGE_SIZE);
-  }, [filteredInvoices, invoicePage]);
-  const invoicePaginationStart = filteredInvoices.length ? (invoicePage - 1) * BILLING_PAGE_SIZE + 1 : 0;
-  const invoicePaginationEnd = Math.min(invoicePage * BILLING_PAGE_SIZE, filteredInvoices.length);
+  const paginatedInvoices = filteredInvoices;
+  const invoicePaginationStart = invoiceListMeta.total ? (invoicePage - 1) * BILLING_PAGE_SIZE + 1 : 0;
+  const invoicePaginationEnd = Math.min((invoicePage - 1) * BILLING_PAGE_SIZE + paginatedInvoices.length, invoiceListMeta.total);
 
   useEffect(() => {
     let isCancelled = false;
@@ -1718,7 +1724,7 @@ const Billing = () => {
             <p className="mt-1 text-sm text-gray-500">Manage invoices and billing actions.</p>
           </div>
           <div className="flex items-center gap-3">
-            <button onClick={loadInvoices} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"><RefreshCw size={15} />Refresh</button>
+            <button onClick={() => loadInvoices()} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"><RefreshCw size={15} />Refresh</button>
           </div>
         </div>
 
@@ -1875,11 +1881,11 @@ const Billing = () => {
               </tbody>
             </table>
           </div>
-          {filteredInvoices.length ? (
+          {invoiceListMeta.total ? (
             <div className="flex flex-col gap-3 border-t border-gray-200 bg-gray-50 px-6 py-3 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-gray-500">
                 Showing <span className="font-medium text-gray-900">{invoicePaginationStart}-{invoicePaginationEnd}</span> of{' '}
-                <span className="font-medium text-gray-900">{filteredInvoices.length}</span> invoices
+                <span className="font-medium text-gray-900">{invoiceListMeta.total}</span> invoices
                 {debouncedInvoiceSearchTerm.trim() ? <span> matching "{debouncedInvoiceSearchTerm.trim()}"</span> : null}
                 {invoiceStatusFilter !== 'all' ? <span> with status {formatStatusLabel(invoiceStatusFilter)}</span> : null}
               </p>

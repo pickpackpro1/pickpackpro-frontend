@@ -42,7 +42,7 @@ import {
   normalizeShipment as normalizeMappedShipment,
   normalizeShipmentList as normalizeMappedShipmentList,
 } from '../../utils/shipmentMapper';
-import { fetchShipmentSummaryPages } from '../../utils/shipmentSummary';
+import { fetchShipmentSummaryPage } from '../../utils/shipmentSummary';
 import {
   findSkuOptionBySku,
   normalizeSkuProductOptions,
@@ -3598,9 +3598,16 @@ const Shipments = () => {
   const [clients, setClients] = useState([]);
   const [staffMembers, setStaffMembers] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [clientFilter, setClientFilter] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
+  const [shipmentListMeta, setShipmentListMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: SHIPMENTS_PER_PAGE,
+    totalPages: 1,
+  });
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
   const [showCreateSection, setShowCreateSection] = useState(false);
   const [showQuickViewModal, setShowQuickViewModal] = useState(false);
@@ -3874,7 +3881,7 @@ const Shipments = () => {
     setSavingAction('');
   };
 
-  const loadShipments = async ({ pinnedShipments = [], excludedKeys = [], preferFullList = false } = {}) => {
+  const loadShipments = async ({ pinnedShipments = [], excludedKeys = [], preferFullList = false, page = currentPage } = {}) => {
     const requestedPinnedRows = (Array.isArray(pinnedShipments) ? pinnedShipments : [pinnedShipments])
       .filter(Boolean)
       .map(normalizeShipment);
@@ -3895,31 +3902,68 @@ const Shipments = () => {
       setIsLoading(true);
       setError('');
       let shipmentRows = [];
+      let nextMeta = {
+        total: 0,
+        page,
+        limit: SHIPMENTS_PER_PAGE,
+        totalPages: 1,
+      };
 
       try {
         if (preferFullList) {
           throw new Error('Use full shipment list refresh.');
         }
 
-        shipmentRows = await fetchShipmentSummaryPages({
+        const summaryResult = await fetchShipmentSummaryPage({
           apiBaseUrl: API_BASE_URL,
           headers: buildHeaders(),
           parseResponse,
+          page,
+          limit: SHIPMENTS_PER_PAGE,
+          params: {
+            ...(debouncedSearchTerm.trim() ? { search: debouncedSearchTerm.trim() } : {}),
+            ...(statusFilter !== 'all' ? { status: statusFilter } : {}),
+            ...(clientFilter.trim() ? { clientId: clientFilter.trim() } : {}),
+          },
           fetchOptions: { cache: 'no-store' },
         });
+        shipmentRows = summaryResult.rows;
+        nextMeta = {
+          total: summaryResult.meta.total,
+          page: summaryResult.meta.page,
+          limit: summaryResult.meta.limit,
+          totalPages: summaryResult.meta.totalPages,
+        };
       } catch {
-        const response = await fetch(`${API_BASE_URL}/api/shipments`, {
+        const query = new URLSearchParams({
+          page: String(page),
+          limit: String(SHIPMENTS_PER_PAGE),
+        });
+        if (debouncedSearchTerm.trim()) query.set('search', debouncedSearchTerm.trim());
+        if (statusFilter !== 'all') query.set('status', statusFilter);
+        if (clientFilter.trim()) query.set('clientId', clientFilter.trim());
+        const response = await fetch(`${API_BASE_URL}/api/shipments?${query.toString()}`, {
           method: 'GET',
           headers: buildHeaders(),
           cache: 'no-store',
         });
         const payload = await parseResponse(response);
         shipmentRows = extractShipments(payload);
+        const source = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+        const total = Number(source.total || shipmentRows.length || 0);
+        const limit = Number(source.limit || SHIPMENTS_PER_PAGE) || SHIPMENTS_PER_PAGE;
+        nextMeta = {
+          total,
+          page: Number(source.page || page || 1) || 1,
+          limit,
+          totalPages: Number(source.totalPages || source.total_pages || Math.ceil(total / limit)) || 1,
+        };
       }
 
       const normalizedRows = shipmentRows.map(normalizeShipment).filter((shipment) => !isExcludedShipment(shipment));
-      const visiblePinnedRows = pinnedRows.filter((shipment) => !isExcludedShipment(shipment));
+      const visiblePinnedRows = page === 1 ? pinnedRows.filter((shipment) => !isExcludedShipment(shipment)) : [];
       setShipments(mergeShipmentRows(visiblePinnedRows, normalizedRows));
+      setShipmentListMeta(nextMeta);
     } catch (requestError) {
       setError(requestError.message);
       showToast('error', requestError.message || 'Failed to load shipments.');
@@ -4242,10 +4286,21 @@ const Shipments = () => {
   };
 
   useEffect(() => {
-    loadShipments();
     loadClients();
     loadStaffMembers();
   }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm.trim());
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [searchTerm]);
+
+  useEffect(() => {
+    loadShipments({ page: currentPage });
+  }, [currentPage, debouncedSearchTerm, statusFilter, clientFilter]);
 
   useEffect(() => {
     const handleOpenCreateShipment = () => {
@@ -4273,34 +4328,17 @@ const Shipments = () => {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const filteredShipments = useMemo(() => {
-    const term = searchTerm.toLowerCase();
-    return shipments.filter((shipment) => {
-      const matchesSearch =
-        !term ||
-        shipment.reference.toLowerCase().includes(term) ||
-        shipment.client.toLowerCase().includes(term);
-      const matchesStatus =
-        statusFilter === 'all' || String(shipment.status || '').toLowerCase() === statusFilter;
-      const matchesClient =
-        !clientFilter.trim() ||
-        String(shipment.client || '').toLowerCase().includes(clientFilter.trim().toLowerCase());
-
-      return matchesSearch && matchesStatus && matchesClient;
-    });
-  }, [shipments, searchTerm, statusFilter, clientFilter]);
-
-  const totalShipmentPages = Math.max(1, Math.ceil(filteredShipments.length / SHIPMENTS_PER_PAGE));
+  const filteredShipments = shipments;
+  const totalShipmentPages = Math.max(1, Number(shipmentListMeta.totalPages || 1) || 1);
   const currentShipmentPage = Math.min(currentPage, totalShipmentPages);
-  const shipmentPageStart = (currentShipmentPage - 1) * SHIPMENTS_PER_PAGE;
-  const paginatedShipments = filteredShipments.slice(shipmentPageStart, shipmentPageStart + SHIPMENTS_PER_PAGE);
-  const firstVisibleShipment = filteredShipments.length ? shipmentPageStart + 1 : 0;
-  const lastVisibleShipment = Math.min(shipmentPageStart + paginatedShipments.length, filteredShipments.length);
+  const paginatedShipments = filteredShipments;
+  const firstVisibleShipment = shipmentListMeta.total ? (currentShipmentPage - 1) * SHIPMENTS_PER_PAGE + 1 : 0;
+  const lastVisibleShipment = Math.min((currentShipmentPage - 1) * SHIPMENTS_PER_PAGE + paginatedShipments.length, shipmentListMeta.total);
   const shipmentPageNumbers = Array.from({ length: totalShipmentPages }, (_, index) => index + 1);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, statusFilter, clientFilter]);
+  }, [debouncedSearchTerm, statusFilter, clientFilter]);
 
   useEffect(() => {
     if (currentPage > totalShipmentPages) {
@@ -4996,7 +5034,7 @@ const Shipments = () => {
                 </div>
 
                 <button
-                  onClick={loadShipments}
+                  onClick={() => loadShipments()}
                   className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
                 >
                   Refresh
@@ -5091,7 +5129,7 @@ const Shipments = () => {
               </div>
               <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-6 py-4 text-sm text-gray-500 md:flex-row md:items-center md:justify-between">
                 <span>
-                  Showing {firstVisibleShipment}-{lastVisibleShipment} of {filteredShipments.length} shipments
+                  Showing {firstVisibleShipment}-{lastVisibleShipment} of {shipmentListMeta.total} shipments
                 </span>
                 <div className="flex flex-wrap items-center gap-2">
                   <button

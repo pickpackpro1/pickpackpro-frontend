@@ -16,7 +16,7 @@ import {
   normalizeShipment as normalizeMappedShipment,
   normalizeShipmentList as normalizeMappedShipmentList,
 } from '../../utils/shipmentMapper';
-import { fetchShipmentSummaryPages } from '../../utils/shipmentSummary';
+import { fetchShipmentSummaryPage } from '../../utils/shipmentSummary';
 import {
   findSkuOptionBySku,
   normalizeSkuProductOptions,
@@ -5097,8 +5097,15 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedShipmentSearchQuery, setDebouncedShipmentSearchQuery] = useState('');
   const [debouncedAwaitingFbaSearchQuery, setDebouncedAwaitingFbaSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
+  const [shipmentListMeta, setShipmentListMeta] = useState({
+    total: 0,
+    page: 1,
+    limit: SHIPMENTS_PER_PAGE,
+    totalPages: 1,
+  });
   const [createForm, setCreateForm] = useState(() => ({
     ...initialCreateForm,
     clientId: getClientIdFromSession(),
@@ -5779,7 +5786,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     }
   };
 
-  const loadShipments = async (pinnedShipments = [], { excludedKeys = [] } = {}) => {
+  const loadShipments = async (pinnedShipments = [], { excludedKeys = [], page = currentPage } = {}) => {
     const sessionClientId = getClientIdFromSession();
     const recentStorageKey = getRecentClientShipmentsCacheKey(sessionClientId, awaitingFbaOnly);
     const requestedPinnedRows = (Array.isArray(pinnedShipments) ? pinnedShipments : [pinnedShipments])
@@ -5829,57 +5836,55 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         setIsRefreshingList(true);
       }
       setError('');
-      const fetchShipmentPages = async (params = {}) => {
+      const fetchShipmentPage = async (params = {}) => {
         if (!awaitingFbaOnly) {
           try {
-            return await fetchShipmentSummaryPages({
+            const summaryResult = await fetchShipmentSummaryPage({
               apiBaseUrl: API_BASE_URL,
               headers: buildHeaders(),
               parseResponse,
               params,
+              page,
+              limit: SHIPMENTS_PER_PAGE,
               fetchOptions: { cache: 'no-store' },
             });
+            return summaryResult;
           } catch {
             // Fall back to the full shipment list endpoint if summary is unavailable.
           }
         }
 
         const query = new URLSearchParams(params);
-        if (awaitingFbaOnly && sessionClientId) query.set('clientId', sessionClientId);
-        const rows = [];
-        const maxPages = awaitingFbaOnly ? 10 : 1;
-        const pageSize = awaitingFbaOnly ? 100 : null;
-
-        for (let page = 1; page <= maxPages; page += 1) {
-          query.set('page', String(page));
-          if (pageSize) {
-            query.set('limit', String(pageSize));
-          } else {
-            query.delete('limit');
-          }
-          const response = await fetch(`${API_BASE_URL}/api/shipments?${query.toString()}`, {
-            method: 'GET',
-            headers: buildHeaders(),
-            cache: 'no-store',
-          });
-          const pageRows = extractShipments(await parseResponse(response));
-          rows.push(...pageRows);
-          if (!awaitingFbaOnly || pageRows.length < pageSize) break;
-        }
-
-        return rows;
+        query.set('page', String(page));
+        query.set('limit', String(SHIPMENTS_PER_PAGE));
+        const response = await fetch(`${API_BASE_URL}/api/shipments?${query.toString()}`, {
+          method: 'GET',
+          headers: buildHeaders(),
+          cache: 'no-store',
+        });
+        const payload = await parseResponse(response);
+        const rows = extractShipments(payload);
+        const source = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+        const total = Number(source.total || rows.length || 0);
+        const limit = Number(source.limit || SHIPMENTS_PER_PAGE) || SHIPMENTS_PER_PAGE;
+        return {
+          rows,
+          meta: {
+            total,
+            page: Number(source.page || page || 1) || 1,
+            limit,
+            totalPages: Number(source.totalPages || source.total_pages || Math.ceil(total / limit)) || 1,
+          },
+        };
       };
 
-      let loadedPayloads = [];
-      if (awaitingFbaOnly && statusFilter === 'all') {
-        const pageResults = await Promise.allSettled([
-          fetchShipmentPages(),
-          ...FBA_LABEL_ELIGIBLE_STATUS_VALUES.map((status) => fetchShipmentPages({ status })),
-        ]);
-        loadedPayloads = pageResults.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
-      } else {
-        loadedPayloads = await fetchShipmentPages(statusFilter !== 'all' ? { status: statusFilter } : {});
-      }
+      const queryParams = {
+        ...(statusFilter !== 'all' ? { status: statusFilter } : {}),
+        ...(debouncedShipmentSearchQuery.trim() ? { search: debouncedShipmentSearchQuery.trim() } : {}),
+        ...(dateFilter ? { month: dateFilter } : {}),
+      };
+      const summaryPage = await fetchShipmentPage(queryParams);
+      const loadedPayloads = summaryPage.rows || [];
 
       const loadedRows = loadedPayloads
         .map(normalizeShipment)
@@ -5887,7 +5892,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         .filter(isValidShipmentForList)
         .filter(doesShipmentBelongToCurrentClient)
         .filter((shipment) => !isExcludedShipment(shipment));
-      const visiblePinnedRows = pinnedRows.filter((shipment) => !isExcludedShipment(shipment));
+      const visiblePinnedRows = page === 1 ? pinnedRows.filter((shipment) => !isExcludedShipment(shipment)) : [];
       const mergedRows = sortShipmentsForList(
         mergeShipmentLists(loadedRows, visiblePinnedRows).filter(isValidShipmentForList)
       );
@@ -5898,9 +5903,14 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         return;
       }
 
-      const serviceEnrichedRows = sortShipmentsForList(await enrichShipmentsWithServiceTasks(mergedRows));
-      setShipments(serviceEnrichedRows);
-      writeCachedClientShipments(sessionClientId, awaitingFbaOnly, serviceEnrichedRows);
+      setShipments(mergedRows);
+      setShipmentListMeta({
+        total: Number(summaryPage.meta?.total || mergedRows.length || 0),
+        page: Number(summaryPage.meta?.page || page || 1) || 1,
+        limit: Number(summaryPage.meta?.limit || SHIPMENTS_PER_PAGE) || SHIPMENTS_PER_PAGE,
+        totalPages: Number(summaryPage.meta?.totalPages || 1) || 1,
+      });
+      writeCachedClientShipments(sessionClientId, awaitingFbaOnly, mergedRows);
     } catch (requestError) {
       setError(requestError.message);
       setShipments((currentShipments) =>
@@ -5934,6 +5944,16 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
   }, [awaitingFbaOnly, searchQuery]);
 
   useEffect(() => {
+    if (awaitingFbaOnly) return undefined;
+
+    const searchTimer = window.setTimeout(() => {
+      setDebouncedShipmentSearchQuery(searchQuery.trim());
+    }, 300);
+
+    return () => window.clearTimeout(searchTimer);
+  }, [awaitingFbaOnly, searchQuery]);
+
+  useEffect(() => {
     if (awaitingFbaOnly) return;
 
     if (isCreateMode) {
@@ -5941,8 +5961,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       return;
     }
 
-    loadShipments();
-  }, [statusFilter, isCreateMode, awaitingFbaOnly]);
+    loadShipments([], { page: currentPage });
+  }, [statusFilter, isCreateMode, awaitingFbaOnly, currentPage, debouncedShipmentSearchQuery, dateFilter]);
 
   useEffect(() => {
     if (!awaitingFbaOnly) return;
@@ -5990,21 +6010,20 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     const isForceVisible = shipmentKeys.some((key) => forceVisibleShipmentKeys.includes(key));
     if (isForceVisible) return true;
 
-    const term = searchQuery.toLowerCase();
+    const term = debouncedShipmentSearchQuery.toLowerCase();
     const matchesSearch = !term || shipment.reference.toLowerCase().includes(term);
     const matchesDate = !dateFilter || String(shipment.created).includes(dateFilter);
     const matchesStatus =
       statusFilter === 'all' ||
       String(shipment.status || '').trim().toLowerCase() === String(statusFilter || '').trim().toLowerCase();
     return matchesSearch && matchesDate && matchesStatus;
-  }), [shipments, searchQuery, dateFilter, statusFilter, forceVisibleShipmentKeys]);
+  }), [shipments, debouncedShipmentSearchQuery, dateFilter, statusFilter, forceVisibleShipmentKeys]);
 
-  const totalShipmentPages = Math.max(1, Math.ceil(filteredShipments.length / SHIPMENTS_PER_PAGE));
+  const totalShipmentPages = Math.max(1, Number(shipmentListMeta.totalPages || 1) || 1);
   const currentShipmentPage = Math.min(currentPage, totalShipmentPages);
-  const shipmentPageStart = (currentShipmentPage - 1) * SHIPMENTS_PER_PAGE;
-  const paginatedShipments = filteredShipments.slice(shipmentPageStart, shipmentPageStart + SHIPMENTS_PER_PAGE);
-  const firstVisibleShipment = filteredShipments.length ? shipmentPageStart + 1 : 0;
-  const lastVisibleShipment = Math.min(shipmentPageStart + paginatedShipments.length, filteredShipments.length);
+  const paginatedShipments = filteredShipments;
+  const firstVisibleShipment = shipmentListMeta.total ? (currentShipmentPage - 1) * SHIPMENTS_PER_PAGE + 1 : 0;
+  const lastVisibleShipment = Math.min((currentShipmentPage - 1) * SHIPMENTS_PER_PAGE + paginatedShipments.length, shipmentListMeta.total);
   const shipmentPageNumbers = Array.from({ length: totalShipmentPages }, (_, index) => index + 1);
 
   useEffect(() => {
@@ -9259,7 +9278,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
             </div>
             <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-6 py-4 text-sm text-gray-500 md:flex-row md:items-center md:justify-between">
               <span>
-                Showing {firstVisibleShipment}-{lastVisibleShipment} of {filteredShipments.length} shipments
+                Showing {firstVisibleShipment}-{lastVisibleShipment} of {shipmentListMeta.total} shipments
               </span>
               <div className="flex flex-wrap items-center gap-2">
                 <button
