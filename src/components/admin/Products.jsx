@@ -32,6 +32,8 @@ import {
 
 const API_BASE_URL = '';
 const PRODUCTS_PER_PAGE = 25;
+const CSV_IMPORT_TOOLTIP =
+  'CSV must include headers. Required: product_name, sku. Optional: default_fnsku, length_cm, width_cm, height_cm, weight_kg, hazmat_flag, expiry_tracked, lot_tracked, needs_bundling, bundle_size, active. Column order does not matter. Boolean values can be true/false, yes/no, or 1/0.';
 
 const initialProductForm = {
   clientId: '',
@@ -1350,16 +1352,20 @@ const Products = () => {
               {isExporting ? <RefreshCw size={15} className="animate-spin" /> : <Download size={15} />}
               {isExporting ? 'Exporting...' : 'Export CSV'}
             </button>
-            <button
-              type="button"
-              onClick={handleImportClick}
-              disabled={isImporting || !resolvedExportClientId}
-              className="inline-flex items-center gap-2 rounded-lg bg-[#132347] px-4 py-2 text-sm font-medium text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:opacity-70"
-              title={!resolvedExportClientId ? 'Select a client before importing products.' : 'Import CSV for selected client'}
-            >
-              {isImporting ? <RefreshCw size={15} className="animate-spin" /> : <Upload size={15} />}
-              {isImporting ? 'Importing...' : 'Import CSV'}
-            </button>
+            <div className="group relative inline-flex">
+              <button
+                type="button"
+                onClick={handleImportClick}
+                disabled={isImporting || !resolvedExportClientId}
+                className="inline-flex items-center gap-2 rounded-lg bg-[#132347] px-4 py-2 text-sm font-medium text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isImporting ? <RefreshCw size={15} className="animate-spin" /> : <Upload size={15} />}
+                {isImporting ? 'Importing...' : 'Import CSV'}
+              </button>
+              <div className="pointer-events-none absolute left-[-90%] top-full z-50 mt-2 hidden w-[400px] -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-xs leading-5 text-slate-700 shadow-lg group-hover:block group-focus-within:block">
+                {CSV_IMPORT_TOOLTIP}
+              </div>
+            </div>
             <input
               ref={importInputRef}
               type="file"
@@ -1373,12 +1379,6 @@ const Products = () => {
               }}
               className="hidden"
             />
-            <div className="max-w-3xl rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
-              CSV must include headers. Required: <span className="font-semibold">product_name, sku</span>. Optional:
-              default_fnsku, length_cm, width_cm, height_cm, weight_kg, hazmat_flag, expiry_tracked, lot_tracked,
-              needs_bundling, bundle_size, active. Column order does not matter. Boolean values can be true/false,
-              yes/no, or 1/0.
-            </div>
           </div>
         </div>
 
