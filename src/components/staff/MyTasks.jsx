@@ -454,6 +454,70 @@ const normalizeTimeEntry = (entry = {}, index = 0) => {
   };
 };
 
+const getPayloadData = (payload) => payload?.data || payload || {};
+
+const getActiveTimeEntry = (payload) => {
+  const data = getPayloadData(payload);
+  return data?.activeEntry || data?.active_entry || payload?.activeEntry || payload?.active_entry || null;
+};
+
+const getIsCheckedIn = (payload, entries = []) => {
+  const data = getPayloadData(payload);
+  const explicitValue = firstPresent(
+    data?.isCheckedIn,
+    data?.is_checked_in,
+    payload?.isCheckedIn,
+    payload?.is_checked_in,
+    ""
+  );
+
+  if (explicitValue !== "") {
+    return explicitValue === true || String(explicitValue).toLowerCase() === "true";
+  }
+
+  return entries.some((entry) => !getEntryEndedAt(entry));
+};
+
+const getDurationMinutes = (entry = {}) => {
+  const explicitMinutes = Number(
+    firstPresent(entry?.durationMinutes, entry?.duration_minutes, entry?.minutes, "")
+  );
+
+  if (Number.isFinite(explicitMinutes)) {
+    return Math.max(0, Math.round(explicitMinutes));
+  }
+
+  const startedAt = new Date(getEntryStartedAt(entry));
+  const endedAt = new Date(getEntryEndedAt(entry) || Date.now());
+  if (Number.isNaN(startedAt.getTime()) || Number.isNaN(endedAt.getTime())) return 0;
+
+  return Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 60000));
+};
+
+const formatDurationMinutes = (minutes = 0) => {
+  const safeMinutes = Math.max(0, Math.round(Number(minutes) || 0));
+  const hours = Math.floor(safeMinutes / 60);
+  const remainingMinutes = safeMinutes % 60;
+  return hours ? `${hours}h ${remainingMinutes}m` : `${remainingMinutes}m`;
+};
+
+const buildAttendanceState = (statusPayload = {}, entriesPayload = {}) => {
+  const entries = extractListByKeys(entriesPayload, timeEntryKeys);
+  const activeEntry = getActiveTimeEntry(statusPayload) || getActiveTimeEntry(entriesPayload) || entries.find((entry) => !getEntryEndedAt(entry)) || null;
+  const isCheckedIn = getIsCheckedIn(statusPayload, entries);
+
+  return {
+    isCheckedIn,
+    activeEntry,
+    entries: entries.map(normalizeTimeEntry),
+  };
+};
+
+const dispatchAttendanceUpdated = (detail = {}) => {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("pickpackpro-attendance-updated", { detail }));
+};
+
 const getDashboardNotes = ({ dashboard = {}, shipments = [], timeEntries = [], stats = [] }) => {
   const summary = dashboard?.summary || dashboard?.stats || {};
   const dashboardNotes = extractListByKeys(dashboard, ["notes", "dashboardNotes", "dashboard_notes", "recentActivity", "recent_activity", "activity"]);
@@ -549,22 +613,49 @@ const MyTasks = () => {
   const [shipments, setShipments] = useState([]);
   const [dashboard, setDashboard] = useState(null);
   const [timeEntries, setTimeEntries] = useState([]);
+  const [isCheckedIn, setIsCheckedIn] = useState(false);
+  const [activeTimeEntry, setActiveTimeEntry] = useState(null);
+  const [isAttendanceActionPending, setIsAttendanceActionPending] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+
+  const applyAttendanceState = (attendanceState) => {
+    setIsCheckedIn(Boolean(attendanceState.isCheckedIn));
+    setActiveTimeEntry(attendanceState.activeEntry || null);
+    setTimeEntries(attendanceState.entries || []);
+    dispatchAttendanceUpdated({
+      isCheckedIn: Boolean(attendanceState.isCheckedIn),
+      activeEntry: attendanceState.activeEntry || null,
+    });
+  };
+
+  const loadAttendance = async () => {
+    const [statusResponse, entriesResponse] = await Promise.all([
+      fetch(`${API_BASE_URL}/api/time/status`, { method: "GET", headers: buildHeaders() }),
+      fetch(`${API_BASE_URL}/api/time/entries?limit=25`, { method: "GET", headers: buildHeaders() }),
+    ]);
+    const statusPayload = await parseResponse(statusResponse);
+    const entriesPayload = await parseResponse(entriesResponse);
+    const attendanceState = buildAttendanceState(statusPayload, entriesPayload);
+    applyAttendanceState(attendanceState);
+    return attendanceState;
+  };
 
   const loadData = async () => {
     try {
       setIsLoading(true);
       setError("");
-      const [shipmentsResponse, dashboardResponse, entriesResponse] = await Promise.all([
+      const [shipmentsResponse, dashboardResponse, statusResponse, entriesResponse] = await Promise.all([
         fetch(`${API_BASE_URL}/api/shipments?page=1&limit=3`, { method: "GET", headers: buildHeaders() }),
         fetch(`${API_BASE_URL}/api/dashboard/staff`, { method: "GET", headers: buildHeaders() }),
-        fetch(`${API_BASE_URL}/api/time/entries`, { method: "GET", headers: buildHeaders() }),
+        fetch(`${API_BASE_URL}/api/time/status`, { method: "GET", headers: buildHeaders() }),
+        fetch(`${API_BASE_URL}/api/time/entries?limit=25`, { method: "GET", headers: buildHeaders() }),
       ]);
 
       const shipmentsPayload = await parseResponse(shipmentsResponse);
       const dashboardPayload = await parseResponse(dashboardResponse);
+      const statusPayload = await parseResponse(statusResponse);
       const entriesPayload = await parseResponse(entriesResponse);
       const dashboardData = dashboardPayload?.data || dashboardPayload?.dashboard || dashboardPayload || {};
       const shipmentRows = extractRows(shipmentsPayload);
@@ -681,17 +772,22 @@ const MyTasks = () => {
 
       setShipments(rowsWithServices.map(normalizeShipment));
       setDashboard(dashboardData);
-      setTimeEntries(
-        [
-          ...extractListByKeys(entriesPayload, timeEntryKeys),
-          ...extractListByKeys(dashboardData, timeEntryKeys),
-        ].map(normalizeTimeEntry)
-      );
+      const attendanceState = buildAttendanceState(statusPayload, {
+        data: {
+          entries: [
+            ...extractListByKeys(entriesPayload, timeEntryKeys),
+            ...extractListByKeys(dashboardData, timeEntryKeys),
+          ],
+        },
+      });
+      applyAttendanceState(attendanceState);
     } catch (requestError) {
       setError(requestError.message);
       setShipments([]);
       setDashboard(null);
       setTimeEntries([]);
+      setIsCheckedIn(false);
+      setActiveTimeEntry(null);
     } finally {
       setIsLoading(false);
     }
@@ -785,40 +881,56 @@ const MyTasks = () => {
     () => getDashboardNotes({ dashboard, shipments, timeEntries, stats }),
     [dashboard, shipments, stats, timeEntries]
   );
+  const activeDurationLabel = activeTimeEntry ? formatDurationMinutes(getDurationMinutes(activeTimeEntry)) : "";
 
   const checkIn = async () => {
     try {
+      setIsAttendanceActionPending(true);
       setError("");
       setMessage("");
-      await parseResponse(
+      const payload = await parseResponse(
         await fetch(`${API_BASE_URL}/api/time/checkin`, {
           method: "POST",
           headers: buildHeaders(true),
           body: JSON.stringify({}),
         })
       );
+      const activeEntry = payload?.data || payload?.entry || payload;
+      setIsCheckedIn(true);
+      setActiveTimeEntry(activeEntry);
       setMessage("Checked in successfully.");
-      await loadData();
+      dispatchAttendanceUpdated({ isCheckedIn: true, activeEntry });
+      await loadAttendance();
     } catch (requestError) {
       setError(requestError.message);
+    } finally {
+      setIsAttendanceActionPending(false);
     }
   };
 
   const checkOut = async () => {
     try {
+      setIsAttendanceActionPending(true);
       setError("");
       setMessage("");
-      await parseResponse(
+      const payload = await parseResponse(
         await fetch(`${API_BASE_URL}/api/time/checkout`, {
           method: "POST",
           headers: buildHeaders(true),
           body: JSON.stringify({}),
         })
       );
+      const completedEntry = payload?.data || payload?.entry || payload;
+      setIsCheckedIn(false);
+      setActiveTimeEntry(null);
       setMessage("Checked out successfully.");
-      await loadData();
+      dispatchAttendanceUpdated({ isCheckedIn: false, activeEntry: null, completedEntry });
+      await loadAttendance();
     } catch (requestError) {
       setError(requestError.message);
+      await loadAttendance().catch(() => {});
+    } finally {
+      setIsAttendanceActionPending(false);
     }
   };
 
@@ -832,8 +944,26 @@ const MyTasks = () => {
             <p className="mt-1 text-sm text-gray-500">Staff dashboard and live time tracking.</p>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={checkIn} className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Check In</button>
-            <button onClick={checkOut} className="rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-medium text-white hover:bg-[#e55d00]">Check Out</button>
+            <span className={`hidden rounded-lg px-3 py-2 text-xs font-semibold sm:inline-flex ${isCheckedIn ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-600"}`}>
+              {isCheckedIn ? `Checked In${activeDurationLabel ? ` - ${activeDurationLabel}` : ""}` : "Clocked Out"}
+            </span>
+            {isCheckedIn ? (
+              <button
+                onClick={checkOut}
+                disabled={isAttendanceActionPending}
+                className="rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-medium text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isAttendanceActionPending ? "Saving..." : "Check Out"}
+              </button>
+            ) : (
+              <button
+                onClick={checkIn}
+                disabled={isAttendanceActionPending}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isAttendanceActionPending ? "Saving..." : "Check In"}
+              </button>
+            )}
             <button onClick={loadData} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
               <RefreshCw className="h-4 w-4" />
               Refresh

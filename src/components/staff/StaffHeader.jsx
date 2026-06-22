@@ -7,6 +7,91 @@ import {
   markNotificationRead,
   resolveNotificationNavigation,
 } from "../../utils/notifications";
+import { getSession } from "../../utils/auth";
+
+const API_BASE_URL = "";
+
+const buildHeaders = () => {
+  const session = getSession();
+  return session?.token ? { Authorization: `Bearer ${session.token}` } : {};
+};
+
+const parseResponse = async (response) => {
+  const text = await response.text();
+  let payload = null;
+
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = text;
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.message ||
+        payload?.error ||
+        payload?.details ||
+        (typeof payload === "string" ? payload : "") ||
+        `Request failed with status ${response.status}`
+    );
+  }
+
+  return payload;
+};
+
+const firstPresent = (...values) => {
+  const value = values.find((currentValue) => {
+    if (currentValue === 0 || currentValue === false) return true;
+    return currentValue !== undefined && currentValue !== null && String(currentValue).trim() !== "";
+  });
+
+  return value === undefined || value === null ? "" : value;
+};
+
+const getTimeStatusData = (payload) => payload?.data || payload || {};
+
+const getActiveEntry = (payload) => {
+  const data = getTimeStatusData(payload);
+  return data?.activeEntry || data?.active_entry || null;
+};
+
+const getIsCheckedIn = (payload) => {
+  const data = getTimeStatusData(payload);
+  const value = firstPresent(data?.isCheckedIn, data?.is_checked_in, payload?.isCheckedIn, payload?.is_checked_in, "");
+  return value === true || String(value).toLowerCase() === "true";
+};
+
+const getEntryStartedAt = (entry = {}) =>
+  firstPresent(
+    entry?.checkInAt,
+    entry?.check_in_at,
+    entry?.checkedInAt,
+    entry?.checked_in_at,
+    entry?.clockInAt,
+    entry?.clock_in_at,
+    entry?.startedAt,
+    entry?.started_at
+  );
+
+const getDurationMinutes = (entry = {}, now = new Date()) => {
+  const explicitMinutes = Number(firstPresent(entry?.durationMinutes, entry?.duration_minutes, ""));
+  const startedAt = new Date(getEntryStartedAt(entry));
+
+  if (!Number.isNaN(startedAt.getTime())) {
+    return Math.max(0, Math.round((now.getTime() - startedAt.getTime()) / 60000));
+  }
+
+  return Number.isFinite(explicitMinutes) ? Math.max(0, Math.round(explicitMinutes)) : 0;
+};
+
+const formatDurationMinutes = (minutes = 0) => {
+  const safeMinutes = Math.max(0, Math.round(Number(minutes) || 0));
+  const hours = Math.floor(safeMinutes / 60);
+  const remainingMinutes = safeMinutes % 60;
+  return hours ? `${hours}h ${remainingMinutes}m` : `${remainingMinutes}m`;
+};
 
 const pageTitles = {
   "/tasks": "My Tasks",
@@ -22,6 +107,9 @@ const StaffHeader = ({ onMenuClick }) => {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [showNotifications, setShowNotifications] = useState(false);
   const [notificationItems, setNotificationItems] = useState([]);
+  const [isCheckedIn, setIsCheckedIn] = useState(false);
+  const [activeEntry, setActiveEntry] = useState(null);
+  const [hasLoadedAttendance, setHasLoadedAttendance] = useState(false);
   const notificationRef = useRef(null);
   const hasLoadedNotificationsRef = useRef(false);
   const seenUnreadIdsRef = useRef(new Set());
@@ -32,6 +120,47 @@ const StaffHeader = ({ onMenuClick }) => {
     }, 1000);
 
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadAttendanceStatus = async () => {
+      try {
+        const payload = await parseResponse(
+          await fetch(`${API_BASE_URL}/api/time/status`, {
+            method: "GET",
+            headers: buildHeaders(),
+          })
+        );
+
+        if (!isMounted) return;
+
+        setIsCheckedIn(getIsCheckedIn(payload));
+        setActiveEntry(getActiveEntry(payload));
+        setHasLoadedAttendance(true);
+      } catch {
+        if (isMounted) {
+          setHasLoadedAttendance(true);
+        }
+      }
+    };
+
+    const handleAttendanceUpdated = (event) => {
+      const detail = event?.detail || {};
+      setIsCheckedIn(Boolean(detail.isCheckedIn));
+      setActiveEntry(detail.activeEntry || null);
+      setHasLoadedAttendance(true);
+      loadAttendanceStatus();
+    };
+
+    loadAttendanceStatus();
+    window.addEventListener("pickpackpro-attendance-updated", handleAttendanceUpdated);
+
+    return () => {
+      isMounted = false;
+      window.removeEventListener("pickpackpro-attendance-updated", handleAttendanceUpdated);
+    };
   }, []);
 
   useEffect(() => {
@@ -100,6 +229,12 @@ const StaffHeader = ({ onMenuClick }) => {
 
   const unreadCount = notificationItems.filter((item) => item.unread).length;
   const visibleNotificationItems = notificationItems.filter((item) => item.unread);
+  const activeDurationLabel = activeEntry ? formatDurationMinutes(getDurationMinutes(activeEntry, currentTime)) : "";
+  const attendanceLabel = !hasLoadedAttendance
+    ? "Checking..."
+    : isCheckedIn
+      ? `Clocked In${activeDurationLabel ? ` - ${activeDurationLabel}` : ""}`
+      : "Clocked Out";
 
   const handleNotificationClick = async (notification) => {
     const target = resolveNotificationNavigation(notification, "staff");
@@ -161,7 +296,7 @@ const StaffHeader = ({ onMenuClick }) => {
         <div className="hidden items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-1.5 sm:flex">
           <Clock size={13} className="text-[#ff6900]" />
           <span className="text-[11px] font-medium uppercase tracking-wide text-[#ff6900]">
-            Shift: {formatTime(currentTime)}
+            Shift: {isCheckedIn && activeDurationLabel ? activeDurationLabel : formatTime(currentTime)}
           </span>
         </div>
 
@@ -179,9 +314,13 @@ const StaffHeader = ({ onMenuClick }) => {
 
         <button
           type="button"
-          className="hidden rounded-lg bg-[#ff6900] px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-[#e65f00] sm:inline-flex"
+          className={`hidden rounded-lg px-4 py-2 text-xs font-semibold shadow-sm transition-colors sm:inline-flex ${
+            isCheckedIn
+              ? "bg-[#ff6900] text-white"
+              : "border border-gray-200 bg-white text-gray-600"
+          }`}
         >
-          Clocked In
+          {attendanceLabel}
         </button>
 
         {showNotifications ? (
