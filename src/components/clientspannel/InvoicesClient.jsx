@@ -9,7 +9,9 @@ import { getServiceDisplayName, getServiceKey, isKnownServiceCode } from '../../
 
 const API_BASE_URL = '';
 const BACKEND_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app').replace(/\/+$/, '');
-const CLIENT_INVOICES_PAGE_SIZE = 10;
+const CLIENT_INVOICES_PAGE_SIZE = 20;
+const INVOICE_CATEGORY_DISPATCH = 'dispatch';
+const INVOICE_CATEGORY_CLIENT = 'client';
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();
@@ -129,6 +131,7 @@ const getInvoiceLineItemQuantity = (item = {}) => {
     firstPresent(
       item?.quantity,
       item?.qty,
+      item?.unit,
       item?.units,
       item?.unitCount,
       item?.unit_count,
@@ -236,12 +239,12 @@ const formatStatusLabel = (status = '') =>
 const getInvoiceTypeValue = (invoice = {}) =>
   String(invoice?.invoiceType || invoice?.invoice_type || invoice?.type || '').trim().toLowerCase();
 
-const getInvoiceTypeLabel = (invoiceType = '') => {
+const getInvoiceTypeLabel = (invoiceType = '', invoice = {}) => {
   const type = String(invoiceType || '').trim().toLowerCase();
   if (type === 'shipment') return 'Shipment Invoice';
   if (type === 'sub_shipment' || type === 'sub-shipment') return 'Sub-shipment Invoice';
-  if (type === 'ad_hoc' || type === 'ad-hoc') return 'Ad-hoc Invoice';
-  if (type === 'monthly') return 'Legacy Invoice';
+  if (type === 'ad_hoc' || type === 'ad-hoc') return isClientInvoiceRecord(invoice) ? 'Ad-hoc Client Invoice' : 'Ad-hoc Invoice';
+  if (type === 'monthly') return isClientInvoiceRecord(invoice) ? 'Client Invoice' : 'Legacy Invoice';
   return 'Invoice';
 };
 
@@ -250,6 +253,21 @@ const getInvoiceShipmentId = (invoice = {}) =>
 
 const getInvoiceSubShipmentId = (invoice = {}) =>
   firstPresent(invoice?.subShipmentId, invoice?.sub_shipment_id, invoice?.raw?.subShipmentId, invoice?.raw?.sub_shipment_id);
+
+const isTruthyInvoiceFlag = (value) => value === true || String(value || '').trim().toLowerCase() === 'true';
+
+const isClientInvoiceRecord = (invoice = {}) => {
+  const rawInvoice = invoice?.raw || {};
+  const category = String(firstPresent(invoice?.category, rawInvoice?.category, '')).trim().toLowerCase();
+  const sourceType = String(firstPresent(invoice?.sourceType, invoice?.source_type, rawInvoice?.sourceType, rawInvoice?.source_type, '')).trim().toLowerCase();
+
+  if (category === INVOICE_CATEGORY_CLIENT || sourceType === 'client_invoice') return true;
+  if (isTruthyInvoiceFlag(firstPresent(invoice?.isClientInvoice, invoice?.is_client_invoice, rawInvoice?.isClientInvoice, rawInvoice?.is_client_invoice, ''))) return true;
+
+  const invoiceType = getInvoiceTypeValue(invoice);
+  const hasDispatchSource = Boolean(getInvoiceShipmentId(invoice) || getInvoiceSubShipmentId(invoice));
+  return !hasDispatchSource && ['monthly', 'ad_hoc', 'ad-hoc'].includes(invoiceType);
+};
 
 const firstObject = (...values) =>
   values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};
@@ -348,6 +366,7 @@ const getInvoiceSourceReference = (invoice = {}) => {
 };
 
 const getInvoiceSourceDisplay = (invoice = {}) => {
+  if (isClientInvoiceRecord(invoice)) return 'Client Invoice';
   return firstPresent(getInvoiceSourceReference(invoice), getInvoiceSourceId(invoice), '--');
 };
 
@@ -364,6 +383,7 @@ const getTierTextClass = (tier) => {
 const normalizeInvoice = (invoice, index = 0) => {
   const invoiceId = firstPresent(invoice?.id, invoice?.uuid, invoice?.invoiceId, invoice?.invoice_id, invoice?.reference, invoice?.invoice);
   const invoiceType = getInvoiceTypeValue(invoice);
+  const isClientInvoice = isClientInvoiceRecord(invoice);
   const invoiceRef =
     invoice?.reference ||
     invoice?.invoice ||
@@ -375,12 +395,23 @@ const normalizeInvoice = (invoice, index = 0) => {
     invoiceId ||
     'N/A';
   const lineItems = extractInvoiceLineItems(invoice);
+  const description = firstPresent(invoice?.description, invoice?.name, invoice?.label, lineItems?.[0]?.description, lineItems?.[0]?.name, '');
+  const unit = Number(firstPresent(invoice?.unit, invoice?.units, invoice?.qty, invoice?.quantity, lineItems?.[0]?.unit, lineItems?.[0]?.units, lineItems?.[0]?.qty, lineItems?.[0]?.quantity, 0)) || 0;
+  const rate = Number(firstPresent(invoice?.rate, invoice?.unitRate, invoice?.unit_rate, lineItems?.[0]?.rate, lineItems?.[0]?.unitRate, lineItems?.[0]?.unit_rate, 0)) || 0;
+  const total = Number(invoice?.total || invoice?.grandTotal || invoice?.grand_total || invoice?.amount || 0);
+  const displayLineItems = lineItems.length
+    ? lineItems
+    : isClientInvoice && description
+      ? [{ description, unit, rate, amount: total, total, qty: unit }]
+      : lineItems;
 
   return {
     id: invoiceId || `invoice-${index}`,
     invoice: invoiceRef,
     invoiceType,
-    invoiceTypeLabel: getInvoiceTypeLabel(invoiceType),
+    invoiceTypeLabel: getInvoiceTypeLabel(invoiceType, invoice),
+    category: isClientInvoice ? INVOICE_CATEGORY_CLIENT : INVOICE_CATEGORY_DISPATCH,
+    isClientInvoice,
     source: getInvoiceSourceDisplay(invoice),
     sourceId: getInvoiceSourceId(invoice),
     sourceReference: getInvoiceSourceReference(invoice),
@@ -388,13 +419,17 @@ const normalizeInvoice = (invoice, index = 0) => {
     subShipmentId: getInvoiceSubShipmentId(invoice),
     subtotal: Number(invoice?.subtotal || invoice?.subTotal || invoice?.sub_total || invoice?.netTotal || invoice?.net_total || 0),
     vat: Number(invoice?.vat || invoice?.vatAmount || invoice?.vat_amount || invoice?.tax || invoice?.taxAmount || invoice?.tax_amount || 0),
-    total: Number(invoice?.total || invoice?.grandTotal || invoice?.grand_total || invoice?.amount || 0),
+    total,
+    description,
+    unit,
+    rate,
+    amount: total,
     due: invoice?.dueDate || invoice?.due_date || invoice?.dueAt || invoice?.due_at || '',
     date: invoice?.invoiceDate || invoice?.invoice_date || invoice?.date || invoice?.createdAt || invoice?.created_at || '',
     status: formatStatusLabel(invoice?.status || invoice?.paymentStatus || invoice?.payment_status || 'Pending'),
     statusValue: getInvoiceStatusValue(invoice),
     client: invoice?.clients?.companyName || invoice?.clients?.company_name || invoice?.client?.companyName || invoice?.client?.company_name || invoice?.clientName || invoice?.client_name || invoice?.client || '',
-    lineItems,
+    lineItems: displayLineItems,
     pdfUrl: invoice?.pdfUrl || invoice?.pdf_url || invoice?.downloadUrl || invoice?.download_url || invoice?.fileUrl || invoice?.file_url || '',
     raw: invoice,
   };
@@ -699,6 +734,7 @@ const InvoicesClient = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isInvoiceDetailLoading, setIsInvoiceDetailLoading] = useState(false);
   const [downloadingInvoiceId, setDownloadingInvoiceId] = useState('');
+  const [invoiceCategory, setInvoiceCategory] = useState(INVOICE_CATEGORY_DISPATCH);
   const [invoiceSearchTerm, setInvoiceSearchTerm] = useState('');
   const [debouncedInvoiceSearchTerm, setDebouncedInvoiceSearchTerm] = useState('');
   const [invoicePage, setInvoicePage] = useState(1);
@@ -720,6 +756,7 @@ const InvoicesClient = () => {
       const query = new URLSearchParams({
         page: String(invoicePage),
         limit: String(CLIENT_INVOICES_PAGE_SIZE),
+        category: invoiceCategory,
       });
       if (debouncedInvoiceSearchTerm.trim()) query.set('search', debouncedInvoiceSearchTerm.trim());
 
@@ -794,7 +831,7 @@ const InvoicesClient = () => {
 
   useEffect(() => {
     loadInvoices();
-  }, [invoicePage, debouncedInvoiceSearchTerm]);
+  }, [invoicePage, debouncedInvoiceSearchTerm, invoiceCategory]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -806,7 +843,7 @@ const InvoicesClient = () => {
 
   useEffect(() => {
     setInvoicePage(1);
-  }, [debouncedInvoiceSearchTerm]);
+  }, [debouncedInvoiceSearchTerm, invoiceCategory]);
 
   const stats = useMemo(() => {
     const outstandingInvoices = invoices.filter((invoice) => invoice.statusValue !== 'paid');
@@ -823,6 +860,7 @@ const InvoicesClient = () => {
     [invoices]
   );
   const filteredInvoices = invoices;
+  const isClientInvoiceCategory = invoiceCategory === INVOICE_CATEGORY_CLIENT;
   const invoiceTotalPages = Math.max(1, Number(invoiceListMeta.totalPages || 1) || 1);
   const invoicePaginationStart = invoiceListMeta.total ? (invoicePage - 1) * CLIENT_INVOICES_PAGE_SIZE + 1 : 0;
   const invoicePaginationEnd = Math.min((invoicePage - 1) * CLIENT_INVOICES_PAGE_SIZE + filteredInvoices.length, invoiceListMeta.total);
@@ -885,6 +923,7 @@ const InvoicesClient = () => {
   };
 
   const getInvoicePdfLines = (invoice) => {
+    const isClientInvoice = isClientInvoiceRecord(invoice);
     const rows = invoice.lineItems?.length
       ? invoice.lineItems
       : [
@@ -913,8 +952,8 @@ const InvoicesClient = () => {
         return `${index + 1}. ${description}${quantity !== '' ? ` | Qty ${quantity}` : ''}${rate !== '' ? ` | Rate ${formatCurrency(rate)}` : ''} | ${formatCurrency(total)}`;
       }),
       '',
-      `Subtotal: ${formatCurrency(invoice.subtotal)}`,
-      `VAT: ${formatCurrency(invoice.vat)}`,
+      isClientInvoice ? '' : `Subtotal: ${formatCurrency(invoice.subtotal)}`,
+      isClientInvoice ? '' : `VAT: ${formatCurrency(invoice.vat)}`,
       `Total: ${formatCurrency(invoice.total)}`,
     ].filter((line) => line !== '');
   };
@@ -955,26 +994,40 @@ const InvoicesClient = () => {
       return;
     }
 
-    const rows = [
-      ['Invoice', 'Type', 'Source', 'Invoice Date', 'Subtotal', 'VAT', 'Total', 'Due', 'Status'],
-      ...filteredInvoices.map((invoice) => [
-        invoice.invoice,
-        invoice.invoiceTypeLabel,
-        invoice.source,
-        formatDate(invoice.date),
-        invoice.subtotal,
-        invoice.vat,
-        invoice.total,
-        invoice.due,
-        invoice.status,
-      ]),
-    ];
+    const rows = isClientInvoiceCategory
+      ? [
+          ['Invoice', 'Invoice Date', 'Description', 'Unit', 'Rate', 'Amount', 'Due', 'Status'],
+          ...filteredInvoices.map((invoice) => [
+            invoice.invoice,
+            formatDate(invoice.date),
+            invoice.description,
+            invoice.unit,
+            invoice.rate,
+            invoice.amount,
+            invoice.due,
+            invoice.status,
+          ]),
+        ]
+      : [
+          ['Invoice', 'Type', 'Source', 'Invoice Date', 'Subtotal', 'VAT', 'Total', 'Due', 'Status'],
+          ...filteredInvoices.map((invoice) => [
+            invoice.invoice,
+            invoice.invoiceTypeLabel,
+            invoice.source,
+            formatDate(invoice.date),
+            invoice.subtotal,
+            invoice.vat,
+            invoice.total,
+            invoice.due,
+            invoice.status,
+          ]),
+        ];
     const csv = rows.map((row) => row.map((value) => `"${String(value)}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'client-invoices.csv';
+    link.download = isClientInvoiceCategory ? 'client-account-invoices.csv' : 'client-shipment-invoices.csv';
     link.click();
     URL.revokeObjectURL(url);
     setMessage('Invoice export downloaded.');
@@ -1087,7 +1140,26 @@ const InvoicesClient = () => {
           </div>
 
           <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-gray-900">Invoice History</h2>
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Invoice History</h2>
+              <div className="mt-2 inline-flex rounded-lg border border-[#dce5f1] bg-[#f8fbff] p-1">
+                {[
+                  { value: INVOICE_CATEGORY_DISPATCH, label: 'Shipment Invoices' },
+                  { value: INVOICE_CATEGORY_CLIENT, label: 'Client Invoices' },
+                ].map((tab) => (
+                  <button
+                    key={tab.value}
+                    type="button"
+                    onClick={() => setInvoiceCategory(tab.value)}
+                    className={`rounded-md px-3 py-1.5 text-sm font-semibold transition-colors ${
+                      invoiceCategory === tab.value ? 'bg-white text-[#ff6900] shadow-sm' : 'text-[#64748b] hover:text-[#132347]'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <label className="relative block">
                 <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#94a3b8]" />
@@ -1111,12 +1183,27 @@ const InvoicesClient = () => {
                 <thead>
                   <tr className="border-b border-[#e8eef7] bg-[#f8fbff]">
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">INVOICE#</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">TYPE</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">SOURCE</th>
+                    {isClientInvoiceCategory ? (
+                      <>
+                        <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">DESCRIPTION</th>
+                        <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">UNIT</th>
+                        <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">RATE</th>
+                        <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">AMOUNT</th>
+                      </>
+                    ) : (
+                      <>
+                        <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">TYPE</th>
+                        <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">SOURCE</th>
+                      </>
+                    )}
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">DATE</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">SUBTOTAL</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">VAT</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">TOTAL</th>
+                    {!isClientInvoiceCategory ? (
+                      <>
+                        <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">SUBTOTAL</th>
+                        <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">VAT</th>
+                        <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">TOTAL</th>
+                      </>
+                    ) : null}
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">DUE</th>
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">STATUS</th>
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">ACTIONS</th>
@@ -1125,13 +1212,13 @@ const InvoicesClient = () => {
                 <tbody>
                   {isLoading ? (
                     <tr>
-                      <td colSpan="10" className="px-6 py-10 text-center text-sm text-gray-500">
+                      <td colSpan={isClientInvoiceCategory ? 9 : 10} className="px-6 py-10 text-center text-sm text-gray-500">
                         <LoadingState label="Loading invoices..." />
                       </td>
                     </tr>
                   ) : filteredInvoices.length === 0 ? (
                     <tr>
-                      <td colSpan="10" className="px-6 py-12 text-center">
+                      <td colSpan={isClientInvoiceCategory ? 9 : 10} className="px-6 py-12 text-center">
                         <div className="mx-auto flex max-w-sm flex-col items-center">
                           <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-[#f1f5f9]">
                             <FileText size={20} className="text-[#64748b]" />
@@ -1150,12 +1237,27 @@ const InvoicesClient = () => {
                   ) : filteredInvoices.map((invoice) => (
                     <tr key={invoice.id} className="border-b border-gray-50 transition-colors hover:bg-gray-50/30 last:border-b-0">
                       <td className="px-6 py-4 text-sm font-semibold text-[#132347]">{invoice.invoice}</td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{invoice.invoiceTypeLabel}</td>
-                      <td className="px-6 py-4 text-sm font-medium text-gray-900">{invoice.source}</td>
+                      {isClientInvoiceCategory ? (
+                        <>
+                          <td className="px-6 py-4 text-sm text-gray-700">{invoice.description || '-'}</td>
+                          <td className="px-6 py-4 text-sm text-gray-700">{invoice.unit || 0}</td>
+                          <td className="px-6 py-4 text-sm text-gray-700">{formatCurrency(invoice.rate)}</td>
+                          <td className="px-6 py-4 text-sm font-semibold text-gray-900">{formatCurrency(invoice.amount)}</td>
+                        </>
+                      ) : (
+                        <>
+                          <td className="px-6 py-4 text-sm text-gray-700">{invoice.invoiceTypeLabel}</td>
+                          <td className="px-6 py-4 text-sm font-medium text-gray-900">{invoice.source}</td>
+                        </>
+                      )}
                       <td className="px-6 py-4 text-sm text-gray-700">{formatDate(invoice.date)}</td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{formatCurrency(invoice.subtotal)}</td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{formatCurrency(invoice.vat)}</td>
-                      <td className="px-6 py-4 text-sm font-semibold text-gray-900">{formatCurrency(invoice.total)}</td>
+                      {!isClientInvoiceCategory ? (
+                        <>
+                          <td className="px-6 py-4 text-sm text-gray-700">{formatCurrency(invoice.subtotal)}</td>
+                          <td className="px-6 py-4 text-sm text-gray-700">{formatCurrency(invoice.vat)}</td>
+                          <td className="px-6 py-4 text-sm font-semibold text-gray-900">{formatCurrency(invoice.total)}</td>
+                        </>
+                      ) : null}
                       <td className="px-6 py-4 text-sm text-gray-700">{formatDate(invoice.due)}</td>
                       <td className="px-6 py-4">
                         <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${
@@ -1250,13 +1352,20 @@ const InvoicesClient = () => {
 
                 <div className="space-y-5 px-6 py-5">
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
-                    {[
-                      { label: 'Type', value: selectedInvoice.invoiceTypeLabel },
-                      { label: 'Source', value: selectedInvoice.source },
-                      { label: 'Invoice Date', value: formatDate(selectedInvoice.date) },
-                      { label: 'Due', value: formatDate(selectedInvoice.due) },
-                      { label: 'Status', value: selectedInvoice.status },
-                    ].map((item) => (
+                    {(isClientInvoiceRecord(selectedInvoice)
+                      ? [
+                          { label: 'Type', value: selectedInvoice.invoiceTypeLabel },
+                          { label: 'Invoice Date', value: formatDate(selectedInvoice.date) },
+                          { label: 'Due', value: formatDate(selectedInvoice.due) },
+                          { label: 'Status', value: selectedInvoice.status },
+                        ]
+                      : [
+                          { label: 'Type', value: selectedInvoice.invoiceTypeLabel },
+                          { label: 'Source', value: selectedInvoice.source },
+                          { label: 'Invoice Date', value: formatDate(selectedInvoice.date) },
+                          { label: 'Due', value: formatDate(selectedInvoice.due) },
+                          { label: 'Status', value: selectedInvoice.status },
+                        ]).map((item) => (
                       <div key={item.label} className="rounded-lg border border-[#e5edf7] bg-[#f8fafc] px-3 py-2">
                         <p className="text-[10px] font-semibold uppercase tracking-wide text-[#94a3b8]">{item.label}</p>
                         <p className="mt-1 break-words text-sm font-semibold text-[#132347]">{item.value || '-'}</p>
@@ -1269,9 +1378,9 @@ const InvoicesClient = () => {
                       <thead className="bg-[#f8fbff] text-xs uppercase tracking-wide text-[#64748b]">
                         <tr>
                           <th className="px-4 py-3 text-left">Description</th>
-                          <th className="px-4 py-3 text-right">Qty</th>
+                          <th className="px-4 py-3 text-right">{isClientInvoiceRecord(selectedInvoice) ? 'Unit' : 'Qty'}</th>
                           <th className="px-4 py-3 text-right">Rate</th>
-                          <th className="px-4 py-3 text-right">Total</th>
+                          <th className="px-4 py-3 text-right">Amount</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#edf2f7]">
@@ -1304,10 +1413,14 @@ const InvoicesClient = () => {
                   </div>
 
                   <div className="ml-auto grid max-w-sm grid-cols-2 gap-y-2 text-sm">
-                    <span className="text-[#64748b]">Subtotal</span>
-                    <span className="text-right font-semibold text-[#132347]">{formatCurrency(selectedInvoice.subtotal)}</span>
-                    <span className="text-[#64748b]">VAT</span>
-                    <span className="text-right font-semibold text-[#132347]">{formatCurrency(selectedInvoice.vat)}</span>
+                    {!isClientInvoiceRecord(selectedInvoice) ? (
+                      <>
+                        <span className="text-[#64748b]">Subtotal</span>
+                        <span className="text-right font-semibold text-[#132347]">{formatCurrency(selectedInvoice.subtotal)}</span>
+                        <span className="text-[#64748b]">VAT</span>
+                        <span className="text-right font-semibold text-[#132347]">{formatCurrency(selectedInvoice.vat)}</span>
+                      </>
+                    ) : null}
                     <span className="border-t border-[#e5edf7] pt-2 text-[#132347]">Total</span>
                     <span className="border-t border-[#e5edf7] pt-2 text-right text-lg font-bold text-[#132347]">{formatCurrency(selectedInvoice.total)}</span>
                   </div>

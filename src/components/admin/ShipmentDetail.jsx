@@ -5,6 +5,7 @@ import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import DiscrepancyResolutionModal from '../common/DiscrepancyResolutionModal';
 import ConfirmationModal from '../common/ConfirmationModal';
+import ShipmentNoteAttachments from '../common/ShipmentNoteAttachments';
 import { getSession } from '../../utils/auth';
 import { getDiscrepancyResolveData, resolveDiscrepancy as resolveDiscrepancyRequest } from '../../utils/discrepancies';
 import { formatToastMessage, showToast } from '../../utils/toast';
@@ -29,6 +30,7 @@ import { fetchFilesBatch, getBatchFileById, getBatchFilesForEntity } from '../..
 import { fetchBoxItemsBatch, getBatchItemsForBox } from '../../utils/boxItemsBatch';
 import { fetchShipmentServicesBatch, getBatchServicesForShipment } from '../../utils/shipmentServicesBatch';
 import { fetchShipmentDiscrepanciesBatch, getBatchDiscrepanciesForShipment } from '../../utils/shipmentDiscrepanciesBatch';
+import { getShipmentNoteAttachments } from '../../utils/shipmentNoteAttachments';
 
 const API_BASE_URL = '';
 const BUNDLE_SIZE_NOTE_PREFIX = 'Bundle Sizes:';
@@ -4992,6 +4994,7 @@ const ShipmentDetail = () => {
         extractList(detailViewBundle, ['subShipments', 'sub_shipments']),
         extractSubShipments(bundleShipment)
       );
+      const noteAttachments = getShipmentNoteAttachments(detailViewBundle, bundleShipment);
       const shipmentData = normalizeMappedShipment({
         ...bundleShipment,
         items: bundleLineItems,
@@ -5001,6 +5004,8 @@ const ShipmentDetail = () => {
         outbound_boxes: bundleBoxes,
         subShipments: bundleSubShipments,
         sub_shipments: bundleSubShipments,
+        noteAttachments,
+        note_attachments: noteAttachments,
         invoice: detailViewBundle?.invoice || bundleShipment?.invoice || null,
         invoices: extractList(detailViewBundle, ['invoices']),
         counts: detailViewBundle?.counts || bundleShipment?.counts,
@@ -6982,6 +6987,7 @@ const ShipmentDetail = () => {
                   <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
                     {getShipmentNoteText(shipment) || 'No shipment notes added.'}
                   </div>
+                  <ShipmentNoteAttachments attachments={getShipmentNoteAttachments(shipment, files)} />
                   <div className="mt-3 text-[11px] text-gray-400">
                     <span>Last edited: {shipment?.updated_at || shipment?.updatedAt || '2 hours ago'} </span>
                   </div>
@@ -7208,6 +7214,7 @@ const ShipmentDetail = () => {
                     <p className="whitespace-pre-line text-[15px] leading-7 text-[#132347]">
                       {getShipmentNoteText(shipment) || 'No shipment notes added.'}
                     </p>
+                    <ShipmentNoteAttachments attachments={getShipmentNoteAttachments(shipment, files)} />
                     {/* <div className="mt-5 border-t border-[#e8edf5] pt-4 text-[12px]">
                       <span className="text-[#9aa8bd]">Last edited: {shipment?.updated_at || shipment?.updatedAt || '2 hours ago'} </span>
                     </div> */}

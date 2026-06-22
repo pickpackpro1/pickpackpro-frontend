@@ -9,6 +9,27 @@ import { getServiceDisplayName, getServiceKey, isKnownServiceCode } from '../../
 
 const API_BASE_URL = '';
 const BILLING_PAGE_SIZE = 20;
+const INVOICE_CATEGORY_DISPATCH = 'dispatch';
+const INVOICE_CATEGORY_CLIENT = 'client';
+
+const createInvoiceListMeta = () => ({
+  total: 0,
+  page: 1,
+  limit: BILLING_PAGE_SIZE,
+  totalPages: 1,
+});
+
+const getTodayInputDate = () => new Date().toISOString().slice(0, 10);
+
+const createEmptyClientInvoiceForm = () => ({
+  clientId: '',
+  invoiceDate: getTodayInputDate(),
+  invoiceType: 'monthly',
+  description: '',
+  unit: '',
+  rate: '',
+  notes: '',
+});
 
 const buildHeaders = (includeJson = false) => {
   const session = getSession();
@@ -359,12 +380,12 @@ const getInvoiceTypeValue = (invoice = {}) =>
     .trim()
     .toLowerCase();
 
-const getInvoiceTypeLabel = (invoiceType = '') => {
+const getInvoiceTypeLabel = (invoiceType = '', invoice = {}) => {
   const type = String(invoiceType || '').trim().toLowerCase();
   if (type === 'shipment') return 'Shipment Invoice';
   if (type === 'sub_shipment' || type === 'sub-shipment') return 'Sub-shipment Invoice';
-  if (type === 'ad_hoc' || type === 'ad-hoc') return 'Ad-hoc Invoice';
-  if (type === 'monthly') return 'Legacy Invoice';
+  if (type === 'ad_hoc' || type === 'ad-hoc') return isClientInvoiceRecord(invoice) ? 'Ad-hoc Client Invoice' : 'Ad-hoc Invoice';
+  if (type === 'monthly') return isClientInvoiceRecord(invoice) ? 'Client Invoice' : 'Legacy Invoice';
   return type ? formatStatusLabel(type) : 'Invoice';
 };
 
@@ -373,6 +394,21 @@ const getInvoiceShipmentId = (invoice = {}) =>
 
 const getInvoiceSubShipmentId = (invoice = {}) =>
   firstPresent(invoice?.subShipmentId, invoice?.sub_shipment_id, invoice?.raw?.subShipmentId, invoice?.raw?.sub_shipment_id);
+
+const isTruthyInvoiceFlag = (value) => value === true || String(value || '').trim().toLowerCase() === 'true';
+
+const isClientInvoiceRecord = (invoice = {}) => {
+  const rawInvoice = invoice?.raw || {};
+  const category = String(firstPresent(invoice?.category, rawInvoice?.category, '')).trim().toLowerCase();
+  const sourceType = String(firstPresent(invoice?.sourceType, invoice?.source_type, rawInvoice?.sourceType, rawInvoice?.source_type, '')).trim().toLowerCase();
+
+  if (category === INVOICE_CATEGORY_CLIENT || sourceType === 'client_invoice') return true;
+  if (isTruthyInvoiceFlag(firstPresent(invoice?.isClientInvoice, invoice?.is_client_invoice, rawInvoice?.isClientInvoice, rawInvoice?.is_client_invoice, ''))) return true;
+
+  const invoiceType = getInvoiceTypeValue(invoice);
+  const hasDispatchSource = Boolean(getInvoiceShipmentId(invoice) || getInvoiceSubShipmentId(invoice));
+  return !hasDispatchSource && ['monthly', 'ad_hoc', 'ad-hoc'].includes(invoiceType);
+};
 
 const firstObject = (...values) =>
   values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};
@@ -471,6 +507,8 @@ const getInvoiceSourceReference = (invoice = {}) => {
 };
 
 const getInvoiceSourceFallbackDisplay = (invoice = {}) => {
+  if (isClientInvoiceRecord(invoice)) return 'Client Invoice';
+
   const directReference = getInvoiceSourceReference(invoice);
   if (directReference) return directReference;
 
@@ -484,12 +522,24 @@ const getInvoiceSourceFallbackDisplay = (invoice = {}) => {
 const normalizeInvoice = (invoice) => {
   const lineItems = extractInvoiceLineItems(invoice);
   const invoiceType = getInvoiceTypeValue(invoice);
+  const isClientInvoice = isClientInvoiceRecord(invoice);
+  const description = firstPresent(invoice?.description, invoice?.name, invoice?.label, lineItems?.[0]?.description, lineItems?.[0]?.name, '');
+  const unit = toNumber(firstPresent(invoice?.unit, invoice?.units, invoice?.qty, invoice?.quantity, lineItems?.[0]?.unit, lineItems?.[0]?.units, lineItems?.[0]?.qty, lineItems?.[0]?.quantity, 0));
+  const rate = toNumber(firstPresent(invoice?.rate, invoice?.unitRate, invoice?.unit_rate, lineItems?.[0]?.rate, lineItems?.[0]?.unitRate, lineItems?.[0]?.unit_rate, 0));
+  const amount = getInvoiceTotalValue(invoice, lineItems);
+  const displayLineItems = lineItems.length
+    ? lineItems
+    : isClientInvoice && description
+      ? [{ description, unit, rate, amount, total: amount, qty: unit }]
+      : lineItems;
 
   return {
     id: firstPresent(invoice?.id, invoice?.uuid, invoice?.invoiceId, invoice?.invoice_id, invoice?.reference, invoice?.invoice_number),
     ref: firstPresent(invoice?.reference, invoice?.invoiceNumber, invoice?.invoice_number, invoice?.number, invoice?.invoiceNo, invoice?.invoice_no, invoice?.id, 'N/A'),
     invoiceType,
-    invoiceTypeLabel: getInvoiceTypeLabel(invoiceType),
+    invoiceTypeLabel: getInvoiceTypeLabel(invoiceType, invoice),
+    category: isClientInvoice ? INVOICE_CATEGORY_CLIENT : INVOICE_CATEGORY_DISPATCH,
+    isClientInvoice,
     shipmentId: getInvoiceShipmentId(invoice),
     subShipmentId: getInvoiceSubShipmentId(invoice),
     sourceId: getInvoiceSourceId(invoice),
@@ -501,13 +551,17 @@ const normalizeInvoice = (invoice) => {
     due: firstPresent(invoice?.dueDate, invoice?.due_date, invoice?.dueAt, invoice?.due_at),
     subtotal: getInvoiceSubtotalValue(invoice, lineItems),
     vat: getInvoiceVatValue(invoice, lineItems),
-    total: getInvoiceTotalValue(invoice, lineItems),
+    total: amount,
+    description,
+    unit,
+    rate,
+    amount,
     status: invoice?.status || 'draft',
     sentAt: firstPresent(invoice?.sentAt, invoice?.sent_at),
     paidAt: firstPresent(invoice?.paidAt, invoice?.paid_at),
     notes: firstPresent(invoice?.notes, ''),
-    lineItems,
-    lineItemCount: getInvoiceLineItemCount(invoice, lineItems),
+    lineItems: displayLineItems,
+    lineItemCount: getInvoiceLineItemCount(invoice, displayLineItems),
     raw: invoice,
   };
 };
@@ -808,9 +862,9 @@ const getInvoiceStatusValue = (invoice = {}) => String(invoice?.status || '').tr
 const isDraftInvoice = (invoice = {}) => getInvoiceStatusValue(invoice) === 'draft';
 
 const canEditManualInvoiceLines = (invoice = {}) =>
-  ['draft', 'sent'].includes(getInvoiceStatusValue(invoice)) && getInvoiceTypeValue(invoice) !== 'monthly';
+  ['draft', 'sent'].includes(getInvoiceStatusValue(invoice)) && !isClientInvoiceRecord(invoice) && getInvoiceTypeValue(invoice) !== 'monthly';
 
-const getInvoiceLineQty = (item = {}) => firstPresent(item?.qty, item?.quantity, item?.units, 0);
+const getInvoiceLineQty = (item = {}) => firstPresent(item?.unit, item?.qty, item?.quantity, item?.units, 0);
 
 const getInvoiceLineUnitRate = (item = {}) =>
   firstPresent(item?.unitRate, item?.unit_rate, item?.rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, 0);
@@ -829,6 +883,7 @@ const buildInvoiceDocumentHtml = ({ invoice, companyDetails, clientRecord, clien
   const clientAddressLines = getInvoiceClientAddressLines(invoice, clientRecord);
   const clientName = firstDisplayValue(clientDisplay, invoice?.client, getClientDisplayName(clientRecord), getInlineInvoiceClientDisplay(rawInvoice), 'Unnamed Client');
   const clientEmail = getInvoiceClientEmailDisplay(invoice, clientRecord);
+  const isClientInvoice = isClientInvoiceRecord(invoice);
   const paymentParts = [
     companyDetails?.bankName ? `Bank: ${companyDetails.bankName}` : '',
     companyDetails?.sortCode ? `Sort Code: ${companyDetails.sortCode}` : '',
@@ -905,31 +960,31 @@ const buildInvoiceDocumentHtml = ({ invoice, companyDetails, clientRecord, clien
       <thead>
         <tr>
           <th>Description</th>
-          <th class="right">Qty</th>
+          <th class="right">${isClientInvoice ? 'Unit' : 'Qty'}</th>
           <th class="right">Rate</th>
           <th class="right">Amount</th>
-          <th class="right">VAT</th>
+          ${isClientInvoice ? '' : '<th class="right">VAT</th>'}
         </tr>
       </thead>
       <tbody>
         ${lineItems.map((item, index) => {
           const description = getInvoiceLineDescription(item, index);
-          const quantity = firstPresent(item?.quantity, item?.qty, item?.units, '');
+          const quantity = firstPresent(item?.unit, item?.quantity, item?.qty, item?.units, '');
           const rate = firstPresent(item?.rate, item?.unitRate, item?.unit_rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, '');
           return `<tr>
             <td>${escapeHtml(description)}</td>
             <td class="right">${escapeHtml(quantity)}</td>
             <td class="right">${rate !== '' ? escapeHtml(formatCurrency(rate)) : ''}</td>
             <td class="right">${escapeHtml(formatCurrency(getInvoiceLineAmount(item)))}</td>
-            <td class="right">${escapeHtml(formatCurrency(getInvoiceLineVat(item)))}</td>
+            ${isClientInvoice ? '' : `<td class="right">${escapeHtml(formatCurrency(getInvoiceLineVat(item)))}</td>`}
           </tr>`;
         }).join('')}
       </tbody>
     </table>
 
     <section class="totals">
-      <div class="totals-row"><span>Subtotal</span><span>${escapeHtml(formatCurrency(invoice?.subtotal))}</span></div>
-      <div class="totals-row"><span>VAT</span><span>${escapeHtml(formatCurrency(invoice?.vat))}</span></div>
+      ${isClientInvoice ? '' : `<div class="totals-row"><span>Subtotal</span><span>${escapeHtml(formatCurrency(invoice?.subtotal))}</span></div>`}
+      ${isClientInvoice ? '' : `<div class="totals-row"><span>VAT</span><span>${escapeHtml(formatCurrency(invoice?.vat))}</span></div>`}
       <div class="totals-row total"><span>Total</span><span>${escapeHtml(formatCurrency(invoice?.total))}</span></div>
     </section>
 
@@ -1040,9 +1095,9 @@ const fetchSubShipmentReference = async (subShipmentId = '', shipmentId = '', ca
 
 const Billing = () => {
   const location = useLocation();
-  const [invoicePage, setInvoicePage] = useState(1);
   const [selectedInvoice, setSelectedInvoice] = useState(null);
-  const [invoices, setInvoices] = useState([]);
+  const [dispatchInvoices, setDispatchInvoices] = useState([]);
+  const [clientInvoices, setClientInvoices] = useState([]);
   const [clients, setClients] = useState([]);
   const [companyBillingDetails, setCompanyBillingDetails] = useState(DEFAULT_COMPANY_BILLING_DETAILS);
   const [manualLineForm, setManualLineForm] = useState(createEmptyManualLineForm);
@@ -1050,25 +1105,69 @@ const Billing = () => {
   const [showManualLineForm, setShowManualLineForm] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
   const [isInvoiceDetailLoading, setIsInvoiceDetailLoading] = useState(false);
   const [invoiceActionKey, setInvoiceActionKey] = useState('');
   const [lineActionKey, setLineActionKey] = useState('');
   const [openedInvoiceQuery, setOpenedInvoiceQuery] = useState('');
-  const [invoiceSearchTerm, setInvoiceSearchTerm] = useState('');
-  const [debouncedInvoiceSearchTerm, setDebouncedInvoiceSearchTerm] = useState('');
-  const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('all');
-  const [invoiceListMeta, setInvoiceListMeta] = useState({
-    total: 0,
-    page: 1,
-    limit: BILLING_PAGE_SIZE,
-    totalPages: 1,
+  const [invoiceCategory, setInvoiceCategory] = useState(INVOICE_CATEGORY_DISPATCH);
+  const [invoicePages, setInvoicePages] = useState({
+    [INVOICE_CATEGORY_DISPATCH]: 1,
+    [INVOICE_CATEGORY_CLIENT]: 1,
+  });
+  const [invoiceSearchTerms, setInvoiceSearchTerms] = useState({
+    [INVOICE_CATEGORY_DISPATCH]: '',
+    [INVOICE_CATEGORY_CLIENT]: '',
+  });
+  const [debouncedInvoiceSearchTerms, setDebouncedInvoiceSearchTerms] = useState({
+    [INVOICE_CATEGORY_DISPATCH]: '',
+    [INVOICE_CATEGORY_CLIENT]: '',
+  });
+  const [invoiceStatusFilters, setInvoiceStatusFilters] = useState({
+    [INVOICE_CATEGORY_DISPATCH]: 'all',
+    [INVOICE_CATEGORY_CLIENT]: 'all',
+  });
+  const [invoiceListMetas, setInvoiceListMetas] = useState({
+    [INVOICE_CATEGORY_DISPATCH]: createInvoiceListMeta(),
+    [INVOICE_CATEGORY_CLIENT]: createInvoiceListMeta(),
+  });
+  const [invoiceLoading, setInvoiceLoading] = useState({
+    [INVOICE_CATEGORY_DISPATCH]: false,
+    [INVOICE_CATEGORY_CLIENT]: false,
   });
   const [sendInvoiceTarget, setSendInvoiceTarget] = useState(null);
   const [deleteInvoiceTarget, setDeleteInvoiceTarget] = useState(null);
+  const [showClientInvoiceForm, setShowClientInvoiceForm] = useState(false);
+  const [clientInvoiceForm, setClientInvoiceForm] = useState(createEmptyClientInvoiceForm);
+  const [selectedClientInvoiceIds, setSelectedClientInvoiceIds] = useState([]);
+  const [bulkDeleteClientInvoicesTarget, setBulkDeleteClientInvoicesTarget] = useState(false);
   const [deletedInvoiceKeys, setDeletedInvoiceKeys] = useState([]);
   const [sourceReferenceLookup, setSourceReferenceLookup] = useState({ shipments: {}, subShipments: {} });
   const pendingSourceReferenceRequests = useRef(new Set());
+
+  const invoices = invoiceCategory === INVOICE_CATEGORY_CLIENT ? clientInvoices : dispatchInvoices;
+  const invoicePage = invoicePages[invoiceCategory] || 1;
+  const invoiceSearchTerm = invoiceSearchTerms[invoiceCategory] || '';
+  const debouncedInvoiceSearchTerm = debouncedInvoiceSearchTerms[invoiceCategory] || '';
+  const invoiceStatusFilter = invoiceStatusFilters[invoiceCategory] || 'all';
+  const invoiceListMeta = invoiceListMetas[invoiceCategory] || createInvoiceListMeta();
+  const isLoading = Boolean(invoiceLoading[invoiceCategory]);
+
+  const setInvoicesForCategory = (category, updater) => {
+    const setCategoryInvoices = category === INVOICE_CATEGORY_CLIENT ? setClientInvoices : setDispatchInvoices;
+    setCategoryInvoices(updater);
+  };
+
+  const setInvoices = (updater) => {
+    setInvoicesForCategory(invoiceCategory, updater);
+  };
+
+  const setInvoicePage = (updater) => {
+    setInvoicePages((currentPages) => {
+      const currentPage = currentPages[invoiceCategory] || 1;
+      const nextPage = typeof updater === 'function' ? updater(currentPage) : updater;
+      return { ...currentPages, [invoiceCategory]: nextPage };
+    });
+  };
 
   const clientLookup = useMemo(() => {
     const lookup = new Map();
@@ -1123,16 +1222,21 @@ const Billing = () => {
   const resolveInvoiceSourceDisplay = (invoice = {}) =>
     resolveInvoiceSourceReference(invoice) || getInvoiceSourceFallbackDisplay(invoice.raw || invoice);
 
-  const loadInvoices = async (extraDeletedKeys = []) => {
+  const loadInvoices = async (category = invoiceCategory, extraDeletedKeys = [], pageOverride) => {
+    const currentPage = Number(pageOverride || invoicePages[category] || 1) || 1;
+    const currentSearchTerm = String(debouncedInvoiceSearchTerms[category] || '').trim();
+    const currentStatusFilter = String(invoiceStatusFilters[category] || 'all').trim() || 'all';
+
     try {
-      setIsLoading(true);
+      setInvoiceLoading((currentLoading) => ({ ...currentLoading, [category]: true }));
       setError('');
       const query = new URLSearchParams({
-        page: String(invoicePage),
+        page: String(currentPage),
         limit: String(BILLING_PAGE_SIZE),
+        category,
+        search: currentSearchTerm,
+        status: currentStatusFilter,
       });
-      if (debouncedInvoiceSearchTerm.trim()) query.set('search', debouncedInvoiceSearchTerm.trim());
-      if (invoiceStatusFilter !== 'all') query.set('status', invoiceStatusFilter);
 
       const response = await fetch(`${API_BASE_URL}/api/invoices?${query.toString()}`, {
         method: 'GET',
@@ -1144,27 +1248,28 @@ const Billing = () => {
       const normalizedInvoices = extractInvoices(payload)
         .map(normalizeInvoice)
         .filter((invoice) => !getInvoiceLookupCandidates(invoice).some((key) => deletedKeySet.has(key)));
-      setInvoices(normalizedInvoices);
+      setInvoicesForCategory(category, normalizedInvoices);
       const source = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
       const total = Number(source.total || normalizedInvoices.length || 0);
       const limit = Number(source.limit || BILLING_PAGE_SIZE) || BILLING_PAGE_SIZE;
-      setInvoiceListMeta({
-        total,
-        page: Number(source.page || invoicePage || 1) || 1,
-        limit,
-        totalPages: Number(source.totalPages || source.total_pages || Math.ceil(total / limit)) || 1,
-      });
+      setInvoiceListMetas((currentMetas) => ({
+        ...currentMetas,
+        [category]: {
+          total,
+          page: Number(source.page || currentPage || 1) || 1,
+          limit,
+          totalPages: Number(source.totalPages || source.total_pages || Math.ceil(total / limit)) || 1,
+        },
+      }));
     } catch (requestError) {
       setError(requestError.message);
-      setInvoices([]);
-      setInvoiceListMeta({
-        total: 0,
-        page: 1,
-        limit: BILLING_PAGE_SIZE,
-        totalPages: 1,
-      });
+      setInvoicesForCategory(category, []);
+      setInvoiceListMetas((currentMetas) => ({
+        ...currentMetas,
+        [category]: createInvoiceListMeta(),
+      }));
     } finally {
-      setIsLoading(false);
+      setInvoiceLoading((currentLoading) => ({ ...currentLoading, [category]: false }));
     }
   };
 
@@ -1201,15 +1306,19 @@ const Billing = () => {
   }, []);
 
   useEffect(() => {
-    loadInvoices();
-  }, [invoicePage, debouncedInvoiceSearchTerm, invoiceStatusFilter]);
+    loadInvoices(invoiceCategory);
+  }, [invoicePage, debouncedInvoiceSearchTerm, invoiceStatusFilter, invoiceCategory]);
 
   useEffect(() => {
+    const category = invoiceCategory;
     const timer = setTimeout(() => {
-      setDebouncedInvoiceSearchTerm(invoiceSearchTerm);
+      setDebouncedInvoiceSearchTerms((currentTerms) => ({
+        ...currentTerms,
+        [category]: invoiceSearchTerms[category] || '',
+      }));
     }, 250);
     return () => clearTimeout(timer);
-  }, [invoiceSearchTerm]);
+  }, [invoiceCategory, invoiceSearchTerm, invoiceSearchTerms]);
 
   const displayInvoices = useMemo(
     () =>
@@ -1245,8 +1354,16 @@ const Billing = () => {
   const paginatedInvoices = filteredInvoices;
   const invoicePaginationStart = invoiceListMeta.total ? (invoicePage - 1) * BILLING_PAGE_SIZE + 1 : 0;
   const invoicePaginationEnd = Math.min((invoicePage - 1) * BILLING_PAGE_SIZE + paginatedInvoices.length, invoiceListMeta.total);
+  const isClientInvoiceCategory = invoiceCategory === INVOICE_CATEGORY_CLIENT;
+  const visibleClientInvoiceIds = isClientInvoiceCategory
+    ? paginatedInvoices.map(getInvoiceRouteId).filter(Boolean)
+    : [];
+  const allVisibleClientInvoicesSelected =
+    visibleClientInvoiceIds.length > 0 && visibleClientInvoiceIds.every((invoiceId) => selectedClientInvoiceIds.includes(invoiceId));
 
   useEffect(() => {
+    if (invoiceCategory === INVOICE_CATEGORY_CLIENT) return undefined;
+
     let isCancelled = false;
     const sourceRequestCache = new Map();
     const nextShipments = {};
@@ -1307,15 +1424,21 @@ const Billing = () => {
     return () => {
       isCancelled = true;
     };
-  }, [paginatedInvoices, sourceReferenceLookup]);
+  }, [paginatedInvoices, sourceReferenceLookup, invoiceCategory]);
 
   useEffect(() => {
-    setInvoicePage((page) => Math.min(Math.max(page, 1), invoiceTotalPages));
-  }, [invoiceTotalPages]);
+    setInvoicePages((currentPages) => {
+      const currentPage = currentPages[invoiceCategory] || 1;
+      const nextPage = Math.min(Math.max(currentPage, 1), invoiceTotalPages);
+      if (nextPage === currentPage) return currentPages;
+      return { ...currentPages, [invoiceCategory]: nextPage };
+    });
+  }, [invoiceCategory, invoiceTotalPages]);
 
   useEffect(() => {
     setInvoicePage(1);
-  }, [debouncedInvoiceSearchTerm, invoiceStatusFilter]);
+    setSelectedClientInvoiceIds([]);
+  }, [debouncedInvoiceSearchTerm, invoiceStatusFilter, invoiceCategory]);
 
 
   const selectedInvoiceView = selectedInvoice
@@ -1507,7 +1630,7 @@ const Billing = () => {
       setDeleteInvoiceTarget(null);
       resetManualLineForm();
       setMessage(`Invoice ${deletedInvoice.ref || invoice?.ref || invoiceId} deleted.`);
-      await loadInvoices(removedKeys);
+      await loadInvoices(invoiceCategory, removedKeys);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -1532,7 +1655,7 @@ const Billing = () => {
       const payload = await parseResponse(response);
       const invoicePayload = payload?.data?.invoice || payload?.invoice || getInvoiceDetailPayload(payload);
       mergeUpdatedInvoice(invoicePayload, invoice);
-      await loadInvoices();
+      await loadInvoices(invoiceCategory);
       if (shouldRefreshSelectedInvoice) {
         setSelectedInvoice(await fetchInvoiceDetail(invoicePayload || invoice));
       }
@@ -1562,6 +1685,109 @@ const Billing = () => {
       const payload = await parseResponse(response);
       mergeUpdatedInvoice(getInvoiceDetailPayload(payload), invoice);
       setMessage(`Invoice marked as ${status}.`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setInvoiceActionKey('');
+    }
+  };
+
+  const getClientInvoiceAmount = () => {
+    const unit = Number(clientInvoiceForm.unit);
+    const rate = Number(clientInvoiceForm.rate);
+    if (!Number.isFinite(unit) || !Number.isFinite(rate)) return 0;
+    return Number((unit * rate).toFixed(2));
+  };
+
+  const resetClientInvoiceForm = () => {
+    setClientInvoiceForm(createEmptyClientInvoiceForm());
+    setShowClientInvoiceForm(false);
+  };
+
+  const handleCreateClientInvoice = async (event) => {
+    event.preventDefault();
+
+    try {
+      setError('');
+      setMessage('');
+      const clientId = String(clientInvoiceForm.clientId || '').trim();
+      const invoiceDate = String(clientInvoiceForm.invoiceDate || '').trim();
+      const description = String(clientInvoiceForm.description || '').trim();
+      const unit = Number(clientInvoiceForm.unit);
+      const rate = Number(clientInvoiceForm.rate);
+      const amount = getClientInvoiceAmount();
+
+      if (!clientId) throw new Error('Client is required.');
+      if (!invoiceDate) throw new Error('Invoice date is required.');
+      if (!description) throw new Error('Description is required.');
+      if (!Number.isFinite(unit) || unit <= 0) throw new Error('Unit must be a positive number.');
+      if (!Number.isFinite(rate) || rate < 0) throw new Error('Rate must be zero or positive.');
+
+      setInvoiceActionKey('client-invoice:create');
+      const response = await fetch(`${API_BASE_URL}/api/invoices`, {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify({
+          clientId,
+          invoiceDate,
+          invoiceType: clientInvoiceForm.invoiceType || 'monthly',
+          description,
+          unit,
+          rate,
+          amount,
+          notes: String(clientInvoiceForm.notes || '').trim(),
+        }),
+      });
+      await parseResponse(response);
+      resetClientInvoiceForm();
+      setInvoiceCategory(INVOICE_CATEGORY_CLIENT);
+      setInvoicePages((currentPages) => ({ ...currentPages, [INVOICE_CATEGORY_CLIENT]: 1 }));
+      setMessage('Client invoice created.');
+      await loadInvoices(INVOICE_CATEGORY_CLIENT, [], 1);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setInvoiceActionKey('');
+    }
+  };
+
+  const handleToggleClientInvoiceSelection = (invoiceId) => {
+    setSelectedClientInvoiceIds((currentIds) =>
+      currentIds.includes(invoiceId)
+        ? currentIds.filter((currentId) => currentId !== invoiceId)
+        : [...currentIds, invoiceId]
+    );
+  };
+
+  const handleToggleAllClientInvoiceSelections = (invoiceIds = []) => {
+    const selectableIds = invoiceIds.filter(Boolean);
+    const allSelected = selectableIds.length > 0 && selectableIds.every((invoiceId) => selectedClientInvoiceIds.includes(invoiceId));
+
+    setSelectedClientInvoiceIds((currentIds) => {
+      if (allSelected) return currentIds.filter((invoiceId) => !selectableIds.includes(invoiceId));
+      return [...new Set([...currentIds, ...selectableIds])];
+    });
+  };
+
+  const handleBulkDeleteClientInvoices = async () => {
+    try {
+      setError('');
+      setMessage('');
+      const ids = selectedClientInvoiceIds.filter(Boolean);
+      if (!ids.length) throw new Error('Select at least one client invoice to delete.');
+
+      setInvoiceActionKey('client-invoice:bulk-delete');
+      const response = await fetch(`${API_BASE_URL}/api/invoices/bulk-delete`, {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify({ ids }),
+      });
+      const payload = await parseResponse(response);
+      const deletedCount = Number(payload?.data?.deletedCount || payload?.data?.deleted_count || ids.length || 0);
+      setSelectedClientInvoiceIds([]);
+      setBulkDeleteClientInvoicesTarget(false);
+      setMessage(`${deletedCount} client invoice${deletedCount === 1 ? '' : 's'} deleted.`);
+      await loadInvoices(INVOICE_CATEGORY_CLIENT);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -1621,7 +1847,7 @@ const Billing = () => {
     const invoicePayload = payload?.data?.invoice || payload?.invoice || getInvoiceDetailPayload(payload);
     mergeUpdatedInvoice(invoicePayload, fallbackInvoice);
     setSelectedInvoice(await fetchInvoiceDetail(invoicePayload || fallbackInvoice));
-    await loadInvoices();
+    await loadInvoices(invoiceCategory);
   };
 
   const handleSubmitManualLine = async (event) => {
@@ -1689,27 +1915,42 @@ const Billing = () => {
   };
 
   const handleExport = () => {
-    const rows = [
-      ['Invoice Ref', 'Client', 'Type', 'Source', 'Date', 'Due', 'Subtotal', 'VAT', 'Total', 'Status'],
-      ...filteredInvoices.map((invoice) => [
-        invoice.ref,
-        invoice.client,
-        invoice.invoiceTypeLabel,
-        invoice.source,
-        invoice.date,
-        invoice.due,
-        invoice.subtotal,
-        invoice.vat,
-        invoice.total,
-        invoice.status,
-      ]),
-    ];
+    const rows = isClientInvoiceCategory
+      ? [
+          ['Invoice Ref', 'Client', 'Date', 'Description', 'Unit', 'Rate', 'Amount', 'Due', 'Status'],
+          ...filteredInvoices.map((invoice) => [
+            invoice.ref,
+            invoice.client,
+            invoice.date,
+            invoice.description,
+            invoice.unit,
+            invoice.rate,
+            invoice.amount,
+            invoice.due,
+            invoice.status,
+          ]),
+        ]
+      : [
+          ['Invoice Ref', 'Client', 'Type', 'Source', 'Date', 'Due', 'Subtotal', 'VAT', 'Total', 'Status'],
+          ...filteredInvoices.map((invoice) => [
+            invoice.ref,
+            invoice.client,
+            invoice.invoiceTypeLabel,
+            invoice.source,
+            invoice.date,
+            invoice.due,
+            invoice.subtotal,
+            invoice.vat,
+            invoice.total,
+            invoice.status,
+          ]),
+        ];
     const csv = rows.map((row) => row.map((value) => `"${String(value)}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'invoices.csv';
+    link.download = isClientInvoiceCategory ? 'client-invoices.csv' : 'dispatch-invoices.csv';
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -1751,13 +1992,57 @@ const Billing = () => {
         <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
           <div className="flex flex-col gap-3 border-b border-gray-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h2 className="text-sm font-semibold text-gray-900">Dispatch Invoices</h2>
-              <p className="mt-1 text-xs text-gray-500">Shipment and sub-shipment invoices are created from dispatch events.</p>
+              <div className="mb-3 inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
+                {[
+                  { value: INVOICE_CATEGORY_DISPATCH, label: 'Dispatch Invoices' },
+                  { value: INVOICE_CATEGORY_CLIENT, label: 'Client Invoices' },
+                ].map((tab) => (
+                  <button
+                    key={tab.value}
+                    type="button"
+                    onClick={() => setInvoiceCategory(tab.value)}
+                    className={`rounded-md px-3 py-1.5 text-sm font-semibold transition-colors ${
+                      invoiceCategory === tab.value ? 'bg-white text-[#ff6900] shadow-sm' : 'text-gray-500 hover:text-gray-900'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              <h2 className="text-sm font-semibold text-gray-900">{isClientInvoiceCategory ? 'Client Invoices' : 'Dispatch Invoices'}</h2>
+              <p className="mt-1 text-xs text-gray-500">
+                {isClientInvoiceCategory
+                  ? 'Independent client-level invoices for storage and account charges.'
+                  : 'Shipment and sub-shipment invoices are created from dispatch events.'}
+              </p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              {isClientInvoiceCategory ? (
+                <button
+                  type="button"
+                  onClick={() => setShowClientInvoiceForm(true)}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00]"
+                >
+                  <Plus size={16} /> Create Client Invoice
+                </button>
+              ) : null}
+              {isClientInvoiceCategory && selectedClientInvoiceIds.length ? (
+                <button
+                  type="button"
+                  onClick={() => setBulkDeleteClientInvoicesTarget(true)}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-100"
+                >
+                  <Trash2 size={16} /> Delete Selected ({selectedClientInvoiceIds.length})
+                </button>
+              ) : null}
               <select
                 value={invoiceStatusFilter}
-                onChange={(event) => setInvoiceStatusFilter(event.target.value)}
+                onChange={(event) =>
+                  setInvoiceStatusFilters((currentFilters) => ({
+                    ...currentFilters,
+                    [invoiceCategory]: event.target.value,
+                  }))
+                }
                 aria-label="Filter invoices by status"
                 className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 outline-none transition-colors focus:border-[#ff6900] sm:w-40"
               >
@@ -1773,8 +2058,13 @@ const Billing = () => {
                 <input
                   type="search"
                   value={invoiceSearchTerm}
-                  onChange={(event) => setInvoiceSearchTerm(event.target.value)}
-                  placeholder="Search client, invoice, source, type"
+                  onChange={(event) =>
+                    setInvoiceSearchTerms((currentTerms) => ({
+                      ...currentTerms,
+                      [invoiceCategory]: event.target.value,
+                    }))
+                  }
+                  placeholder={isClientInvoiceCategory ? 'Search client invoice, description' : 'Search client, invoice, source, type'}
                   className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-9 pr-3 text-sm text-gray-700 outline-none transition-colors placeholder:text-gray-400 focus:border-[#ff6900] sm:w-80"
                 />
               </label>
@@ -1786,16 +2076,42 @@ const Billing = () => {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50">
+                  {isClientInvoiceCategory ? (
+                    <th className="px-4 py-3 text-left">
+                      <input
+                        type="checkbox"
+                        checked={allVisibleClientInvoicesSelected}
+                        onChange={() => handleToggleAllClientInvoiceSelections(visibleClientInvoiceIds)}
+                        aria-label="Select all visible client invoices"
+                        className="h-4 w-4 rounded border-gray-300 text-[#ff6900] focus:ring-[#ff6900]"
+                      />
+                    </th>
+                  ) : null}
                   <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Invoice No.</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Client</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Type</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Source</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Status</th>
+                  {isClientInvoiceCategory ? (
+                    <>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Description</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Unit</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Rate</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Amount</th>
+                    </>
+                  ) : (
+                    <>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Type</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Source</th>
+                    </>
+                  )}
                   <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Invoice Date</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Due Date</th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Subtotal</th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">VAT</th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Total</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Status</th>
+                  {!isClientInvoiceCategory ? (
+                    <>
+                      <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Subtotal</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">VAT</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Total</th>
+                    </>
+                  ) : null}
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500">Actions</th>
                 </tr>
               </thead>
@@ -1804,14 +2120,26 @@ const Billing = () => {
                   const routeId = getInvoiceRouteId(invoice);
                   const status = String(invoice.status || '').toLowerCase();
                   const isActionPending = invoiceActionKey.startsWith(`${routeId}:`);
-                  const canSend = isDraftInvoice(invoice) && getInvoiceTypeValue(invoice) !== 'monthly';
+                  const canSend = isDraftInvoice(invoice);
                   const canMarkPaid = ['sent', 'overdue'].includes(status);
                   const sourceId = invoice.sourceId || invoice.shipmentId || invoice.source;
                   const sourceDisplay = invoice.source || sourceId || '-';
                   const canLinkSource = invoice.invoiceType === 'shipment' && sourceId && sourceId !== '-';
+                  const invoiceId = getInvoiceRouteId(invoice);
 
                   return (
                     <tr key={invoice.id} className="transition-colors hover:bg-gray-50">
+                      {isClientInvoiceCategory ? (
+                        <td className="px-4 py-3.5">
+                          <input
+                            type="checkbox"
+                            checked={selectedClientInvoiceIds.includes(invoiceId)}
+                            onChange={() => handleToggleClientInvoiceSelection(invoiceId)}
+                            aria-label={`Select ${invoice.ref}`}
+                            className="h-4 w-4 rounded border-gray-300 text-[#ff6900] focus:ring-[#ff6900]"
+                          />
+                        </td>
+                      ) : null}
                       <td className="px-4 py-3.5">
                         <div className="flex items-center gap-2">
                           <FileText size={14} className="text-gray-400" />
@@ -1819,26 +2147,41 @@ const Billing = () => {
                         </div>
                       </td>
                       <td className="px-4 py-3.5 text-sm text-gray-700">{invoice.client}</td>
-                      <td className="px-4 py-3.5 text-sm text-gray-700">{invoice.invoiceTypeLabel}</td>
-                      <td className="px-4 py-3.5 text-sm text-gray-500">
-                        {canLinkSource ? (
-                          <a href={`/shipments/${encodeURIComponent(sourceId)}`} className="font-medium text-[#ff6900] hover:text-[#e55d00]">
-                            {sourceDisplay}
-                          </a>
-                        ) : (
-                          sourceDisplay
-                        )}
-                      </td>
+                      {isClientInvoiceCategory ? (
+                        <>
+                          <td className="px-4 py-3.5 text-sm text-gray-700">{invoice.description || '-'}</td>
+                          <td className="px-4 py-3.5 text-right text-sm text-gray-700">{invoice.unit || 0}</td>
+                          <td className="px-4 py-3.5 text-right text-sm text-gray-700">{formatCurrency(invoice.rate)}</td>
+                          <td className="px-4 py-3.5 text-right text-sm font-medium text-gray-900">{formatCurrency(invoice.amount)}</td>
+                        </>
+                      ) : (
+                        <>
+                          <td className="px-4 py-3.5 text-sm text-gray-700">{invoice.invoiceTypeLabel}</td>
+                          <td className="px-4 py-3.5 text-sm text-gray-500">
+                            {canLinkSource ? (
+                              <a href={`/shipments/${encodeURIComponent(sourceId)}`} className="font-medium text-[#ff6900] hover:text-[#e55d00]">
+                                {sourceDisplay}
+                              </a>
+                            ) : (
+                              sourceDisplay
+                            )}
+                          </td>
+                        </>
+                      )}
+                      <td className="px-4 py-3.5 text-sm text-gray-500">{formatDate(invoice.date)}</td>
+                      <td className="px-4 py-3.5 text-sm text-gray-500">{formatDate(invoice.due)}</td>
                       <td className="px-4 py-3.5">
                         <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${status === 'paid' ? 'bg-green-100 text-green-700' : status === 'sent' ? 'bg-blue-100 text-blue-700' : status === 'draft' ? 'bg-yellow-100 text-yellow-700' : status === 'overdue' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}`}>
                           {formatStatusLabel(invoice.status)}
                         </span>
                       </td>
-                      <td className="px-4 py-3.5 text-sm text-gray-500">{formatDate(invoice.date)}</td>
-                      <td className="px-4 py-3.5 text-sm text-gray-500">{formatDate(invoice.due)}</td>
-                      <td className="px-4 py-3.5 text-right text-sm text-gray-700">{formatCurrency(invoice.subtotal)}</td>
-                      <td className="px-4 py-3.5 text-right text-sm text-gray-700">{formatCurrency(invoice.vat)}</td>
-                      <td className="px-4 py-3.5 text-right text-sm font-medium text-gray-900">{formatCurrency(invoice.total)}</td>
+                      {!isClientInvoiceCategory ? (
+                        <>
+                          <td className="px-4 py-3.5 text-right text-sm text-gray-700">{formatCurrency(invoice.subtotal)}</td>
+                          <td className="px-4 py-3.5 text-right text-sm text-gray-700">{formatCurrency(invoice.vat)}</td>
+                          <td className="px-4 py-3.5 text-right text-sm font-medium text-gray-900">{formatCurrency(invoice.total)}</td>
+                        </>
+                      ) : null}
                       <td className="px-4 py-3.5 text-center">
                         <div className="flex items-center justify-center gap-1">
                           <button type="button" onClick={() => handleViewInvoice(invoice)} className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[#ff6900]" title="View invoice" aria-label={`View ${invoice.ref}`}><Eye size={16} /></button>
@@ -1866,14 +2209,14 @@ const Billing = () => {
                 })}
                 {isLoading ? (
                   <tr>
-                    <td colSpan="11" className="px-6 py-10 text-center text-sm text-gray-500">
+                    <td colSpan={isClientInvoiceCategory ? 11 : 11} className="px-6 py-10 text-center text-sm text-gray-500">
                       <LoadingState label="Loading invoices..." />
                     </td>
                   </tr>
                 ) : null}
                 {!isLoading && !paginatedInvoices.length ? (
                   <tr>
-                    <td colSpan="11" className="px-6 py-10 text-center text-sm text-gray-500">
+                    <td colSpan={isClientInvoiceCategory ? 11 : 11} className="px-6 py-10 text-center text-sm text-gray-500">
                       {debouncedInvoiceSearchTerm.trim() || invoiceStatusFilter !== 'all' ? 'No invoices match your filters.' : 'No invoices found.'}
                     </td>
                   </tr>
@@ -1899,6 +2242,164 @@ const Billing = () => {
             </div>
           ) : null}
         </div>
+
+        {showClientInvoiceForm ? (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4 py-8">
+            <div className="w-full max-w-2xl rounded-xl bg-white shadow-2xl">
+              <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-5 py-4">
+                <div>
+                  <h3 className="text-base font-semibold text-gray-900">Create Client Invoice</h3>
+                  <p className="mt-1 text-sm text-gray-500">Create an independent client-level invoice with no VAT.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={resetClientInvoiceForm}
+                  className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                  aria-label="Close create client invoice"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <form onSubmit={handleCreateClientInvoice}>
+                <div className="grid grid-cols-1 gap-4 px-5 py-4 sm:grid-cols-2">
+                  <label className="text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Client</span>
+                    <select
+                      value={clientInvoiceForm.clientId}
+                      onChange={(event) => setClientInvoiceForm((current) => ({ ...current, clientId: event.target.value }))}
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-[#ff6900]"
+                    >
+                      <option value="">Select client</option>
+                      {clients.map((client) => {
+                        const clientId = getClientId(client);
+                        return (
+                          <option key={clientId || getClientDisplayName(client)} value={clientId}>
+                            {getClientDisplayName(client)}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </label>
+                  <label className="text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Date</span>
+                    <input
+                      type="date"
+                      value={clientInvoiceForm.invoiceDate}
+                      onChange={(event) => setClientInvoiceForm((current) => ({ ...current, invoiceDate: event.target.value }))}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-[#ff6900]"
+                    />
+                  </label>
+                  <label className="sm:col-span-2 text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Description</span>
+                    <input
+                      type="text"
+                      value={clientInvoiceForm.description}
+                      onChange={(event) => setClientInvoiceForm((current) => ({ ...current, description: event.target.value }))}
+                      placeholder="Storage"
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-[#ff6900]"
+                    />
+                  </label>
+                  <label className="text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Unit</span>
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      value={clientInvoiceForm.unit}
+                      onChange={(event) => setClientInvoiceForm((current) => ({ ...current, unit: event.target.value }))}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-[#ff6900]"
+                    />
+                  </label>
+                  <label className="text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Rate</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={clientInvoiceForm.rate}
+                      onChange={(event) => setClientInvoiceForm((current) => ({ ...current, rate: event.target.value }))}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-[#ff6900]"
+                    />
+                  </label>
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Amount</p>
+                    <p className="mt-1 text-sm font-semibold text-gray-900">{formatCurrency(getClientInvoiceAmount())}</p>
+                  </div>
+                  <label className="sm:col-span-2 text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Notes</span>
+                    <textarea
+                      rows={3}
+                      value={clientInvoiceForm.notes}
+                      onChange={(event) => setClientInvoiceForm((current) => ({ ...current, notes: event.target.value }))}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-[#ff6900]"
+                    />
+                  </label>
+                </div>
+                <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-4">
+                  <button type="button" onClick={resetClientInvoiceForm} className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50">
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={invoiceActionKey === 'client-invoice:create'}
+                    className="inline-flex items-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Plus size={16} />
+                    {invoiceActionKey === 'client-invoice:create' ? 'Creating...' : 'Create Invoice'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        ) : null}
+
+        {bulkDeleteClientInvoicesTarget ? (
+          <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/40 px-4 py-8">
+            <div className="w-full max-w-md rounded-xl bg-white shadow-2xl">
+              <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-5 py-4">
+                <div>
+                  <h3 className="text-base font-semibold text-gray-900">Delete Client Invoices</h3>
+                  <p className="mt-1 text-sm text-gray-500">
+                    Delete selected client invoices? This will remove the invoices and their files.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setBulkDeleteClientInvoicesTarget(false)}
+                  disabled={invoiceActionKey === 'client-invoice:bulk-delete'}
+                  className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label="Close bulk delete confirmation"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="px-5 py-4 text-sm">
+                <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-red-700">
+                  {selectedClientInvoiceIds.length} invoice{selectedClientInvoiceIds.length === 1 ? '' : 's'} selected. Bulk delete only applies to independent client invoices.
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-4">
+                <button
+                  type="button"
+                  onClick={() => setBulkDeleteClientInvoicesTarget(false)}
+                  disabled={invoiceActionKey === 'client-invoice:bulk-delete'}
+                  className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleBulkDeleteClientInvoices}
+                  disabled={invoiceActionKey === 'client-invoice:bulk-delete'}
+                  className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Trash2 size={16} />
+                  {invoiceActionKey === 'client-invoice:bulk-delete' ? 'Deleting...' : 'Delete Selected'}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {sendInvoiceTarget ? (
           <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4 py-8">
@@ -2035,7 +2536,7 @@ const Billing = () => {
                   <p className="mt-1 text-sm text-gray-500">{selectedInvoiceView.invoiceTypeLabel}</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  {isDraftInvoice(selectedInvoiceView) && getInvoiceTypeValue(selectedInvoiceView) !== 'monthly' ? (
+                  {isDraftInvoice(selectedInvoiceView) ? (
                     <button
                       type="button"
                       onClick={() => setSendInvoiceTarget(selectedInvoiceView)}
@@ -2084,12 +2585,14 @@ const Billing = () => {
                   ))}
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  {[
-                    { label: 'Subtotal', value: formatCurrency(selectedInvoiceView.subtotal) },
-                    { label: 'VAT', value: formatCurrency(selectedInvoiceView.vat) },
-                    { label: 'Total', value: formatCurrency(selectedInvoiceView.total) },
-                  ].map((item) => (
+                <div className={`grid grid-cols-1 gap-3 ${isClientInvoiceRecord(selectedInvoiceView) ? 'sm:grid-cols-1' : 'sm:grid-cols-3'}`}>
+                  {(isClientInvoiceRecord(selectedInvoiceView)
+                    ? [{ label: 'Total', value: formatCurrency(selectedInvoiceView.total) }]
+                    : [
+                        { label: 'Subtotal', value: formatCurrency(selectedInvoiceView.subtotal) },
+                        { label: 'VAT', value: formatCurrency(selectedInvoiceView.vat) },
+                        { label: 'Total', value: formatCurrency(selectedInvoiceView.total) },
+                      ]).map((item) => (
                     <div key={item.label} className="rounded-lg border border-gray-200 bg-white px-3 py-2">
                       <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{item.label}</p>
                       <p className="mt-1 text-sm font-semibold text-gray-900">{item.value}</p>
@@ -2172,19 +2675,23 @@ const Billing = () => {
                     <thead className="bg-gray-50 text-xs uppercase tracking-wider text-gray-500">
                       <tr>
                         <th className="px-4 py-2 text-left">Description</th>
-                        <th className="px-4 py-2 text-right">Qty</th>
-                        <th className="px-4 py-2 text-right">Unit Rate</th>
+                        <th className="px-4 py-2 text-right">{isClientInvoiceRecord(selectedInvoiceView) ? 'Unit' : 'Qty'}</th>
+                        <th className="px-4 py-2 text-right">Rate</th>
                         <th className="px-4 py-2 text-right">Amount</th>
-                        <th className="px-4 py-2 text-right">VAT Rate</th>
-                        <th className="px-4 py-2 text-right">VAT Amount</th>
-                        <th className="px-4 py-2 text-left">Source</th>
-                        <th className="px-4 py-2 text-center">Actions</th>
+                        {!isClientInvoiceRecord(selectedInvoiceView) ? (
+                          <>
+                            <th className="px-4 py-2 text-right">VAT Rate</th>
+                            <th className="px-4 py-2 text-right">VAT Amount</th>
+                            <th className="px-4 py-2 text-left">Source</th>
+                            <th className="px-4 py-2 text-center">Actions</th>
+                          </>
+                        ) : null}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {isInvoiceDetailLoading ? (
                         <tr>
-                          <td colSpan="8" className="px-4 py-8 text-center text-sm text-gray-500">
+                          <td colSpan={isClientInvoiceRecord(selectedInvoiceView) ? 4 : 8} className="px-4 py-8 text-center text-sm text-gray-500">
                             <LoadingState label="Loading line items..." />
                           </td>
                         </tr>
@@ -2201,29 +2708,33 @@ const Billing = () => {
                               <td className="px-4 py-2 text-right">{getInvoiceLineQty(item)}</td>
                               <td className="px-4 py-2 text-right">{formatCurrency(getInvoiceLineUnitRate(item))}</td>
                               <td className="px-4 py-2 text-right">{formatCurrency(getInvoiceLineAmount(item))}</td>
-                              <td className="px-4 py-2 text-right">{Number(getInvoiceLineVatRate(item) || 0).toLocaleString(undefined, { style: 'percent', maximumFractionDigits: 2 })}</td>
-                              <td className="px-4 py-2 text-right">{formatCurrency(getInvoiceLineVatAmount(item))}</td>
-                              <td className="px-4 py-2">
-                                <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${isManual ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
-                                  {lineSource === 'manual' ? 'Manual' : 'System'}
-                                </span>
-                              </td>
-                              <td className="px-4 py-2 text-center">
-                                {canEditLine ? (
-                                  <div className="flex items-center justify-center gap-1">
-                                    <button type="button" onClick={() => startEditManualLine(item)} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-[#ff6900]" title="Edit manual line" aria-label="Edit manual line"><Pencil size={15} /></button>
-                                    <button type="button" onClick={() => handleDeleteManualLine(item)} disabled={Boolean(lineId && lineActionKey.includes(lineId))} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50" title="Delete manual line" aria-label="Delete manual line"><Trash2 size={15} /></button>
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-gray-400">-</span>
-                                )}
-                              </td>
+                              {!isClientInvoiceRecord(selectedInvoiceView) ? (
+                                <>
+                                  <td className="px-4 py-2 text-right">{Number(getInvoiceLineVatRate(item) || 0).toLocaleString(undefined, { style: 'percent', maximumFractionDigits: 2 })}</td>
+                                  <td className="px-4 py-2 text-right">{formatCurrency(getInvoiceLineVatAmount(item))}</td>
+                                  <td className="px-4 py-2">
+                                    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${isManual ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
+                                      {lineSource === 'manual' ? 'Manual' : 'System'}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-2 text-center">
+                                    {canEditLine ? (
+                                      <div className="flex items-center justify-center gap-1">
+                                        <button type="button" onClick={() => startEditManualLine(item)} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-[#ff6900]" title="Edit manual line" aria-label="Edit manual line"><Pencil size={15} /></button>
+                                        <button type="button" onClick={() => handleDeleteManualLine(item)} disabled={Boolean(lineId && lineActionKey.includes(lineId))} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50" title="Delete manual line" aria-label="Delete manual line"><Trash2 size={15} /></button>
+                                      </div>
+                                    ) : (
+                                      <span className="text-xs text-gray-400">-</span>
+                                    )}
+                                  </td>
+                                </>
+                              ) : null}
                             </tr>
                           );
                         })
                       ) : (
                         <tr>
-                          <td colSpan="8" className="px-4 py-8 text-center text-sm text-gray-500">
+                          <td colSpan={isClientInvoiceRecord(selectedInvoiceView) ? 4 : 8} className="px-4 py-8 text-center text-sm text-gray-500">
                             {toNumber(selectedInvoiceView.total) === 0
                               ? 'No billable line items were created for this invoice.'
                               : 'No line items returned for this invoice detail.'}

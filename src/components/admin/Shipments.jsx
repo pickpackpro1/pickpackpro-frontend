@@ -4,6 +4,7 @@ import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import ProductSkuCombobox from '../common/ProductSkuCombobox';
 import DiscrepancyResolutionModal from '../common/DiscrepancyResolutionModal';
+import ShipmentNoteAttachments from '../common/ShipmentNoteAttachments';
 import { getSession } from '../../utils/auth';
 import { getDiscrepancyResolveData, resolveDiscrepancy as resolveDiscrepancyRequest } from '../../utils/discrepancies';
 import {
@@ -74,6 +75,11 @@ import {
   mapDraftPayloadItemsToFormItems,
   uploadDraftFnskuLabelFiles,
 } from '../../utils/shipmentDrafts';
+import {
+  SHIPMENT_NOTE_ATTACHMENT_LABEL,
+  getShipmentNoteAttachments,
+  uploadShipmentNoteAttachment,
+} from '../../utils/shipmentNoteAttachments';
 
 const API_BASE_URL = '';
 const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app';
@@ -3625,6 +3631,7 @@ const Shipments = () => {
   const quickViewRequestIdRef = useRef(0);
   const [createForm, setCreateForm] = useState(initialCreateForm);
   const [createItems, setCreateItems] = useState([createEmptyProductItem()]);
+  const [shipmentNoteAttachmentFile, setShipmentNoteAttachmentFile] = useState(null);
   const [editingShipmentId, setEditingShipmentId] = useState('');
   const [skuOptions, setSkuOptions] = useState([]);
   const [isSkuOptionsLoading, setIsSkuOptionsLoading] = useState(false);
@@ -3878,6 +3885,7 @@ const Shipments = () => {
     setEditingShipmentId('');
     setCreateForm(initialCreateForm);
     setCreateItems([createEmptyProductItem()]);
+    setShipmentNoteAttachmentFile(null);
     setSavingAction('');
   };
 
@@ -4071,6 +4079,8 @@ const Shipments = () => {
         shipment_line_items: itemsForView,
         boxes: visibleBundleBoxes,
         outbound_boxes: visibleBundleBoxes,
+        noteAttachments: getShipmentNoteAttachments(bundle, bundleShipment, shipment),
+        note_attachments: getShipmentNoteAttachments(bundle, bundleShipment, shipment),
         counts: bundle?.counts || bundleShipment?.counts,
         permissions: bundle?.permissions || bundleShipment?.permissions,
         dispatchSummary: bundle?.dispatchSummary || bundle?.dispatch_summary || bundleShipment?.dispatchSummary || bundleShipment?.dispatch_summary,
@@ -4577,6 +4587,7 @@ const Shipments = () => {
         notes: firstPresent(draftPayload?.notes, detail?.notes, detail?.client_notes, shipment?.notes),
       });
       setCreateItems(hydratedDraftItems.length ? hydratedDraftItems : ensureDraftItemIds(fallbackItems));
+      setShipmentNoteAttachmentFile(null);
       setEditingShipmentId(getShipmentRecordId(detail) || shipmentId);
       setShowQuickViewModal(false);
       setShowCreateSection(true);
@@ -4806,8 +4817,26 @@ const Shipments = () => {
           }
         }
 
-      } else if (labelFileInputs.length) {
-        postCreateWarnings.push(`${isDraft ? 'Draft' : 'FNSKU'} label upload skipped because shipment ID was not returned.`);
+        if (shipmentNoteAttachmentFile) {
+          try {
+            await uploadShipmentNoteAttachment({
+              file: shipmentNoteAttachmentFile,
+              shipmentId: createdShipmentId,
+              apiBaseUrl: API_BASE_URL,
+              buildHeaders,
+              parseResponse,
+            });
+          } catch (attachmentError) {
+            postCreateWarnings.push(attachmentError.message || `${SHIPMENT_NOTE_ATTACHMENT_LABEL} upload failed.`);
+          }
+        }
+      } else {
+        if (labelFileInputs.length) {
+          postCreateWarnings.push(`${isDraft ? 'Draft' : 'FNSKU'} label upload skipped because shipment ID was not returned.`);
+        }
+        if (shipmentNoteAttachmentFile) {
+          postCreateWarnings.push(`${SHIPMENT_NOTE_ATTACHMENT_LABEL} upload skipped because shipment ID was not returned.`);
+        }
       }
 
       const createdShipmentDetailForList = createdShipmentDetail;
@@ -5512,6 +5541,32 @@ const Shipments = () => {
                     onChange={(e) => setCreateForm((prev) => ({ ...prev, notes: e.target.value }))}
                     className="min-h-32 w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm"
                   />
+                  <div className="mt-4 rounded-lg border border-dashed border-[#dbe3ef] bg-[#f8fafc] px-3 py-3">
+                    <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.14em] text-[#6b7280]">
+                      {SHIPMENT_NOTE_ATTACHMENT_LABEL}
+                    </label>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <input
+                        type="file"
+                        onChange={(e) => setShipmentNoteAttachmentFile(e.target.files?.[0] || null)}
+                        className="w-full text-sm text-[#132347] file:mr-3 file:rounded-md file:border-0 file:bg-[#fff7ed] file:px-3 file:py-2 file:text-sm file:font-semibold file:text-[#ff6900]"
+                      />
+                      {shipmentNoteAttachmentFile ? (
+                        <button
+                          type="button"
+                          onClick={() => setShipmentNoteAttachmentFile(null)}
+                          className="self-start rounded-md border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-50 sm:self-auto"
+                        >
+                          Remove
+                        </button>
+                      ) : null}
+                    </div>
+                    {shipmentNoteAttachmentFile ? (
+                      <p className="mt-2 text-xs text-[#6b7280]">
+                        Selected: {shipmentNoteAttachmentFile.name}. It will upload after the shipment is saved.
+                      </p>
+                    ) : null}
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-end gap-3 rounded-xl border border-[#e6ecf5] bg-white p-5">
@@ -5604,6 +5659,8 @@ const Shipments = () => {
                       detailServices
                     );
                     const itemCount = quickViewItems.length;
+                    const quickViewNotes = getRawShipmentNotes(quickViewShipment);
+                    const quickViewNoteAttachments = getShipmentNoteAttachments(quickViewShipment, quickViewFiles);
                     const hasMatchedServiceTasks = standardServiceTasks.some((service) =>
                       quickViewItems.some((item) => isServiceTaskForItem(service, item, itemCount))
                     );
@@ -5916,6 +5973,18 @@ const Shipments = () => {
                           <p><span className="text-xs uppercase text-gray-500">Created</span><br /><span className="font-medium text-gray-900">{quickViewShipment.created}</span></p>
                           <p><span className="text-xs uppercase text-gray-500">Assigned</span><br /><span className="font-medium text-gray-900">{getAssignedDisplayName(quickViewShipment)}</span></p>
                         </div>
+
+                        {quickViewNotes || quickViewNoteAttachments.length ? (
+                          <div className="mt-6">
+                            <p className="mb-2 font-medium text-gray-900">Notes</p>
+                            {quickViewNotes ? (
+                              <p className="whitespace-pre-line rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                                {quickViewNotes}
+                              </p>
+                            ) : null}
+                            <ShipmentNoteAttachments attachments={quickViewNoteAttachments} />
+                          </div>
+                        ) : null}
 
                         <div className="mt-6">
                           <p className="mb-2 font-medium text-gray-900">Items</p>

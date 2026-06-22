@@ -23,6 +23,7 @@ import LoadingState from "../common/LoadingState";
 import FullPageLoader from "../common/FullPageLoader";
 import DiscrepancyResolutionModal from "../common/DiscrepancyResolutionModal";
 import ConfirmationModal from "../common/ConfirmationModal";
+import ShipmentNoteAttachments from "../common/ShipmentNoteAttachments";
 import { getSession } from "../../utils/auth";
 import { getDiscrepancyResolveData, resolveDiscrepancy as resolveDiscrepancyRequest } from "../../utils/discrepancies";
 import { formatToastMessage, showToast } from "../../utils/toast";
@@ -37,6 +38,7 @@ import {
   normalizeShipmentList as normalizeMappedShipmentList,
 } from "../../utils/shipmentMapper";
 import { fetchShipmentSummaryPage } from "../../utils/shipmentSummary";
+import { getShipmentNoteAttachments } from "../../utils/shipmentNoteAttachments";
 import {
   STANDARD_SERVICE_KEYS as STANDARD_CATALOG_SERVICE_KEYS,
   getServiceDisplayName,
@@ -4566,6 +4568,7 @@ const ShipmentsStaff = () => {
         extractList(detailViewBundle, ["subShipments", "sub_shipments"]),
         extractSubShipments(bundleShipment)
       );
+      const noteAttachments = getShipmentNoteAttachments(detailViewBundle, bundleShipment);
       const shipmentData = {
         ...bundleShipment,
         items: bundleLineItems,
@@ -4575,6 +4578,8 @@ const ShipmentsStaff = () => {
         outbound_boxes: bundleBoxes,
         subShipments: bundleSubShipments,
         sub_shipments: bundleSubShipments,
+        noteAttachments,
+        note_attachments: noteAttachments,
         counts: detailViewBundle?.counts || bundleShipment?.counts,
         permissions: detailViewBundle?.permissions || bundleShipment?.permissions,
         dispatchSummary: detailViewBundle?.dispatchSummary || detailViewBundle?.dispatch_summary || bundleShipment?.dispatchSummary || bundleShipment?.dispatch_summary,
@@ -4725,6 +4730,7 @@ const ShipmentsStaff = () => {
         extractList(quickViewBundle, ["subShipments", "sub_shipments"]),
         extractSubShipments(bundleShipment)
       );
+      const noteAttachments = getShipmentNoteAttachments(quickViewBundle, bundleShipment, shipment);
       const shipmentData = {
         ...shipment,
         ...bundleShipment,
@@ -4735,6 +4741,8 @@ const ShipmentsStaff = () => {
         outbound_boxes: bundleBoxes,
         subShipments: bundleSubShipments,
         sub_shipments: bundleSubShipments,
+        noteAttachments,
+        note_attachments: noteAttachments,
         counts: quickViewBundle?.counts || bundleShipment?.counts,
         permissions: quickViewBundle?.permissions || bundleShipment?.permissions,
         dispatchSummary: quickViewBundle?.dispatchSummary || quickViewBundle?.dispatch_summary || bundleShipment?.dispatchSummary || bundleShipment?.dispatch_summary,
@@ -7361,6 +7369,7 @@ const ShipmentsStaff = () => {
                     <p className="whitespace-pre-line text-[15px] leading-7 text-[#132347]">
                       {getShipmentNoteText(selectedShipment) || "No shipment notes added."}
                     </p>
+                    <ShipmentNoteAttachments attachments={getShipmentNoteAttachments(selectedShipment, files)} />
                     <div className="mt-5 flex items-center justify-between border-t border-[#e8edf5] pt-4 text-[12px]">
                       <span className="text-[#9aa8bd]">Last edited: {selectedShipment?.updated_at || selectedShipment?.updatedAt || "-"}</span>
                       <span className="font-semibold text-[#a96900]">Edit Notes</span>
@@ -7738,6 +7747,7 @@ const ShipmentsStaff = () => {
                 const itemLabelFiles = getItemLabelFileAssignments(viewLineItems, viewShipmentFiles);
                 const orderData = getShipmentOrderData(shipmentForView);
                 const shipmentNotes = getShipmentNoteText(shipmentForView);
+                const shipmentNoteAttachments = getShipmentNoteAttachments(shipmentForView, viewShipmentFiles);
                 const viewReference = firstPresent(shipmentForView?.reference, viewShipment?.reference, viewShipment?.id);
                 const expectedArrival = firstPresent(
                   shipmentForView?.expectedArrivalDate,
@@ -8048,10 +8058,13 @@ const ShipmentsStaff = () => {
                         </div>
                       </div>
 
-                      {shipmentNotes ? (
+                      {shipmentNotes || shipmentNoteAttachments.length ? (
                         <div>
                           <p className="mb-2 font-medium text-gray-900">Notes</p>
-                          <p className="whitespace-pre-line rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">{shipmentNotes}</p>
+                          {shipmentNotes ? (
+                            <p className="whitespace-pre-line rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">{shipmentNotes}</p>
+                          ) : null}
+                          <ShipmentNoteAttachments attachments={shipmentNoteAttachments} />
                         </div>
                       ) : null}
 

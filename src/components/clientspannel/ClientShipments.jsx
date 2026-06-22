@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LayoutClient from './clientlayout/LayoutClient';
 import LoadingState from '../common/LoadingState';
 import ProductSkuCombobox from '../common/ProductSkuCombobox';
+import ShipmentNoteAttachments from '../common/ShipmentNoteAttachments';
 import { Search, ChevronDown, Calendar, Plus, X, Eye, RefreshCw, Upload, FileUp, Trash2, ArrowLeft, Check, ClipboardCheck, Truck, FileText, Tags, Download, Pencil } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getSession } from '../../utils/auth';
@@ -59,6 +60,11 @@ import { fetchFilesBatch, getBatchFileById, getBatchFilesForEntity } from '../..
 import { fetchBoxItemsBatch, getBatchItemsForBox } from '../../utils/boxItemsBatch';
 import { fetchShipmentServicesBatch, getBatchServicesForShipment } from '../../utils/shipmentServicesBatch';
 import { fetchShipmentDiscrepanciesBatch, getBatchDiscrepanciesForShipment } from '../../utils/shipmentDiscrepanciesBatch';
+import {
+  SHIPMENT_NOTE_ATTACHMENT_LABEL,
+  getShipmentNoteAttachments,
+  uploadShipmentNoteAttachment,
+} from '../../utils/shipmentNoteAttachments';
 
 const DRAFT_CACHE_KEY = 'pickpackpro-shipment-drafts';
 const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';
@@ -5111,6 +5117,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
     clientId: getClientIdFromSession(),
   }));
   const [productItems, setProductItems] = useState([createEmptyProductItem()]);
+  const [shipmentNoteAttachmentFile, setShipmentNoteAttachmentFile] = useState(null);
   const [skuOptions, setSkuOptions] = useState([]);
   const [isSkuOptionsLoading, setIsSkuOptionsLoading] = useState(false);
   const [editingShipmentId, setEditingShipmentId] = useState('');
@@ -5173,6 +5180,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       clientId: getClientIdFromSession(),
     });
     setProductItems([createEmptyProductItem()]);
+    setShipmentNoteAttachmentFile(null);
     setEditingShipmentId('');
     setSavingAction('');
     navigate('/shipments', { replace: true });
@@ -6392,6 +6400,24 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         }
       }
 
+      if (shipmentNoteAttachmentFile) {
+        if (savedShipmentRecordId) {
+          try {
+            await uploadShipmentNoteAttachment({
+              file: shipmentNoteAttachmentFile,
+              shipmentId: savedShipmentRecordId,
+              apiBaseUrl: API_BASE_URL,
+              buildHeaders,
+              parseResponse,
+            });
+          } catch (attachmentError) {
+            labelUploadWarnings.push(attachmentError.message || `${SHIPMENT_NOTE_ATTACHMENT_LABEL} upload failed.`);
+          }
+        } else {
+          labelUploadWarnings.push(`${SHIPMENT_NOTE_ATTACHMENT_LABEL} upload skipped because shipment database ID was not returned.`);
+        }
+      }
+
       const savedShipmentWithFiles = uploadedLabelFiles.length
         ? {
             ...savedShipmentForList,
@@ -6462,6 +6488,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         clientId: getClientIdFromSession(),
       });
       setProductItems([createEmptyProductItem()]);
+      setShipmentNoteAttachmentFile(null);
       setEditingShipmentId('');
       setStatusFilter('all');
       setSearchQuery('');
@@ -6575,6 +6602,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       (isUuidValue(resolvedShipmentId) ? resolvedShipmentId : '');
     const cachedNotes = cachedDraft?.createForm ? buildShipmentNotes(cachedDraft.createForm, cachedItems) : '';
     const cachedExpectedArrivalDate = cachedDraft?.createForm?.expectedArrivalDate || '';
+    const noteAttachments = getShipmentNoteAttachments(detailViewBundle, bundleShipment);
     const selectedShipmentForView = {
       ...selectedFallback,
       ...bundleShipment,
@@ -6601,6 +6629,8 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
       discrepancies: bundleDiscrepancies,
       subShipments: loadedSubShipments,
       sub_shipments: loadedSubShipments,
+      noteAttachments,
+      note_attachments: noteAttachments,
       files: extractFiles(detailViewBundle?.files),
       counts: detailViewBundle?.counts || bundleShipment?.counts,
       permissions: detailViewBundle?.permissions || bundleShipment?.permissions,
@@ -6787,6 +6817,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
             ? ensureDraftItemIds(cachedDraft.productItems)
             : mapShipmentItemsToProductItems(getLineItems(draft))
       );
+      setShipmentNoteAttachmentFile(null);
       setEditingShipmentId(getShipmentRecordId(draft) || getShipmentId(draft) || shipmentId);
       setShowViewModal(false);
       setShowTrackModal(false);
@@ -8749,6 +8780,32 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                         onChange={(e) => setCreateForm((prev) => ({ ...prev, notes: e.target.value }))}
                         className="min-h-[120px] w-full rounded-lg border border-[#dbe3ef] px-4 py-3 text-sm text-[#132347] outline-none focus:ring-2 focus:ring-[#ff6900]"
                       />
+                      <div className="mt-4 rounded-lg border border-dashed border-[#dbe3ef] bg-[#f8fafc] px-3 py-3">
+                        <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.14em] text-[#6b7280]">
+                          {SHIPMENT_NOTE_ATTACHMENT_LABEL}
+                        </label>
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                          <input
+                            type="file"
+                            onChange={(e) => setShipmentNoteAttachmentFile(e.target.files?.[0] || null)}
+                            className="w-full text-sm text-[#132347] file:mr-3 file:rounded-md file:border-0 file:bg-[#fff7ed] file:px-3 file:py-2 file:text-sm file:font-semibold file:text-[#ff6900]"
+                          />
+                          {shipmentNoteAttachmentFile ? (
+                            <button
+                              type="button"
+                              onClick={() => setShipmentNoteAttachmentFile(null)}
+                              className="self-start rounded-md border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-50 sm:self-auto"
+                            >
+                              Remove
+                            </button>
+                          ) : null}
+                        </div>
+                        {shipmentNoteAttachmentFile ? (
+                          <p className="mt-2 text-xs text-[#6b7280]">
+                            Selected: {shipmentNoteAttachmentFile.name}. It will upload after the shipment is saved.
+                          </p>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -9630,6 +9687,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
               {(() => {
                 const viewStats = selectedShipmentViewStats;
                 const viewNotes = getShipmentNoteText(selectedShipment);
+                const viewNoteAttachments = getShipmentNoteAttachments(selectedShipment, visibleShipmentFiles);
                 const orderData = getShipmentOrderData(selectedShipment);
                 const itemCount = viewStats.items.length;
                 const itemLabelFiles = getItemLabelFileAssignments(viewStats.items, trackFiles, visibleShipmentFiles);
@@ -9745,10 +9803,13 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                         <p><span className="text-xs uppercase text-gray-500">Pallets</span><br /><span className="font-medium text-gray-900">{orderData.pallets || '-'}</span></p>
                       </div>
                     </div>
-                    {viewNotes ? (
+                    {viewNotes || viewNoteAttachments.length ? (
                       <div>
                         <p className="mb-2 font-medium text-gray-900">Notes</p>
-                        <p className="whitespace-pre-line rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">{viewNotes}</p>
+                        {viewNotes ? (
+                          <p className="whitespace-pre-line rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">{viewNotes}</p>
+                        ) : null}
+                        <ShipmentNoteAttachments attachments={viewNoteAttachments} />
                       </div>
                     ) : null}
                     {viewStats.services.length ? (

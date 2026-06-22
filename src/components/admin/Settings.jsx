@@ -442,6 +442,17 @@ const getPricingServiceValue = (price = {}) =>
 const getPricingTierValue = (price = {}) =>
   String(price?.tier || price?.pricingTier || price?.pricing_tier || '').trim();
 
+const normalizePricingTierForApi = (tier = '') => {
+  const normalizedTier = String(tier || '').trim().toLowerCase();
+  if (['silver', 'gold', 'platinum'].includes(normalizedTier)) return normalizedTier;
+  return null;
+};
+
+const formatPricingTierLabel = (tier = '') => {
+  const normalizedTier = normalizePricingTierForApi(tier);
+  return normalizedTier ? formatServiceTypeLabel(normalizedTier) : 'Default';
+};
+
 const getPricingAmountValue = (price = {}) =>
   price?.pricePerUnit ??
   price?.price_per_unit ??
@@ -456,6 +467,22 @@ const getPricingNotes = (price = {}) =>
 
 const getPricingClientId = (price = {}) =>
   price?.clientId || price?.client_id || price?.client?.id || price?.client?.uuid || '';
+
+const getPricingClientObject = (price = {}) =>
+  price?.clients || price?.client || price?.customer || {};
+
+const getPricingClientDisplayLabel = (price = {}) => {
+  const clientRecord = getPricingClientObject(price);
+  return clientRecord && Object.keys(clientRecord).length ? getClientDisplayLabel(clientRecord) : '';
+};
+
+const getPricingRateFromValue = (value) => {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return firstFilledValue(value.rate, value.pricePerUnit, value.price_per_unit, value.price, value.unitRate, value.unit_rate);
+  }
+
+  return firstFilledValue(value);
+};
 
 const toDisplayRole = (role = '') => {
   const normalizedRole = String(role).toLowerCase();
@@ -743,11 +770,15 @@ const Settings = () => {
     const globalRows = normalizedGlobalCatalog.flatMap((service) => {
       const serviceType = getServiceTypeValue(service);
       const serviceLabel =
-        formatServiceTypeLabel(serviceType) ||
+        service?.displayName ||
+        service?.display_name ||
         service?.label ||
         service?.name ||
         service?.serviceName ||
-        service?.service_name;
+        service?.service_name ||
+        formatServiceTypeLabel(serviceType) ||
+        service?.label ||
+        service?.name;
       const tierPricing = toObjectValue(
         service?.default_tier_pricing ||
           service?.defaultTierPricing ||
@@ -764,14 +795,14 @@ const Settings = () => {
           scope: 'Global default',
           client: 'All clients',
           service: serviceLabel || formatServiceTypeLabel(serviceType),
-          tier: formatServiceTypeLabel(tier),
-          price: tierPricing[tier],
+          tier: formatPricingTierLabel(tier),
+          price: getPricingRateFromValue(tierPricing[tier]),
           notes: getPricingNotes(service),
         }));
 
       if (tierRows.length) return tierRows;
 
-      const directPrice = firstFilledValue(tierPricing.rate, getPricingAmountValue(service));
+      const directPrice = firstFilledValue(getPricingRateFromValue(tierPricing.rate), getPricingAmountValue(service));
       if (directPrice === '') return [];
 
       return [
@@ -780,7 +811,7 @@ const Settings = () => {
           scope: 'Global default',
           client: 'All clients',
           service: serviceLabel || formatServiceTypeLabel(serviceType),
-          tier: formatServiceTypeLabel(getPricingTierValue(service) || 'default'),
+          tier: formatPricingTierLabel(getPricingTierValue(service)),
           price: directPrice,
           notes: getPricingNotes(service),
         },
@@ -797,16 +828,20 @@ const Settings = () => {
         price?.company_name ||
         price?.clientEmail ||
         price?.client_email ||
-        price?.client?.companyName ||
-        price?.client?.company_name ||
-        price?.client?.name ||
-        price?.client?.email ||
+        getPricingClientDisplayLabel(price) ||
         clientLabelLookup.get(clientId) ||
         clientId ||
         'Selected client';
       const serviceType = getPricingServiceValue(price);
-      const tier = getPricingTierValue(price) || 'default';
-      const rowKey = `${clientId || 'global'}:${getServiceKey(serviceType)}:${String(tier).toLowerCase()}`;
+      const serviceCatalog = price?.service_catalog || price?.serviceCatalog || {};
+      const serviceLabel =
+        serviceCatalog?.displayName ||
+        serviceCatalog?.display_name ||
+        serviceCatalog?.label ||
+        serviceCatalog?.name ||
+        formatServiceTypeLabel(serviceType);
+      const tier = normalizePricingTierForApi(getPricingTierValue(price));
+      const rowKey = `${clientId || 'global'}:${getServiceKey(serviceType)}:${tier || 'default'}`;
 
       if (seenClientPriceKeys.has(rowKey)) {
         return [];
@@ -818,8 +853,8 @@ const Settings = () => {
         key: price?.id || price?.uuid || `client-${clientId}-${serviceType}-${getPricingTierValue(price)}-${index}`,
         scope: 'Client special',
         client: clientLabel,
-        service: formatServiceTypeLabel(serviceType),
-        tier: formatServiceTypeLabel(tier),
+        service: serviceLabel,
+        tier: formatPricingTierLabel(tier),
         price: getPricingAmountValue(price),
         notes: getPricingNotes(price),
       };
@@ -1391,13 +1426,25 @@ const Settings = () => {
         throw new Error('Price per unit is required.');
       }
 
+      const pricePerUnit = Number(pricingForm.pricePerUnit);
+
+      if (!Number.isFinite(pricePerUnit)) {
+        throw new Error('Price per unit must be a valid number.');
+      }
+
+      const normalizedTier = normalizePricingTierForApi(pricingForm.tier);
       const pricingPayload = {
-        clientId: pricingForm.clientId.trim() || undefined,
         serviceType: normalizeServiceCode(selectedServiceType),
-        tier: pricingForm.tier,
-        pricePerUnit: Number(pricingForm.pricePerUnit || 0),
+        tier: normalizedTier,
+        pricePerUnit,
         notes: pricingForm.notes.trim() || undefined,
       };
+
+      const selectedClientId = pricingForm.clientId.trim();
+      if (selectedClientId) {
+        pricingPayload.clientId = selectedClientId;
+      }
+
       console.log('[PickPackPro][Settings][POST /api/pricing request]', pricingPayload);
 
       const response = await fetch(`${API_BASE_URL}/api/pricing`, {
@@ -2670,7 +2717,7 @@ const Settings = () => {
                         <option value="silver">Silver</option>
                         <option value="gold">Gold</option>
                         <option value="platinum">Platinum</option>
-                        <option value="others">Others</option>
+                        <option value="default">Default / all tiers</option>
                       </select>
                       <input
                         type="number"
