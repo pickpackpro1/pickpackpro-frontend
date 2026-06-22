@@ -1128,14 +1128,14 @@ const InvoicesClient = () => {
                 </div>
               </div>
               <p className="mt-4 text-sm font-semibold text-[#22d3ee]">{payableInvoice?.invoice || invoices[0]?.invoice || 'No open invoice'}</p>
-              <button
+              {/* <button
                 type="button"
                 onClick={handlePayNow}
                 disabled={!payableInvoice}
                 className="mt-6 w-full rounded-lg bg-[#22c7b8] px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
               >
                 Pay Now
-              </button>
+              </button> */}
             </div>
           </div>
 

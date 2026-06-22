@@ -3,7 +3,7 @@ import LayoutClient from './clientlayout/LayoutClient';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import { Eye, EyeOff, Shield, X } from 'lucide-react';
-import { getSession } from '../../utils/auth';
+import { getSession, saveSession } from '../../utils/auth';
 import { getServiceDisplayName, getServiceKey, normalizeServiceCode } from '../../utils/serviceCatalog';
 
 const API_BASE_URL = '';
@@ -335,6 +335,8 @@ const Account = () => {
   const [profileData, setProfileData] = useState(() => normalizeClientProfile(session, null, null));
   const [isLoadingProfile, setIsLoadingProfile] = useState(false);
   const [profileError, setProfileError] = useState('');
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileSaveError, setProfileSaveError] = useState('');
   const [pricingRates, setPricingRates] = useState([]);
   const [isLoadingPricing, setIsLoadingPricing] = useState(false);
   const [pricingError, setPricingError] = useState('');
@@ -459,7 +461,59 @@ const Account = () => {
       vatNumber: profile.vatNumber,
       billingAddress: profile.billingAddress,
     });
+    setProfileSaveError('');
     setShowEditProfileModal(true);
+  };
+
+  const handleSaveProfile = async () => {
+    try {
+      setIsSavingProfile(true);
+      setProfileSaveError('');
+
+      const payload = {
+        companyName: String(profileForm.company || '').trim(),
+        contactName: String(profileForm.contactName || '').trim(),
+        phone: String(profileForm.phone || '').trim(),
+        vatNumber: String(profileForm.vatNumber || '').trim(),
+        billingAddress: String(profileForm.billingAddress || '').trim(),
+      };
+
+      const response = await fetch(`${API_BASE_URL}/api/clients/me`, {
+        method: 'PATCH',
+        headers: buildHeaders(true),
+        body: JSON.stringify(payload),
+      });
+      const result = await parseResponse(response);
+      const updatedClient = result?.data || result?.client || result;
+      const normalizedProfile = normalizeClientProfile(session, null, updatedClient);
+
+      setProfileData(normalizedProfile);
+
+      const currentSession = getSession();
+      if (currentSession) {
+        saveSession({
+          ...currentSession,
+          companyName: updatedClient?.companyName || updatedClient?.company_name || normalizedProfile.company,
+          company_name: updatedClient?.company_name || updatedClient?.companyName || normalizedProfile.company,
+          name: updatedClient?.contactName || updatedClient?.contact_name || normalizedProfile.contactName,
+          rawUser: {
+            ...(currentSession.rawUser || {}),
+            companyName: updatedClient?.companyName || updatedClient?.company_name || normalizedProfile.company,
+            company_name: updatedClient?.company_name || updatedClient?.companyName || normalizedProfile.company,
+            client: {
+              ...((currentSession.rawUser || {}).client || {}),
+              ...updatedClient,
+            },
+          },
+        });
+      }
+
+      setShowEditProfileModal(false);
+    } catch (error) {
+      setProfileSaveError(error.message || 'Failed to update profile.');
+    } finally {
+      setIsSavingProfile(false);
+    }
   };
 
   return (
@@ -674,9 +728,10 @@ const Account = () => {
                 <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.14em] text-[#6b7280]">Email Address</label>
                 <input
                   value={profileForm.email}
-                  onChange={(e) => setProfileForm((prev) => ({ ...prev, email: e.target.value }))}
-                  className="w-full rounded-lg border border-[#dde6f2] px-4 py-3 text-sm"
+                  readOnly
+                  className="w-full cursor-not-allowed rounded-lg border border-[#dde6f2] bg-gray-50 px-4 py-3 text-sm text-gray-500"
                 />
+                <p className="mt-1 text-xs text-[#94a3b8]">Email changes are not supported from the client profile page.</p>
               </div>
               <div>
                 <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.14em] text-[#6b7280]">Phone Number</label>
@@ -703,21 +758,31 @@ const Account = () => {
                 />
               </div>
             </div>
+            {profileSaveError ? (
+              <div className="mx-6 mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {profileSaveError}
+              </div>
+            ) : null}
 
             <div className="flex items-center justify-end gap-3 border-t border-[#ebf0f7] px-6 py-5">
               <button
                 type="button"
-                onClick={() => setShowEditProfileModal(false)}
+                onClick={() => {
+                  if (isSavingProfile) return;
+                  setShowEditProfileModal(false);
+                }}
+                disabled={isSavingProfile}
                 className="rounded-lg border border-[#d7dfec] bg-white px-5 py-2.5 text-sm font-medium text-[#475569]"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                onClick={() => setShowEditProfileModal(false)}
-                className="rounded-lg bg-[#ff8c2f] px-5 py-2.5 text-sm font-semibold text-white"
+                onClick={handleSaveProfile}
+                disabled={isSavingProfile}
+                className="rounded-lg bg-[#ff8c2f] px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
               >
-                Save Changes
+                {isSavingProfile ? 'Saving...' : 'Save Changes'}
               </button>
             </div>
           </div>
