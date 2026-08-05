@@ -860,12 +860,14 @@ const getBoxTitle = (box = {}, index = 0) => {
     if (palletNumber) return palletNumber;
   }
 
+  const boxNumber = String(firstPresent(box?.boxNumber, box?.box_number) || '').trim();
+  if (boxNumber) return /^\d+$/.test(boxNumber) ? `Box ${boxNumber}` : boxNumber;
+
   const rawTitle = firstPresent(box?.label, box?.name, box?.reference);
   const title = String(rawTitle || '').trim();
   if (title) return title;
 
-  const boxNumber = String(firstPresent(box?.boxNumber, box?.box_number) || '').trim();
-  return boxNumber ? `Box ${boxNumber}` : `Box ${index + 1}`;
+  return `Box ${index + 1}`;
 };
 
 const getBoxSize = (box = {}) =>
@@ -4240,6 +4242,7 @@ const ShipmentDetail = () => {
   const [boxLength, setBoxLength] = useState('');
   const [boxWidth, setBoxWidth] = useState('');
   const [boxHeight, setBoxHeight] = useState('');
+  const [boxNumber, setBoxNumber] = useState('');
   const [palletNumber, setPalletNumber] = useState('');
   const [sealBoxId, setSealBoxId] = useState('');
   const [sealTrackingCode, setSealTrackingCode] = useState('');
@@ -5246,6 +5249,7 @@ const ShipmentDetail = () => {
 
     setActiveSubShipmentIdForBox(subShipmentId);
     setBoxType(normalizedBoxType);
+    setBoxNumber('');
     setPalletNumber('');
     resetAddBoxSkuSelection();
     setSelectedPalletBoxIds([]);
@@ -5637,6 +5641,7 @@ const ShipmentDetail = () => {
     try {
       setError('');
       setMessage('');
+      const existingInvoice = findInvoiceByType(shipment, 'shipment');
       setInvoiceActionKey(`shipment:${id}`);
       const response = await fetch(`${API_BASE_URL}/api/shipments/${encodeURIComponent(id)}/invoice`, {
         method: 'POST',
@@ -5647,7 +5652,7 @@ const ShipmentDetail = () => {
       if (invoice && typeof invoice === 'object') {
         setShipment((currentShipment) => ({ ...(currentShipment || {}), invoice }));
       }
-      setMessage('Shipment invoice ready.');
+      setMessage(existingInvoice ? 'Shipment invoice refreshed.' : 'Shipment invoice ready.');
       await loadShipmentData({ showLoader: false });
     } catch (requestError) {
       setError(requestError.message);
@@ -5661,6 +5666,8 @@ const ShipmentDetail = () => {
       setError('');
       setMessage('');
       if (!subShipmentId) throw new Error('Sub-shipment identifier is missing.');
+      const existingSubShipment = subShipments.find((subShipment) => getSubShipmentId(subShipment) === subShipmentId);
+      const existingInvoice = findInvoiceByType(existingSubShipment, 'sub_shipment');
       setInvoiceActionKey(`sub-shipment:${subShipmentId}`);
       const response = await fetch(`${API_BASE_URL}/api/sub-shipments/${encodeURIComponent(subShipmentId)}/invoice`, {
         method: 'POST',
@@ -5675,7 +5682,7 @@ const ShipmentDetail = () => {
           )
         );
       }
-      setMessage('Sub-shipment invoice ready.');
+      setMessage(existingInvoice ? 'Sub-shipment invoice refreshed.' : 'Sub-shipment invoice ready.');
       await loadShipmentData({ showLoader: false });
     } catch (requestError) {
       setError(requestError.message);
@@ -5842,6 +5849,7 @@ const ShipmentDetail = () => {
             boxSize,
             weight: Number(boxWeight || 0),
             dimensions: { l: Number(boxLength || 0), w: Number(boxWidth || 0), h: Number(boxHeight || 0) },
+            ...(String(boxNumber || '').trim() ? { boxNumber: String(boxNumber || '').trim() } : {}),
           };
       const allocationDrafts = [
         { lineItemValue: boxSkuPreview, quantity: boxSkuQuantityPreview, rowNumber: 1 },
@@ -6028,6 +6036,7 @@ const ShipmentDetail = () => {
         }
       }
       resetAddBoxSkuSelection();
+      setBoxNumber('');
       setActiveSubShipmentIdForBox('');
       return true;
     } catch (requestError) {
@@ -6137,7 +6146,11 @@ const ShipmentDetail = () => {
         headers: buildHeaders(true),
         body: JSON.stringify({ trackingCode: undefined }),
       });
-      await parseResponse(response);
+      const payload = await parseResponse(response);
+      const invoice = extractGeneratedInvoice(payload);
+      if (invoice && typeof invoice === 'object') {
+        setShipment((currentShipment) => ({ ...(currentShipment || {}), invoice }));
+      }
       setMessage(`${isPallet ? 'Pallet' : 'Box'} marked dispatched.`);
       await loadShipmentData({ showLoader: false });
     } catch (requestError) {
@@ -6542,16 +6555,24 @@ const ShipmentDetail = () => {
                     View Invoice
                   </button>
                 ) : null}
-                {!shipmentInvoice ? (
-                  <button
-                    type="button"
-                    onClick={handleGenerateShipmentInvoice}
-                    disabled={invoiceActionKey === `shipment:${id}`}
-                    className="rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {invoiceActionKey === `shipment:${id}` ? 'Generating...' : 'Generate Invoice'}
-                  </button>
-                ) : null}
+                <button
+                  type="button"
+                  onClick={handleGenerateShipmentInvoice}
+                  disabled={invoiceActionKey === `shipment:${id}`}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${
+                    shipmentInvoice
+                      ? 'border border-[#ffb37a] bg-white text-[#d76000] hover:bg-[#fff7ed]'
+                      : 'bg-[#ff6900] text-white hover:bg-[#e55d00]'
+                  }`}
+                >
+                  {invoiceActionKey === `shipment:${id}`
+                    ? shipmentInvoice
+                      ? 'Refreshing...'
+                      : 'Generating...'
+                    : shipmentInvoice
+                      ? 'Refresh Invoice'
+                      : 'Generate Invoice'}
+                </button>
               </div>
             </div>
           </div>
@@ -6740,7 +6761,8 @@ const ShipmentDetail = () => {
                                   View / Manage Boxes
                                 </button> */}
                                 {canShowSubShipmentInvoiceSection ? (
-                                  subShipmentInvoice ? (
+                                  <>
+                                    {subShipmentInvoice ? (
                                     <button
                                       type="button"
                                       onClick={() => navigate(`/billing?invoice=${encodeURIComponent(getInvoiceId(subShipmentInvoice) || getInvoiceReference(subShipmentInvoice))}`)}
@@ -6748,16 +6770,26 @@ const ShipmentDetail = () => {
                                     >
                                       View Invoice
                                     </button>
-                                  ) : (
+                                    ) : null}
                                     <button
                                       type="button"
                                       onClick={() => handleGenerateSubShipmentInvoice(subShipmentId)}
                                       disabled={!subShipmentId || invoiceActionKey === `sub-shipment:${subShipmentId}`}
-                                      className="rounded-lg bg-[#ff6900] px-3 py-2 text-xs font-semibold text-white hover:bg-[#e55d00] disabled:cursor-not-allowed disabled:opacity-60"
+                                      className={`rounded-lg px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${
+                                        subShipmentInvoice
+                                          ? 'border border-[#ffb37a] bg-white text-[#d76000] hover:bg-[#fff7ed]'
+                                          : 'bg-[#ff6900] text-white hover:bg-[#e55d00]'
+                                      }`}
                                     >
-                                      {invoiceActionKey === `sub-shipment:${subShipmentId}` ? 'Generating...' : 'Generate Invoice'}
+                                      {invoiceActionKey === `sub-shipment:${subShipmentId}`
+                                        ? subShipmentInvoice
+                                          ? 'Refreshing...'
+                                          : 'Generating...'
+                                        : subShipmentInvoice
+                                          ? 'Refresh Invoice'
+                                          : 'Generate Invoice'}
                                     </button>
-                                  )
+                                  </>
                                 ) : null}
                               </div>
                             </div>
@@ -7197,6 +7229,7 @@ const ShipmentDetail = () => {
                     onClick={() => {
                       setActiveSubShipmentIdForBox('');
                       setBoxType('box');
+                      setBoxNumber('');
                       setPalletNumber('');
                       resetAddBoxSkuSelection();
                       setSelectedPalletBoxIds([]);
@@ -7394,6 +7427,9 @@ const ShipmentDetail = () => {
                 <h3 className="mb-4 text-sm font-semibold uppercase tracking-wider text-gray-500">Create Box / Pallet</h3>
                 <div className="space-y-3">
                   <input type="text" placeholder="box or pallet" value={boxType} onChange={(e) => setBoxType(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
+                  {boxType !== 'pallet' ? (
+                    <input type="text" placeholder="Box Number (optional)" value={boxNumber} onChange={(e) => setBoxNumber(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
+                  ) : null}
                   <input type="text" placeholder="Size" value={boxSize} onChange={(e) => setBoxSize(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
                   <input type="number" step="0.01" placeholder="Weight" value={boxWeight} onChange={(e) => setBoxWeight(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
                   <div className="grid grid-cols-3 gap-2">
@@ -7407,6 +7443,7 @@ const ShipmentDetail = () => {
                       onClick={() => {
                         setActiveSubShipmentIdForBox('');
                         setBoxType('pallet');
+                        setBoxNumber('');
                         setPalletNumber('');
                         resetAddBoxSkuSelection();
                         setSelectedPalletBoxIds([]);
@@ -7626,6 +7663,7 @@ const ShipmentDetail = () => {
                     if (isCreatingBox) return;
                     setShowAddBoxModal(false);
                     setActiveSubShipmentIdForBox('');
+                    setBoxNumber('');
                     setPalletNumber('');
                     resetAddBoxSkuSelection();
                     setSelectedPalletBoxIds([]);
@@ -7644,7 +7682,9 @@ const ShipmentDetail = () => {
                       value={boxType}
                       onChange={(e) => {
                         setBoxType(e.target.value);
-                        if (e.target.value !== 'pallet') {
+                        if (e.target.value === 'pallet') {
+                          setBoxNumber('');
+                        } else {
                           setPalletNumber('');
                           setSelectedPalletBoxIds([]);
                         }
@@ -7717,7 +7757,19 @@ const ShipmentDetail = () => {
                     />
                     <p className="mt-1 text-[11px] text-gray-400">Optional saved display label for this pallet.</p>
                   </div>
-                ) : null}
+                ) : (
+                  <div>
+                    <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-gray-400">Box Number</label>
+                    <input
+                      type="text"
+                      value={boxNumber}
+                      onChange={(event) => setBoxNumber(event.target.value)}
+                      placeholder="A-01, Box 1, FBA-BOX-5"
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm"
+                    />
+                    <p className="mt-1 text-[11px] text-gray-400">Optional. Leave blank to auto-generate the box number.</p>
+                  </div>
+                )}
                 <div>
                   <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-gray-400">Dimensions (cm)</label>
                   <div className="grid grid-cols-3 gap-3">
@@ -7864,6 +7916,7 @@ const ShipmentDetail = () => {
                     if (isCreatingBox) return;
                     setShowAddBoxModal(false);
                     setActiveSubShipmentIdForBox('');
+                    setBoxNumber('');
                     setPalletNumber('');
                     resetAddBoxSkuSelection();
                     setSelectedPalletBoxIds([]);
@@ -7882,6 +7935,7 @@ const ShipmentDetail = () => {
                     if (created) {
                       setShowAddBoxModal(false);
                       setActiveSubShipmentIdForBox('');
+                      setBoxNumber('');
                       setPalletNumber('');
                       resetAddBoxSkuSelection();
                       setSelectedPalletBoxIds([]);

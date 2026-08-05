@@ -102,13 +102,15 @@ const formatQueueContents = (contents = []) =>
 
 const getQueueChildBoxTitle = (box = {}, index = 0) => {
   const boxNumber = firstPresent(box?.boxNumber, box?.box_number);
+  const isPallet = toBooleanFlag(firstPresent(box?.isPallet, box?.is_pallet)) || String(firstPresent(box?.boxType, box?.box_type)).toLowerCase() === "pallet";
+  const boxNumberTitle = boxNumber !== "" ? (isPallet ? `Pallet ${boxNumber}` : /^\d+$/.test(String(boxNumber)) ? `Box ${boxNumber}` : String(boxNumber)) : "";
   return firstPresent(
+    box?.palletNumber,
+    box?.pallet_number,
+    boxNumberTitle,
     box?.boxTitle,
     box?.box_title,
     box?.title,
-    box?.palletNumber,
-    box?.pallet_number,
-    boxNumber !== "" ? `Box ${boxNumber}` : "",
     `Box ${index + 1}`
   );
 };
@@ -200,8 +202,8 @@ const sortDispatchQueueRows = (rows = []) =>
       return secondShipmentReference.localeCompare(firstShipmentReference, undefined, { numeric: true, sensitivity: 'base' });
     }
 
-    const firstBoxNumber = Number(firstPresent(firstRow?.boxNumber, firstRow?.box_number, -1));
-    const secondBoxNumber = Number(firstPresent(secondRow?.boxNumber, secondRow?.box_number, -1));
+    const firstBoxNumber = Number(firstPresent(firstRow?.boxSequenceNumber, firstRow?.box_sequence_number, firstRow?.sequence, firstRow?.sequence_no, -1));
+    const secondBoxNumber = Number(firstPresent(secondRow?.boxSequenceNumber, secondRow?.box_sequence_number, secondRow?.sequence, secondRow?.sequence_no, -1));
 
     if (Number.isFinite(firstBoxNumber) && Number.isFinite(secondBoxNumber) && firstBoxNumber !== secondBoxNumber) {
       return secondBoxNumber - firstBoxNumber;
@@ -238,14 +240,14 @@ const normalizeDispatchQueueRow = (row = {}, index = 0) => {
   const boxId = firstPresent(row?.boxId, row?.box_id, row?.id);
   const isPallet = toBooleanFlag(firstPresent(row?.isPallet, row?.is_pallet)) || String(firstPresent(row?.boxType, row?.box_type)).toLowerCase() === "pallet";
   const boxNumber = firstPresent(row?.boxNumber, row?.box_number);
+  const boxNumberTitle = boxNumber !== "" ? (isPallet ? `Pallet ${boxNumber}` : /^\d+$/.test(String(boxNumber)) ? `Box ${boxNumber}` : String(boxNumber)) : "";
   const boxTitle = firstPresent(
+    row?.palletNumber,
+    row?.pallet_number,
+    boxNumberTitle,
     row?.boxTitle,
     row?.box_title,
     row?.title,
-    row?.palletNumber,
-    row?.pallet_number,
-    isPallet && boxNumber !== "" ? `Pallet ${boxNumber}` : "",
-    boxNumber !== "" ? `Box ${boxNumber}` : "",
     "--"
   );
   const weightValue = firstPresent(row?.weightKg, row?.weight_kg, row?.weight);

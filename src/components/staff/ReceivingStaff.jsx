@@ -10,6 +10,22 @@ import {
   normalizeShipment as normalizeMappedShipment,
   normalizeShipmentList as normalizeMappedShipmentList,
 } from "../../utils/shipmentMapper";
+import {
+  formatReceivingStatus,
+  formatReceivingQuantity,
+  getReceivingLineDiscrepancyNotes,
+  getReceivingLineExpectedQty,
+  getReceivingLineReceivedQty,
+  getReceivingLineRemainingQty,
+  getReceivingShipmentDiscrepancyCount,
+  getReceivingShipmentExpectedQty,
+  getReceivingShipmentReceivedQty,
+  getReceivingShipmentRemainingQty,
+  getReceivingShipmentStatus,
+  hasReceivingLineDiscrepancy,
+  hasReceivingShipmentDiscrepancy,
+  isReceivingComplete,
+} from "../../utils/receiving";
 
 const API_BASE_URL = '';
 const RECEIVING_PAGE_SIZE = 25;
@@ -58,23 +74,6 @@ const extractShipments = (payload) => {
   return normalizeMappedShipmentList(payload);
 };
 
-const RECEIVING_QUEUE_STATUSES = ["pending_arrival", "submitted"];
-
-const LINE_ITEM_KEYS = [
-  "shipment_line_items",
-  "shipmentLineItems",
-  "shipment_items",
-  "shipmentItems",
-  "line_items",
-  "lineItems",
-  "items",
-  "products",
-  "productItems",
-  "product_items",
-];
-
-const LINE_ITEM_CONTAINERS = ["shipment", "data", "record", "result", "payload", "detail"];
-
 const getLineItems = (source) => getMappedShipmentItems(source);
 
 const extractShipmentDetail = (payload) =>
@@ -93,39 +92,9 @@ const extractShipmentDetail = (payload) =>
 const getItemId = (item) =>
   getMappedLineItemId(item) || item?.id || item?.shipmentItemId || item?.shipment_item_id || item?.lineItemId || item?.line_item_id || "";
 
-const getExpectedQty = (item) =>
-  Number(
-    item?.expectedQty ??
-      item?.expected_qty ??
-      item?.expectedQuantity ??
-      item?.expected_quantity ??
-      item?.qtyExpected ??
-      item?.qty_expected ??
-      item?.expectedUnits ??
-      item?.expected_units ??
-      item?.unitsExpected ??
-      item?.units_expected ??
-      item?.expected ??
-      item?.quantity ??
-      item?.qty ??
-      item?.count ??
-      item?.totalUnits ??
-      item?.total_units ??
-      item?.units ??
-      0
-  );
-
-const getReceivedQty = (item) =>
-  item?.receivedQty ??
-  item?.received_qty ??
-  item?.receivedQuantity ??
-  item?.received_quantity ??
-  item?.qtyReceived ??
-  item?.qty_received ??
-  item?.unitsReceived ??
-  item?.units_received ??
-  item?.received ??
-  "";
+const getExpectedQty = getReceivingLineExpectedQty;
+const getReceivedQty = getReceivingLineReceivedQty;
+const getRemainingQty = getReceivingLineRemainingQty;
 
 const getItemSku = (item) =>
   item?.sku ||
@@ -198,10 +167,7 @@ const ReceivingStaff = () => {
       const shipmentsById = new Map();
 
       extractShipments(payload).forEach((shipment, index) => {
-        const status = String(shipment?.status || "").toLowerCase();
-        if (!RECEIVING_QUEUE_STATUSES.includes(status)) return;
-
-        const key = shipment?.id || shipment?.uuid || shipment?.reference || `${status}-${index}`;
+        const key = shipment?.id || shipment?.uuid || shipment?.reference || `shipment-${index}`;
         if (!shipmentsById.has(key)) shipmentsById.set(key, shipment);
       });
 
@@ -241,7 +207,7 @@ const ReceivingStaff = () => {
       const quantities = {};
 
       getLineItems(detail).forEach((item) => {
-        quantities[getItemId(item)] = String(getReceivedQty(item));
+        quantities[getItemId(item)] = "";
       });
 
       setSelectedShipment(detail);
@@ -261,21 +227,57 @@ const ReceivingStaff = () => {
 
       const shipmentId = selectedShipment.id || selectedShipment.uuid;
       const items = getLineItems(selectedShipment)
-        .map((item) => ({
-          shipmentItemId: getItemId(item),
-          receivedQty: Number(receivedQuantities[getItemId(item)] || 0),
-        }))
+        .map((item) => {
+          const shipmentItemId = getItemId(item);
+          return {
+            shipmentItemId,
+            receivedQty: Number(receivedQuantities[shipmentItemId] || 0),
+            remainingQty: getRemainingQty(item),
+            sku: getItemSku(item) || shipmentItemId,
+          };
+        })
         .filter((item) => item.shipmentItemId);
 
       if (!items.length) {
         throw new Error("Shipment has no valid line items to receive.");
       }
 
+      const invalidNumberItem = items.find((item) => !Number.isFinite(item.receivedQty));
+      if (invalidNumberItem) {
+        throw new Error(`Enter a valid received quantity for ${invalidNumberItem.sku || "this line item"}.`);
+      }
+
+      const negativeItem = items.find((item) => item.receivedQty < 0);
+      if (negativeItem) {
+        throw new Error(`Received quantity cannot be negative for ${negativeItem.sku || "this line item"}.`);
+      }
+
+      const overReceivedItem = items.find((item) => item.receivedQty > item.remainingQty);
+      if (overReceivedItem) {
+        throw new Error(
+          `Received quantity for ${overReceivedItem.sku || "this line item"} cannot exceed remaining quantity ${formatReceivingQuantity(overReceivedItem.remainingQty)}.`
+        );
+      }
+
+      if (!items.some((item) => item.receivedQty > 0)) {
+        throw new Error("Enter at least one received quantity greater than 0.");
+      }
+
+      const remainingAfterAction = items.reduce(
+        (sum, item) => sum + Math.max(0, item.remainingQty - item.receivedQty),
+        0
+      );
+      if (startPrepAfterReceive && remainingAfterAction > 0) {
+        throw new Error("Receive all remaining quantity before starting prep.");
+      }
+
       await parseResponse(
         await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
           method: "POST",
           headers: buildHeaders(true),
-          body: JSON.stringify({ items }),
+          body: JSON.stringify({
+            items: items.map(({ shipmentItemId, receivedQty }) => ({ shipmentItemId, receivedQty })),
+          }),
         })
       );
 
@@ -289,7 +291,7 @@ const ReceivingStaff = () => {
         );
       }
 
-      setMessage(startPrepAfterReceive ? "Shipment received and moved to in_progress." : "Shipment received.");
+      setMessage(startPrepAfterReceive ? "Received quantity saved and moved to in_progress." : "Received quantity saved.");
       setSelectedShipment(null);
       setReceivedQuantities({});
       await loadPendingArrivals();
@@ -349,33 +351,59 @@ const ReceivingStaff = () => {
                   <tr className="bg-white text-left text-[11px] font-semibold uppercase tracking-wider text-gray-400">
                     <th className="px-5 py-3">Shipment</th>
                     <th className="px-5 py-3">Client</th>
-                    <th className="px-5 py-3">Expected</th>
-                    <th className="px-5 py-3">Units</th>
+                    <th className="px-5 py-3">Expected Arrival</th>
+                    <th className="px-5 py-3">Expected Quantity</th>
+                    <th className="px-5 py-3">Received Quantity</th>
+                    <th className="px-5 py-3">Remaining Quantity</th>
+                    <th className="px-5 py-3">Status</th>
                     <th className="px-5 py-3">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {isLoading ? (
                     <tr>
-                      <td colSpan="5" className="px-5 py-10 text-center text-sm text-gray-500">
+                      <td colSpan="8" className="px-5 py-10 text-center text-sm text-gray-500">
                         <LoadingState label="Loading arrivals..." />
                       </td>
                     </tr>
                   ) : pendingArrivals.map((shipment) => {
                     const shipmentId = shipment?.id || shipment?.uuid || shipment?.reference;
                     const isSelected = selectedShipment && (selectedShipment.id || selectedShipment.uuid) === shipmentId;
-                    const units =
-                      shipment?.totalUnits ||
-                      shipment?.total_units ||
-                      shipment?.units ||
-                      getLineItems(shipment).reduce((sum, item) => sum + getExpectedQty(item), 0);
+                    const lineItems = getLineItems(shipment);
+                    const expectedQty = getReceivingShipmentExpectedQty(shipment, lineItems);
+                    const receivedQty = getReceivingShipmentReceivedQty(shipment, lineItems);
+                    const remainingQty = getReceivingShipmentRemainingQty(shipment, lineItems);
+                    const discrepancyCount = getReceivingShipmentDiscrepancyCount(shipment, lineItems);
+                    const hasDiscrepancy = hasReceivingShipmentDiscrepancy(shipment, lineItems);
+                    const complete = isReceivingComplete(shipment, lineItems);
+                    const shipmentStatusLabel = formatReceivingStatus(getReceivingShipmentStatus(shipment));
 
                     return (
                       <tr key={shipmentId} className={isSelected ? "bg-blue-50/50" : "hover:bg-gray-50"}>
                         <td className="px-5 py-4 text-sm font-semibold text-[#2d6cdf]">{getReference(shipment)}</td>
                         <td className="px-5 py-4 text-sm text-gray-700">{getClientName(shipment)}</td>
                         <td className="px-5 py-4 text-sm text-gray-700">{shipment?.expectedArrivalDate || shipment?.expected_arrival_date || "-"}</td>
-                        <td className="px-5 py-4 text-sm text-gray-700">{units || 0}</td>
+                        <td className="px-5 py-4 text-sm font-medium text-gray-900">{formatReceivingQuantity(expectedQty)}</td>
+                        <td className="px-5 py-4 text-sm font-medium text-gray-900">{formatReceivingQuantity(receivedQty)}</td>
+                        <td className={`px-5 py-4 text-sm font-semibold ${remainingQty > 0 ? "text-[#2d6cdf]" : "text-green-700"}`}>{formatReceivingQuantity(remainingQty)}</td>
+                        <td className="px-5 py-4">
+                          <div className="flex flex-col items-start gap-1">
+                            {shipmentStatusLabel ? (
+                              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">{shipmentStatusLabel}</span>
+                            ) : null}
+                            {complete ? (
+                              <span className="rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700">Complete</span>
+                            ) : hasDiscrepancy ? (
+                              <span className="rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700">
+                                {discrepancyCount
+                                  ? `${formatReceivingQuantity(discrepancyCount)} ${discrepancyCount === 1 ? "discrepancy" : "discrepancies"}`
+                                  : "Discrepancy"}
+                              </span>
+                            ) : (
+                              <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-[#2d6cdf]">Pending</span>
+                            )}
+                          </div>
+                        </td>
                         <td className="px-5 py-4">
                           <button
                             type="button"
@@ -390,7 +418,7 @@ const ReceivingStaff = () => {
                   })}
                   {!isLoading && !pendingArrivals.length ? (
                     <tr>
-                      <td colSpan="5" className="px-5 py-10 text-center text-sm text-gray-500">No pending arrivals found.</td>
+                      <td colSpan="8" className="px-5 py-10 text-center text-sm text-gray-500">No pending arrivals found.</td>
                     </tr>
                   ) : null}
                 </tbody>
@@ -439,44 +467,80 @@ const ReceivingStaff = () => {
                       const sku = getItemSku(item) || itemId || "SKU";
                       const productName = getProductName(item);
                       const expected = getExpectedQty(item);
+                      const receivedSoFar = getReceivedQty(item);
+                      const remaining = getRemainingQty(item);
                       const value = receivedQuantities[itemId] ?? "";
-                      const hasDiscrepancy = value !== "" && Number(value) !== expected;
+                      const quantityNow = Number(value || 0);
+                      const invalidQuantity = !Number.isFinite(quantityNow) || quantityNow < 0 || quantityNow > remaining;
+                      const lineHasDiscrepancy = hasReceivingLineDiscrepancy(item);
+                      const notes = getReceivingLineDiscrepancyNotes(item);
 
                       return (
-                        <div key={itemId || item?.sku} className={`rounded-xl border p-4 ${hasDiscrepancy ? "border-red-200 bg-red-50" : "border-gray-200"}`}>
+                        <div key={itemId || item?.sku} className={`rounded-xl border p-4 ${lineHasDiscrepancy || invalidQuantity ? "border-red-200 bg-red-50" : "border-gray-200"}`}>
                           <div className="mb-3 flex items-start justify-between gap-3">
                             <div>
                               <p className="text-sm font-semibold text-gray-900">SKU: {sku}</p>
                               <p className="mt-1 text-xs text-gray-500">{productName}</p>
                             </div>
-                            <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-700">Expected {expected}</span>
+                            {remaining <= 0 ? (
+                              <span className="rounded-full bg-green-100 px-2 py-1 text-xs font-semibold text-green-700">Verified</span>
+                            ) : lineHasDiscrepancy ? (
+                              <span className="rounded-full bg-red-100 px-2 py-1 text-xs font-semibold text-red-700">Discrepancy</span>
+                            ) : (
+                              <span className="rounded-full bg-blue-100 px-2 py-1 text-xs font-semibold text-[#2d6cdf]">Pending</span>
+                            )}
                           </div>
                           <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                             <div>
                               <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Expected</label>
                               <input
                                 type="number"
-                                value={expected}
+                                value={formatReceivingQuantity(expected)}
                                 readOnly
                                 className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700"
                               />
                             </div>
                             <div>
-                              <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Received</label>
+                              <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Received So Far</label>
+                              <input
+                                type="number"
+                                value={formatReceivingQuantity(receivedSoFar)}
+                                readOnly
+                                className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Remaining</label>
+                              <input
+                                type="number"
+                                value={formatReceivingQuantity(remaining)}
+                                readOnly
+                                className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Receive Now</label>
                               <input
                                 type="number"
                                 min="0"
+                                max={remaining}
                                 value={value}
+                                disabled={remaining <= 0}
                                 onChange={(event) => setReceivedQuantities((current) => ({ ...current, [itemId]: event.target.value }))}
-                                className="w-full rounded-xl border border-[#93c5fd] px-3 py-3 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#2d6cdf]"
-                                placeholder="Received quantity"
+                                className={`w-full rounded-xl border px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#2d6cdf] ${remaining <= 0 ? "cursor-not-allowed border-gray-200 bg-gray-50 text-gray-400 focus:ring-0" : invalidQuantity ? "border-red-300 bg-white text-red-700" : "border-[#93c5fd] text-gray-700"}`}
+                                placeholder="0"
                               />
                             </div>
                           </div>
-                          {hasDiscrepancy ? (
+                          {invalidQuantity ? (
                             <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-white px-3 py-2 text-xs text-red-600">
                               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                              <span>Expected {expected}, received {Number(value || 0)}. Backend will flag discrepancy.</span>
+                              <span>Enter a quantity from 0 to {formatReceivingQuantity(remaining)} for {sku}.</span>
+                            </div>
+                          ) : lineHasDiscrepancy || notes ? (
+                            <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-white px-3 py-2 text-xs text-red-600">
+                              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                              <span>{notes || `${formatReceivingQuantity(remaining)} units still need to be received for ${sku}.`}</span>
                             </div>
                           ) : null}
                         </div>

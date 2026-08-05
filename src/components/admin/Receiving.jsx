@@ -1,9 +1,25 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import { getSession } from '../../utils/auth';
-import { Check, Package, AlertCircle, RefreshCw } from 'lucide-react';
+import {
+  formatReceivingStatus,
+  formatReceivingQuantity,
+  getReceivingLineDiscrepancyNotes,
+  getReceivingLineExpectedQty,
+  getReceivingLineReceivedQty,
+  getReceivingLineRemainingQty,
+  getReceivingShipmentDiscrepancyCount,
+  getReceivingShipmentExpectedQty,
+  getReceivingShipmentReceivedQty,
+  getReceivingShipmentRemainingQty,
+  getReceivingShipmentStatus,
+  hasReceivingLineDiscrepancy,
+  hasReceivingShipmentDiscrepancy,
+  isReceivingComplete,
+} from '../../utils/receiving';
+import { Package, AlertCircle, RefreshCw } from 'lucide-react';
 
 const API_BASE_URL = '';
 const RECEIVING_PAGE_SIZE = 25;
@@ -47,8 +63,6 @@ const extractShipments = (payload) =>
         : Array.isArray(payload?.data)
           ? payload.data
           : [];
-
-const RECEIVING_QUEUE_STATUSES = ['pending_arrival', 'submitted'];
 
 const LINE_ITEM_KEYS = [
   'shipment_line_items',
@@ -96,39 +110,9 @@ const extractShipmentDetail = (payload) =>
 const getLineItemId = (item) =>
   item?.id || item?.shipmentItemId || item?.shipment_item_id || item?.lineItemId || item?.line_item_id || item?.sku || '';
 
-const getExpectedQty = (item) =>
-  Number(
-    item?.expectedQty ??
-      item?.expected_qty ??
-      item?.expectedQuantity ??
-      item?.expected_quantity ??
-      item?.qtyExpected ??
-      item?.qty_expected ??
-      item?.expectedUnits ??
-      item?.expected_units ??
-      item?.unitsExpected ??
-      item?.units_expected ??
-      item?.expected ??
-      item?.quantity ??
-      item?.qty ??
-      item?.count ??
-      item?.totalUnits ??
-      item?.total_units ??
-      item?.units ??
-      0
-  );
-
-const getReceivedQty = (item) =>
-  item?.receivedQty ??
-  item?.received_qty ??
-  item?.receivedQuantity ??
-  item?.received_quantity ??
-  item?.qtyReceived ??
-  item?.qty_received ??
-  item?.unitsReceived ??
-  item?.units_received ??
-  item?.received ??
-  '';
+const getExpectedQty = getReceivingLineExpectedQty;
+const getReceivedQty = getReceivingLineReceivedQty;
+const getRemainingQty = getReceivingLineRemainingQty;
 
 const getItemSku = (item) =>
   item?.sku ||
@@ -197,10 +181,7 @@ const Receiving = () => {
       const shipmentsById = new Map();
 
       extractShipments(payload).forEach((shipment, index) => {
-        const status = String(shipment?.status || '').toLowerCase();
-        if (!RECEIVING_QUEUE_STATUSES.includes(status)) return;
-
-        const key = shipment?.id || shipment?.uuid || shipment?.reference || `${status}-${index}`;
+        const key = shipment?.id || shipment?.uuid || shipment?.reference || `shipment-${index}`;
         if (!shipmentsById.has(key)) shipmentsById.set(key, shipment);
       });
 
@@ -238,7 +219,7 @@ const Receiving = () => {
       setSelectedShipment(detail);
       const quantities = {};
       getLineItems(detail).forEach((item) => {
-        quantities[getLineItemId(item)] = String(getReceivedQty(item));
+        quantities[getLineItemId(item)] = '';
       });
       setReceivedQuantities(quantities);
     } catch (requestError) {
@@ -258,22 +239,51 @@ const Receiving = () => {
       setError('');
       setMessage('');
       const items = getLineItems(selectedShipment)
-        .map((item) => ({
-          shipmentItemId: getLineItemId(item),
-          receivedQty: Number(receivedQuantities[getLineItemId(item)] || 0),
-        }))
+        .map((item) => {
+          const shipmentItemId = getLineItemId(item);
+          return {
+            shipmentItemId,
+            receivedQty: Number(receivedQuantities[shipmentItemId] || 0),
+            remainingQty: getRemainingQty(item),
+            sku: getItemSku(item) || shipmentItemId,
+          };
+        })
         .filter((item) => item.shipmentItemId);
 
       if (!items.length) {
         throw new Error('Shipment line items nahi milay. Detail response check karein.');
       }
+
+      const invalidNumberItem = items.find((item) => !Number.isFinite(item.receivedQty));
+      if (invalidNumberItem) {
+        throw new Error(`Enter a valid received quantity for ${invalidNumberItem.sku || 'this line item'}.`);
+      }
+
+      const negativeItem = items.find((item) => item.receivedQty < 0);
+      if (negativeItem) {
+        throw new Error(`Received quantity cannot be negative for ${negativeItem.sku || 'this line item'}.`);
+      }
+
+      const overReceivedItem = items.find((item) => item.receivedQty > item.remainingQty);
+      if (overReceivedItem) {
+        throw new Error(
+          `Received quantity for ${overReceivedItem.sku || 'this line item'} cannot exceed remaining quantity ${formatReceivingQuantity(overReceivedItem.remainingQty)}.`
+        );
+      }
+
+      if (!items.some((item) => item.receivedQty > 0)) {
+        throw new Error('Enter at least one received quantity greater than 0.');
+      }
+
       const response = await fetch(`${API_BASE_URL}/api/shipments/${selectedShipment.id || selectedShipment.uuid}/receive`, {
         method: 'POST',
         headers: buildHeaders(true),
-        body: JSON.stringify({ items }),
+        body: JSON.stringify({
+          items: items.map(({ shipmentItemId, receivedQty }) => ({ shipmentItemId, receivedQty })),
+        }),
       });
       await parseResponse(response);
-      setMessage('Shipment received. Pipeline status is now received.');
+      setMessage('Received quantity saved.');
       setSelectedShipment(null);
       setReceivedQuantities({});
       await loadPendingArrivals();
@@ -321,35 +331,69 @@ const Receiving = () => {
                 <tr className="border-b border-gray-200 bg-gray-50">
                   <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Reference</th>
                   <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Client</th>
-                  <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Expected</th>
-                  <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Units</th>
+                  <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Expected Arrival</th>
+                  <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Expected Quantity</th>
+                  <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Received Quantity</th>
+                  <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Remaining Quantity</th>
+                  <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
                   <th className="text-left py-3 px-6 text-xs font-semibold text-gray-500 uppercase tracking-wider">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {isLoading ? (
                   <tr>
-                    <td colSpan="5" className="px-6 py-12 text-center text-sm text-gray-500">
+                    <td colSpan="8" className="px-6 py-12 text-center text-sm text-gray-500">
                       <LoadingState label="Loading arrivals..." />
                     </td>
                   </tr>
-                ) : pendingArrivals.map((shipment, index) => (
-                  <tr key={shipment.id || index} className="hover:bg-gray-50 transition-colors">
-                    <td className="py-3.5 px-6"><div className="flex items-center gap-2"><Package size={14} className="text-gray-400" /><span className="text-sm font-medium text-gray-900">{shipment.reference || shipment.id}</span></div></td>
-                    <td className="py-3.5 px-6 text-sm text-gray-700">{getClientName(shipment)}</td>
-                    <td className="py-3.5 px-6 text-sm text-gray-500">{shipment.expectedArrivalDate || shipment.expected_arrival_date || '-'}</td>
-                    <td className="py-3.5 px-6 text-sm font-medium text-gray-900">{shipment.totalUnits || shipment.total_units || shipment.units || getLineItems(shipment).reduce((sum, item) => sum + getExpectedQty(item), 0)}</td>
-                    <td className="py-3.5 px-6">
-                      <button
-                        type="button"
-                        onClick={() => handleSelectShipment(shipment)}
-                        className="rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-medium text-white hover:bg-[#e55d00]"
-                      >
-                        Receive
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                ) : pendingArrivals.map((shipment, index) => {
+                  const lineItems = getLineItems(shipment);
+                  const expectedQty = getReceivingShipmentExpectedQty(shipment, lineItems);
+                  const receivedQty = getReceivingShipmentReceivedQty(shipment, lineItems);
+                  const remainingQty = getReceivingShipmentRemainingQty(shipment, lineItems);
+                  const discrepancyCount = getReceivingShipmentDiscrepancyCount(shipment, lineItems);
+                  const hasDiscrepancy = hasReceivingShipmentDiscrepancy(shipment, lineItems);
+                  const complete = isReceivingComplete(shipment, lineItems);
+                  const shipmentStatusLabel = formatReceivingStatus(getReceivingShipmentStatus(shipment));
+
+                  return (
+                    <tr key={shipment.id || index} className="hover:bg-gray-50 transition-colors">
+                      <td className="py-3.5 px-6"><div className="flex items-center gap-2"><Package size={14} className="text-gray-400" /><span className="text-sm font-medium text-gray-900">{shipment.reference || shipment.id}</span></div></td>
+                      <td className="py-3.5 px-6 text-sm text-gray-700">{getClientName(shipment)}</td>
+                      <td className="py-3.5 px-6 text-sm text-gray-500">{shipment.expectedArrivalDate || shipment.expected_arrival_date || '-'}</td>
+                      <td className="py-3.5 px-6 text-sm font-medium text-gray-900">{formatReceivingQuantity(expectedQty)}</td>
+                      <td className="py-3.5 px-6 text-sm font-medium text-gray-900">{formatReceivingQuantity(receivedQty)}</td>
+                      <td className={`py-3.5 px-6 text-sm font-semibold ${remainingQty > 0 ? 'text-[#ff6900]' : 'text-green-700'}`}>{formatReceivingQuantity(remainingQty)}</td>
+                      <td className="py-3.5 px-6">
+                        <div className="flex flex-col items-start gap-1">
+                          {shipmentStatusLabel ? (
+                            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">{shipmentStatusLabel}</span>
+                          ) : null}
+                          {complete ? (
+                            <span className="rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700">Complete</span>
+                          ) : hasDiscrepancy ? (
+                            <span className="rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700">
+                              {discrepancyCount
+                                ? `${formatReceivingQuantity(discrepancyCount)} ${discrepancyCount === 1 ? 'discrepancy' : 'discrepancies'}`
+                                : 'Discrepancy'}
+                            </span>
+                          ) : (
+                            <span className="rounded-full bg-orange-100 px-2.5 py-1 text-xs font-semibold text-[#c05621]">Pending</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3.5 px-6">
+                        <button
+                          type="button"
+                          onClick={() => handleSelectShipment(shipment)}
+                          className="rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-medium text-white hover:bg-[#e55d00]"
+                        >
+                          Receive
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -400,38 +444,64 @@ const Receiving = () => {
                     const sku = getItemSku(item) || key || `SKU ${itemIndex + 1}`;
                     const productName = getProductName(item);
                     const expected = getExpectedQty(item);
+                    const receivedSoFar = getReceivedQty(item);
+                    const remaining = getRemainingQty(item);
                     const receivedValue = receivedQuantities[key] ?? '';
                     const value = Number(receivedValue || 0);
-                    const hasValue = receivedValue !== '';
-                    const matches = hasValue && value === expected;
-                    const discrepancy = hasValue && value !== expected;
+                    const invalidQuantity = !Number.isFinite(value) || value < 0 || value > remaining;
+                    const lineHasDiscrepancy = hasReceivingLineDiscrepancy(item);
+                    const notes = getReceivingLineDiscrepancyNotes(item);
                     return (
-                      <div key={key || itemIndex} className={`rounded-xl border p-4 ${discrepancy ? 'border-red-200 bg-red-50/40' : 'border-gray-200 bg-white'}`}>
+                      <div key={key || itemIndex} className={`rounded-xl border p-4 ${lineHasDiscrepancy || invalidQuantity ? 'border-red-200 bg-red-50/40' : 'border-gray-200 bg-white'}`}>
                         <div className="mb-3 flex items-center justify-between gap-3">
                           <div>
                             <p className="text-sm font-semibold text-gray-900">SKU: {sku}</p>
                             <p className="mt-1 text-xs text-gray-500">{productName}</p>
                           </div>
-                          {matches ? (
+                          {remaining <= 0 ? (
                             <span className="rounded-full bg-green-100 px-2.5 py-1 text-[11px] font-semibold text-green-700">Verified</span>
-                          ) : discrepancy ? (
+                          ) : lineHasDiscrepancy ? (
                             <span className="rounded-full bg-red-100 px-2.5 py-1 text-[11px] font-semibold text-red-700">Discrepancy</span>
-                          ) : null}
+                          ) : (
+                            <span className="rounded-full bg-orange-100 px-2.5 py-1 text-[11px] font-semibold text-[#c05621]">Pending</span>
+                          )}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                           <div>
                             <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Expected</label>
-                            <input type="number" value={expected} readOnly className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700" />
+                            <input type="number" value={formatReceivingQuantity(expected)} readOnly className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700" />
                           </div>
                           <div>
-                            <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Received</label>
-                            <input type="number" value={receivedValue} onChange={(e) => setReceivedQuantities({ ...receivedQuantities, [key]: e.target.value })} className={`w-full rounded-lg border px-3 py-2 text-sm ${discrepancy ? 'border-red-300 bg-white text-red-700' : 'border-gray-200 text-gray-900'}`} placeholder="Enter quantity" />
+                            <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Received So Far</label>
+                            <input type="number" value={formatReceivingQuantity(receivedSoFar)} readOnly className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700" />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Remaining</label>
+                            <input type="number" value={formatReceivingQuantity(remaining)} readOnly className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700" />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500">Receive Now</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max={remaining}
+                              value={receivedValue}
+                              disabled={remaining <= 0}
+                              onChange={(e) => setReceivedQuantities({ ...receivedQuantities, [key]: e.target.value })}
+                              className={`w-full rounded-lg border px-3 py-2 text-sm ${remaining <= 0 ? 'cursor-not-allowed border-gray-200 bg-gray-50 text-gray-400' : invalidQuantity ? 'border-red-300 bg-white text-red-700' : 'border-gray-200 text-gray-900'}`}
+                              placeholder="0"
+                            />
                           </div>
                         </div>
-                        {discrepancy ? (
+                        {invalidQuantity ? (
                           <div className="mt-3 flex items-center gap-2 rounded-lg bg-red-100 px-3 py-2 text-xs text-red-700">
                             <AlertCircle size={14} />
-                            <span>Discrepancy detected on {sku}: expected {expected}, entered {value}.</span>
+                            <span>Enter a quantity from 0 to {formatReceivingQuantity(remaining)} for {sku}.</span>
+                          </div>
+                        ) : lineHasDiscrepancy || notes ? (
+                          <div className="mt-3 flex items-center gap-2 rounded-lg bg-red-100 px-3 py-2 text-xs text-red-700">
+                            <AlertCircle size={14} />
+                            <span>{notes || `${formatReceivingQuantity(remaining)} units still need to be received for ${sku}.`}</span>
                           </div>
                         ) : null}
                       </div>

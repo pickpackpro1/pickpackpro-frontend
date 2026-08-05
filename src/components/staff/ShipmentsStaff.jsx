@@ -1919,12 +1919,14 @@ const getBoxTitle = (box = {}, index = 0) => {
   const palletNumber = isPallet ? String(firstPresent(box?.palletNumber, box?.pallet_number) || "").trim() : "";
   if (palletNumber) return palletNumber;
 
+  const boxNumber = String(firstPresent(box?.boxNumber, box?.box_number) || "").trim();
+  if (boxNumber) return /^\d+$/.test(boxNumber) ? `Box ${boxNumber}` : boxNumber;
+
   const rawTitle = firstPresent(box?.label, box?.name, box?.reference);
   const title = String(rawTitle || "").trim();
   if (title) return title;
 
-  const boxNumber = String(firstPresent(box?.boxNumber, box?.box_number) || "").trim();
-  return boxNumber ? `Box ${boxNumber}` : `Box ${index + 1}`;
+  return `Box ${index + 1}`;
 };
 
 const formatBoxMetaValue = (value = "") => {
@@ -4446,6 +4448,7 @@ const ShipmentsStaff = () => {
   const [boxLength, setBoxLength] = useState("");
   const [boxWidth, setBoxWidth] = useState("");
   const [boxHeight, setBoxHeight] = useState("");
+  const [boxNumber, setBoxNumber] = useState("");
   const [palletNumber, setPalletNumber] = useState("");
   const [showAddBoxModal, setShowAddBoxModal] = useState(false);
   const [boxSkuPreview, setBoxSkuPreview] = useState("");
@@ -4982,6 +4985,7 @@ const ShipmentsStaff = () => {
 
     setActiveSubShipmentIdForBox(subShipmentId);
     setBoxType(normalizedBoxType);
+    setBoxNumber("");
     resetAddBoxSkuSelection();
     setSelectedPalletBoxIds([]);
     setPalletNumber("");
@@ -5647,6 +5651,7 @@ const ShipmentsStaff = () => {
             boxSize,
             weight: Number(boxWeight || 0),
             dimensions: { l: Number(boxLength || 0), w: Number(boxWidth || 0), h: Number(boxHeight || 0) },
+            ...(String(boxNumber || "").trim() ? { boxNumber: String(boxNumber || "").trim() } : {}),
           };
       const allocationDrafts = [
         { lineItemValue: boxSkuPreview, quantity: boxSkuQuantityPreview, rowNumber: 1 },
@@ -5797,6 +5802,7 @@ const ShipmentsStaff = () => {
         }
       }
       resetAddBoxSkuSelection();
+      setBoxNumber("");
       setPalletNumber("");
       setActiveSubShipmentIdForBox("");
       return true;
@@ -7353,6 +7359,7 @@ const ShipmentsStaff = () => {
                     onClick={() => {
                       setActiveSubShipmentIdForBox("");
                       setBoxType("box");
+                      setBoxNumber("");
                       resetAddBoxSkuSelection();
                       setSelectedPalletBoxIds([]);
                       setShowAddBoxModal(true);
@@ -7641,6 +7648,9 @@ const ShipmentsStaff = () => {
                 <h3 className="mb-3 text-sm font-semibold text-gray-900">Create Box / Pallet</h3>
                 <div className="space-y-3">
                   <input type="text" placeholder="box or pallet" value={boxType} onChange={(e) => setBoxType(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
+                  {boxType !== "pallet" ? (
+                    <input type="text" placeholder="Box Number (optional)" value={boxNumber} onChange={(e) => setBoxNumber(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
+                  ) : null}
                   <input type="text" placeholder="Size" value={boxSize} onChange={(e) => setBoxSize(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
                   <input type="number" step="0.01" placeholder="Weight" value={boxWeight} onChange={(e) => setBoxWeight(e.target.value)} className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm" />
                   <div className="grid grid-cols-3 gap-2">
@@ -7654,6 +7664,7 @@ const ShipmentsStaff = () => {
                       onClick={() => {
                         setActiveSubShipmentIdForBox("");
                         setBoxType("pallet");
+                        setBoxNumber("");
                         resetAddBoxSkuSelection();
                         setSelectedPalletBoxIds([]);
                         setShowAddBoxModal(true);
@@ -8426,6 +8437,7 @@ const ShipmentsStaff = () => {
                     if (isCreatingBox) return;
                     setShowAddBoxModal(false);
                     setActiveSubShipmentIdForBox("");
+                    setBoxNumber("");
                     resetAddBoxSkuSelection();
                     setSelectedPalletBoxIds([]);
                     setPalletNumber("");
@@ -8445,7 +8457,9 @@ const ShipmentsStaff = () => {
                       onChange={(e) => {
                         const nextBoxType = e.target.value;
                         setBoxType(nextBoxType);
-                        if (nextBoxType !== "pallet") {
+                        if (nextBoxType === "pallet") {
+                          setBoxNumber("");
+                        } else {
                           setSelectedPalletBoxIds([]);
                           setPalletNumber("");
                         }
@@ -8518,7 +8532,19 @@ const ShipmentsStaff = () => {
                     />
                     <p className="mt-1 text-[11px] text-gray-400">Optional saved display label for this pallet.</p>
                   </div>
-                ) : null}
+                ) : (
+                  <div>
+                    <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-gray-400">Box Number</label>
+                    <input
+                      type="text"
+                      value={boxNumber}
+                      onChange={(event) => setBoxNumber(event.target.value)}
+                      placeholder="A-01, Box 1, FBA-BOX-5"
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm"
+                    />
+                    <p className="mt-1 text-[11px] text-gray-400">Optional. Leave blank to auto-generate the box number.</p>
+                  </div>
+                )}
                 <div>
                   <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-gray-400">Dimensions (cm)</label>
                   <div className="grid grid-cols-3 gap-3">
@@ -8666,6 +8692,7 @@ const ShipmentsStaff = () => {
                     if (isCreatingBox) return;
                     setShowAddBoxModal(false);
                     setActiveSubShipmentIdForBox("");
+                    setBoxNumber("");
                     resetAddBoxSkuSelection();
                     setSelectedPalletBoxIds([]);
                     setPalletNumber("");
@@ -8684,6 +8711,7 @@ const ShipmentsStaff = () => {
                     if (created) {
                       setShowAddBoxModal(false);
                       setActiveSubShipmentIdForBox("");
+                      setBoxNumber("");
                       resetAddBoxSkuSelection();
                       setSelectedPalletBoxIds([]);
                       setPalletNumber("");

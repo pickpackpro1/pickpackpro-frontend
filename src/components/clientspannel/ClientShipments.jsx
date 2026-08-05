@@ -1977,7 +1977,10 @@ const getBoxTitle = (box = {}, index = 0) => {
   const palletNumber = isPallet ? String(firstPresent(box?.palletNumber, box?.pallet_number) || '').trim() : '';
   if (palletNumber) return palletNumber;
 
-  return firstPresent(box?.name, box?.label, box?.reference, box?.boxNumber, box?.box_number, `Box #${index + 1}`);
+  const boxNumber = String(firstPresent(box?.boxNumber, box?.box_number) || '').trim();
+  if (boxNumber) return /^\d+$/.test(boxNumber) ? `Box ${boxNumber}` : boxNumber;
+
+  return firstPresent(box?.name, box?.label, box?.reference, `Box #${index + 1}`);
 };
 
 const getBoxDisplayTitle = (box = {}, index = 0) => {
@@ -7320,7 +7323,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
         ),
       }));
 
-      showToast('success', `FBA label uploaded for Box ${box?.box_number || index + 1}${uploadFile !== file ? '. Large image was optimized before upload.' : ''}`);
+      showToast('success', `FBA label uploaded for Box ${firstPresent(box?.boxNumber, box?.box_number, index + 1)}${uploadFile !== file ? '. Large image was optimized before upload.' : ''}`);
       await loadFbaLabelShipments(shipments);
     } catch (requestError) {
       const errorMessage = isPayloadTooLargeMessage(requestError.message) ? getUploadTooLargeMessage(file.name) : requestError.message;
@@ -9120,7 +9123,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                               }`}
                             >
                               <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#f1f5f9] text-sm font-bold text-[#132347]">
-                                {box?.box_number || boxIndex + 1}
+                                {firstPresent(box?.boxNumber, box?.box_number, boxIndex + 1)}
                               </div>
 
                               <div className="min-w-0">
@@ -10221,7 +10224,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                     );
                     return (
                       <div key={box?.id || index} className="grid grid-cols-[1fr_90px_56px] items-center border-t border-[#edf2f7] px-4 py-3 text-sm">
-                        <span className="text-[#132347]">{box?.name || box?.boxNumber || `Box #${index + 1}`}</span>
+                        <span className="text-[#132347]">{getBoxTitle(box, index)}</span>
                         <span className={`text-xs font-semibold ${labelUploaded ? 'text-[#d8a11f]' : 'text-[#e45a5a]'}`}>
                           {labelUploaded ? 'UPLOADED' : 'MISSING'}
                         </span>

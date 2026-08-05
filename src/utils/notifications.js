@@ -160,6 +160,12 @@ const getNotificationActor = (item = {}) => {
   );
 };
 
+const formatBoxNumberLabel = (value = "") => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "";
+  return /^\d+$/.test(normalized) ? `Box ${normalized}` : normalized;
+};
+
 const getNotificationSubject = (item = {}) => {
   const data = item?.data || item?.payload || item?.meta || item?.metadata || item?.details || {};
   const box = item?.box || data?.box || {};
@@ -176,9 +182,8 @@ const getNotificationSubject = (item = {}) => {
     data?.type,
     data?.notificationType,
     data?.notification_type,
-    box?.box_number ? `Box ${box.box_number}` : "",
-    data?.boxNumber ? `Box ${data.boxNumber}` : "",
-    data?.box_number ? `Box ${data.box_number}` : "",
+    formatBoxNumberLabel(firstPresent(box?.boxNumber, box?.box_number)),
+    formatBoxNumberLabel(firstPresent(data?.boxNumber, data?.box_number)),
     discrepancy?.sku,
     data?.sku
   );

@@ -1410,7 +1410,10 @@ const getBoxTitle = (box = {}, index = 0) => {
   const palletNumber = isPallet ? String(firstPresent(box?.palletNumber, box?.pallet_number) || '').trim() : '';
   if (palletNumber) return palletNumber;
 
-  const rawTitle = firstPresent(box?.name, box?.label, box?.reference, box?.boxNumber, box?.box_number);
+  const boxNumber = String(firstPresent(box?.boxNumber, box?.box_number) || '').trim();
+  if (boxNumber) return /^\d+$/.test(boxNumber) ? `Box ${boxNumber}` : boxNumber;
+
+  const rawTitle = firstPresent(box?.name, box?.label, box?.reference);
   const title = String(rawTitle || '').trim();
 
   if (/^\d+$/.test(title)) return `Box ${title}`;

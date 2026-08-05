@@ -887,7 +887,10 @@ const getBoxTitle = (box = {}, index = 0) => {
   const palletNumber = typeLabel === 'Pallet' ? String(firstPresent(box?.palletNumber, box?.pallet_number) || '').trim() : '';
   if (palletNumber) return palletNumber;
 
-  const rawTitle = firstPresent(box?.name, box?.label, box?.reference, box?.boxNumber, box?.box_number);
+  const boxNumber = String(firstPresent(box?.boxNumber, box?.box_number) || '').trim();
+  if (boxNumber) return /^\d+$/.test(boxNumber) ? `${typeLabel} ${boxNumber}` : boxNumber;
+
+  const rawTitle = firstPresent(box?.name, box?.label, box?.reference);
   const title = String(rawTitle || '').trim();
 
   if (/^\d+$/.test(title)) return `${typeLabel} ${title}`;
@@ -3168,7 +3171,7 @@ const AwaitingFbaLabels = () => {
                                 } cursor-pointer transition-colors hover:bg-[#f8fafc] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#ff9d3a]`}
                               >
                                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#f1f5f9] text-sm font-bold text-[#132347]">
-                                  {box?.box_number || originalIndex + 1}
+                                  {firstPresent(box?.boxNumber, box?.box_number, originalIndex + 1)}
                                 </div>
 
                                 <div className="min-w-0">

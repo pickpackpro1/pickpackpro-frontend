@@ -4,6 +4,7 @@ import Layout from './adminlayout/Layout';
 import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import { getSession } from '../../utils/auth';
+import { API_MUTATION_EVENT_NAME } from '../../utils/toast';
 import { FileText, CheckCircle, AlertCircle, Download, Eye, RefreshCw, X, Send, Plus, Pencil, Trash2, Search } from 'lucide-react';
 import { getServiceDisplayName, getServiceKey, isKnownServiceCode } from '../../utils/serviceCatalog';
 
@@ -641,6 +642,14 @@ const getContentDispositionFileName = (contentDisposition = '') => {
   return match?.[1]?.trim() || '';
 };
 
+const ensurePdfFileName = (fileName = '', fallback = 'invoice') => {
+  const normalizedFileName = String(fileName || '').trim();
+  if (normalizedFileName && /\.pdf$/i.test(normalizedFileName)) return normalizedFileName;
+
+  const baseName = sanitizeFileName(normalizedFileName || fallback).replace(/\.[^.]+$/i, '');
+  return `${baseName || 'invoice'}.pdf`;
+};
+
 const downloadBlob = (blob, fileName) => {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -692,8 +701,8 @@ const firstAddressLines = (...addresses) =>
   addresses.map(getAddressLines).find((lines) => lines.length) || [];
 
 const DEFAULT_COMPANY_BILLING_DETAILS = {
-  companyName: 'PickPackPro',
-  website: 'pickpackpro.co.uk',
+  companyName: '',
+  website: '',
   addressLines: [],
   vatNumber: '',
   bankName: '',
@@ -821,10 +830,34 @@ const buildAddressHtml = (lines = []) =>
   (lines.length ? lines : ['-']).map((line) => `<div>${escapeHtml(line)}</div>`).join('');
 
 const getInvoiceLineAmount = (item = {}) =>
-  firstPresent(item?.amount, item?.total, item?.lineTotal, item?.line_total, item?.subtotal, item?.sub_total, 0);
+  firstPresent(
+    item?.effectiveAmount,
+    item?.effective_amount,
+    item?.overrideAmount,
+    item?.override_amount,
+    item?.amount,
+    item?.total,
+    item?.lineTotal,
+    item?.line_total,
+    item?.subtotal,
+    item?.sub_total,
+    0
+  );
 
 const getInvoiceLineVat = (item = {}) =>
-  firstPresent(item?.vat, item?.vatAmount, item?.vat_amount, item?.tax, item?.taxAmount, item?.tax_amount, 0);
+  firstPresent(
+    item?.effectiveVatAmount,
+    item?.effective_vat_amount,
+    item?.overrideVatAmount,
+    item?.override_vat_amount,
+    item?.vat,
+    item?.vatAmount,
+    item?.vat_amount,
+    item?.tax,
+    item?.taxAmount,
+    item?.tax_amount,
+    0
+  );
 
 const getInvoiceLineDescription = (item = {}, index = 0) => {
   const serviceCode = firstPresent(
@@ -835,7 +868,15 @@ const getInvoiceLineDescription = (item = {}, index = 0) => {
     item?.code,
     item?.type
   );
-  const description = firstDisplayValue(item?.description, item?.name, item?.label);
+  const description = firstDisplayValue(
+    item?.effectiveDescription,
+    item?.effective_description,
+    item?.overrideDescription,
+    item?.override_description,
+    item?.description,
+    item?.name,
+    item?.label
+  );
   const serviceLabel = getServiceDisplayName(serviceCode || description);
 
   if (serviceCode && (!description || getServiceKey(description) === getServiceKey(serviceCode))) {
@@ -855,23 +896,65 @@ const getInvoiceLineId = (item = {}) =>
 const getInvoiceLineSource = (item = {}) =>
   String(firstPresent(item?.lineSource, item?.line_source, item?.source, 'system')).trim().toLowerCase();
 
-const isManualInvoiceLine = (item = {}) => getInvoiceLineSource(item) === 'manual';
+const isManualInvoiceLine = (item = {}) => ['manual', 'manual_override'].includes(getInvoiceLineSource(item));
+
+const isSystemInvoiceLine = (item = {}) => !isManualInvoiceLine(item);
+
+const isOverriddenInvoiceLine = (item = {}) =>
+  item?.isOverridden === true ||
+  item?.is_overridden === true ||
+  String(firstPresent(item?.isOverridden, item?.is_overridden, item?.metadata?.isOverridden, item?.metadata?.is_overridden, '') || '')
+    .trim()
+    .toLowerCase() === 'true';
+
+const getInvoiceLineSourceLabel = (item = {}) => {
+  if (isManualInvoiceLine(item)) return 'Manual';
+  return 'System';
+};
 
 const getInvoiceStatusValue = (invoice = {}) => String(invoice?.status || '').trim().toLowerCase();
 
 const isDraftInvoice = (invoice = {}) => getInvoiceStatusValue(invoice) === 'draft';
 
-const canEditManualInvoiceLines = (invoice = {}) =>
+const canEditInvoiceLines = (invoice = {}) =>
   ['draft', 'sent'].includes(getInvoiceStatusValue(invoice)) && !isClientInvoiceRecord(invoice) && getInvoiceTypeValue(invoice) !== 'monthly';
 
-const getInvoiceLineQty = (item = {}) => firstPresent(item?.unit, item?.qty, item?.quantity, item?.units, 0);
+const canEditManualInvoiceLines = canEditInvoiceLines;
+
+const getInvoiceLineQty = (item = {}) =>
+  firstPresent(item?.effectiveQty, item?.effective_qty, item?.overrideQty, item?.override_qty, item?.unit, item?.qty, item?.quantity, item?.units, 0);
 
 const getInvoiceLineUnitRate = (item = {}) =>
-  firstPresent(item?.unitRate, item?.unit_rate, item?.rate, item?.unitPrice, item?.unit_price, item?.pricePerUnit, 0);
+  firstPresent(
+    item?.effectiveUnitRate,
+    item?.effective_unit_rate,
+    item?.overrideUnitRate,
+    item?.override_unit_rate,
+    item?.unitRate,
+    item?.unit_rate,
+    item?.rate,
+    item?.unitPrice,
+    item?.unit_price,
+    item?.pricePerUnit,
+    0
+  );
 
-const getInvoiceLineVatRate = (item = {}) => firstPresent(item?.vatRate, item?.vat_rate, 0);
+const getInvoiceLineVatRate = (item = {}) =>
+  firstPresent(item?.effectiveVatRate, item?.effective_vat_rate, item?.overrideVatRate, item?.override_vat_rate, item?.vatRate, item?.vat_rate, 0);
 
 const getInvoiceLineVatAmount = (item = {}) => firstPresent(getInvoiceLineVat(item), 0);
+
+const getInvoiceLineOverrideReason = (item = {}) =>
+  firstPresent(
+    item?.reason,
+    item?.overrideReason,
+    item?.override_reason,
+    item?.metadata?.reason,
+    item?.metadata?.overrideReason,
+    item?.metadata?.override_reason,
+    item?.metadata?.override?.reason,
+    ''
+  );
 
 const buildInvoiceDocumentHtml = ({ invoice, companyDetails, clientRecord, clientDisplay }) => {
   const rawInvoice = invoice?.raw || invoice;
@@ -1005,6 +1088,7 @@ const createEmptyManualLineForm = () => ({
   qty: '1',
   unitRate: '',
   vatRate: '',
+  reason: '',
 });
 
 const extractSourceRecord = (payload = {}, recordKeys = []) => {
@@ -1102,6 +1186,7 @@ const Billing = () => {
   const [companyBillingDetails, setCompanyBillingDetails] = useState(DEFAULT_COMPANY_BILLING_DETAILS);
   const [manualLineForm, setManualLineForm] = useState(createEmptyManualLineForm);
   const [editingLineItemId, setEditingLineItemId] = useState('');
+  const [editingLineSource, setEditingLineSource] = useState('');
   const [showManualLineForm, setShowManualLineForm] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -1515,12 +1600,58 @@ const Billing = () => {
     }
   };
 
+  const handleRefreshSelectedInvoice = async ({ showMessage = true } = {}) => {
+    if (!selectedInvoice) return;
+
+    try {
+      setError('');
+      if (showMessage) setMessage('');
+      setIsInvoiceDetailLoading(true);
+      const refreshedInvoice = await fetchInvoiceDetail(selectedInvoice);
+      setSelectedInvoice(refreshedInvoice);
+      await loadInvoices(invoiceCategory);
+      if (showMessage) setMessage('Invoice refreshed.');
+    } catch (requestError) {
+      if (showMessage) setError(requestError.message);
+    } finally {
+      setIsInvoiceDetailLoading(false);
+    }
+  };
+
   useEffect(() => {
     const invoiceId = new URLSearchParams(location.search).get('invoice') || '';
     if (!invoiceId || openedInvoiceQuery === invoiceId || !invoices.length) return;
     setOpenedInvoiceQuery(invoiceId);
     handleViewInvoice(invoiceId);
   }, [location.search, invoices, openedInvoiceQuery]);
+
+  useEffect(() => {
+    let refreshTimer = null;
+
+    const scheduleInvoiceRefresh = () => {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        if (selectedInvoice) {
+          handleRefreshSelectedInvoice({ showMessage: false });
+        } else {
+          loadInvoices(invoiceCategory);
+        }
+      }, 700);
+    };
+
+    const handleMutation = (event) => {
+      const url = String(event?.detail?.url || '');
+      if (!url.includes('/api/invoices') && !url.includes('/api/shipments') && !url.includes('/api/boxes')) return;
+      scheduleInvoiceRefresh();
+    };
+
+    window.addEventListener(API_MUTATION_EVENT_NAME, handleMutation);
+
+    return () => {
+      window.clearTimeout(refreshTimer);
+      window.removeEventListener(API_MUTATION_EVENT_NAME, handleMutation);
+    };
+  }, [invoiceCategory, selectedInvoice]);
 
   const handleDownloadPdf = async (invoice) => {
     const invoiceId = getInvoiceRouteId(invoice);
@@ -1531,36 +1662,29 @@ const Billing = () => {
       setMessage('');
       if (!invoiceId) throw new Error('Invoice identifier is missing.');
 
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/invoices/${encodeURIComponent(invoiceId)}/pdf`, {
-          method: 'GET',
-          headers: buildHeaders(),
-          cache: 'no-store',
-        });
-        if (!response.ok) await parseResponse(response);
-        const blob = await response.blob();
-        const fileName =
-          getContentDispositionFileName(response.headers.get('content-disposition')) ||
-          `${sanitizeFileName(invoiceRef || invoiceId)}.pdf`;
-        downloadBlob(blob, fileName);
-        setMessage('Invoice PDF downloaded.');
-        return;
-      } catch {
-        const detailedInvoice = await fetchInvoiceDetail(invoice);
-        const clientRecord = getInvoiceClientRecord(detailedInvoice, clients);
-        const invoiceDocumentHtml = buildInvoiceDocumentHtml({
-          invoice: detailedInvoice,
-          companyDetails: companyBillingDetails,
-          clientRecord,
-          clientDisplay: resolveInvoiceClientDisplay(detailedInvoice),
-        });
+      const response = await fetch(`${API_BASE_URL}/api/invoices/${encodeURIComponent(invoiceId)}/pdf`, {
+        method: 'GET',
+        headers: buildHeaders(),
+        cache: 'no-store',
+      });
+      if (!response.ok) await parseResponse(response);
 
-        downloadBlob(
-          new Blob([invoiceDocumentHtml], { type: 'text/html;charset=utf-8' }),
-          `${sanitizeFileName(invoiceRef || invoiceId)}.html`
-        );
-        setMessage('Invoice document downloaded.');
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('application/json')) {
+        const payload = await response.json();
+        throw new Error(payload?.message || payload?.error || 'Invoice PDF endpoint returned JSON instead of a PDF.');
       }
+      if (contentType.includes('text/html')) {
+        throw new Error('Invoice PDF endpoint returned HTML instead of a PDF.');
+      }
+
+      const blob = await response.blob();
+      const fileName = ensurePdfFileName(
+        getContentDispositionFileName(response.headers.get('content-disposition')),
+        invoiceRef || invoiceId
+      );
+      downloadBlob(blob, fileName);
+      setMessage('Invoice PDF downloaded.');
     } catch (downloadError) {
       setError(downloadError.message);
     }
@@ -1798,12 +1922,14 @@ const Billing = () => {
   const resetManualLineForm = () => {
     setManualLineForm(createEmptyManualLineForm());
     setEditingLineItemId('');
+    setEditingLineSource('');
     setShowManualLineForm(false);
   };
 
   const startAddManualLine = () => {
     setManualLineForm(createEmptyManualLineForm());
     setEditingLineItemId('');
+    setEditingLineSource('');
     setShowManualLineForm(true);
   };
 
@@ -1814,8 +1940,10 @@ const Billing = () => {
       qty: String(getInvoiceLineQty(lineItem) || '1'),
       unitRate: String(getInvoiceLineUnitRate(lineItem) || ''),
       vatRate: String(getInvoiceLineVatRate(lineItem) || ''),
+      reason: String(getInvoiceLineOverrideReason(lineItem) || ''),
     });
     setEditingLineItemId(getInvoiceLineId(lineItem));
+    setEditingLineSource(getInvoiceLineSource(lineItem));
     setShowManualLineForm(true);
   };
 
@@ -1826,6 +1954,7 @@ const Billing = () => {
     const unitRate = Number(manualLineForm.unitRate);
     const vatRateText = String(manualLineForm.vatRate || '').trim();
     const vatRate = vatRateText === '' ? undefined : Number(vatRateText);
+    const reason = String(manualLineForm.reason || '').trim();
 
     if (!description) throw new Error('Description is required.');
     if (!Number.isFinite(qty) || qty <= 0) throw new Error('Quantity must be positive.');
@@ -1840,6 +1969,7 @@ const Billing = () => {
       qty,
       unitRate,
       ...(vatRate !== undefined ? { vatRate } : {}),
+      ...(reason ? { reason } : {}),
     };
   };
 
@@ -1858,7 +1988,7 @@ const Billing = () => {
       setError('');
       setMessage('');
       if (!invoiceId) throw new Error('Invoice identifier is missing.');
-      if (!canEditManualInvoiceLines(selectedInvoiceView)) throw new Error('Manual invoice lines can only be edited while the invoice is draft or sent.');
+      if (!canEditInvoiceLines(selectedInvoiceView)) throw new Error('Invoice lines can only be edited while the invoice is draft or sent.');
 
       const payload = buildManualLinePayload();
       const isEditing = Boolean(editingLineItemId);
@@ -1876,7 +2006,7 @@ const Billing = () => {
       );
       await replaceInvoiceFromPayload(await parseResponse(response));
       resetManualLineForm();
-      setMessage(isEditing ? 'Manual service line updated.' : 'Manual service line added.');
+      setMessage(isEditing ? 'Invoice line updated.' : 'Manual service line added.');
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -1892,8 +2022,11 @@ const Billing = () => {
       setError('');
       setMessage('');
       if (!invoiceId || !lineItemId) throw new Error('Invoice line identifier is missing.');
-      if (!canEditManualInvoiceLines(selectedInvoiceView) || !isManualInvoiceLine(lineItem)) {
-        throw new Error('Only manual lines on draft or sent invoices can be deleted.');
+      if (!canEditInvoiceLines(selectedInvoiceView)) {
+        throw new Error('Invoice lines can only be edited while the invoice is draft or sent.');
+      }
+      if (isSystemInvoiceLine(lineItem)) {
+        throw new Error('System-generated lines can be edited but not deleted.');
       }
       if (!window.confirm('Delete this manual invoice line?')) return;
 
@@ -2548,6 +2681,14 @@ const Billing = () => {
                   ) : null}
                   <button
                     type="button"
+                    onClick={() => handleRefreshSelectedInvoice()}
+                    disabled={isInvoiceDetailLoading}
+                    className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <RefreshCw size={16} className={isInvoiceDetailLoading ? 'animate-spin' : ''} /> Refresh
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setDeleteInvoiceTarget(selectedInvoiceView)}
                     disabled={invoiceActionKey.startsWith(`${getInvoiceRouteId(selectedInvoiceView)}:`)}
                     className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -2603,7 +2744,16 @@ const Billing = () => {
                 {canEditManualInvoiceLines(selectedInvoiceView) ? (
                   <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
                     <div className="mb-3 flex items-center justify-between gap-3">
-                      <h4 className="text-sm font-semibold text-gray-900">Manual Custom Services</h4>
+                      <div>
+                        <h4 className="text-sm font-semibold text-gray-900">Invoice Line Adjustments</h4>
+                        {showManualLineForm && editingLineItemId ? (
+                          <p className="mt-1 text-xs text-gray-500">
+                            {isSystemInvoiceLine({ lineSource: editingLineSource })
+                              ? 'Editing a system-generated line will save a persistent override.'
+                              : 'Editing a manual invoice line.'}
+                          </p>
+                        ) : null}
+                      </div>
                       <button
                         type="button"
                         onClick={showManualLineForm ? resetManualLineForm : startAddManualLine}
@@ -2615,7 +2765,7 @@ const Billing = () => {
                     </div>
 
                     {showManualLineForm ? (
-                      <form onSubmit={handleSubmitManualLine} className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(120px,1fr)_110px_130px_110px_auto]">
+                      <form onSubmit={handleSubmitManualLine} className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(120px,1fr)_110px_130px_110px_minmax(150px,1fr)_auto]">
                         <input
                           type="text"
                           value={manualLineForm.description}
@@ -2658,6 +2808,13 @@ const Billing = () => {
                           placeholder="VAT rate"
                           className="rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-[#ff6900]"
                         />
+                        <input
+                          type="text"
+                          value={manualLineForm.reason}
+                          onChange={(event) => setManualLineForm((current) => ({ ...current, reason: event.target.value }))}
+                          placeholder="Reason"
+                          className="rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-[#ff6900]"
+                        />
                         <button
                           type="submit"
                           disabled={Boolean(lineActionKey)}
@@ -2697,9 +2854,10 @@ const Billing = () => {
                         </tr>
                       ) : selectedInvoiceView.lineItems.length ? (
                         selectedInvoiceView.lineItems.map((item, index) => {
-                          const lineSource = getInvoiceLineSource(item);
                           const isManual = isManualInvoiceLine(item);
-                          const canEditLine = canEditManualInvoiceLines(selectedInvoiceView) && isManual;
+                          const isSystem = isSystemInvoiceLine(item);
+                          const isOverridden = isOverriddenInvoiceLine(item);
+                          const canEditLine = canEditInvoiceLines(selectedInvoiceView);
                           const lineId = getInvoiceLineId(item);
 
                           return (
@@ -2713,15 +2871,24 @@ const Billing = () => {
                                   <td className="px-4 py-2 text-right">{Number(getInvoiceLineVatRate(item) || 0).toLocaleString(undefined, { style: 'percent', maximumFractionDigits: 2 })}</td>
                                   <td className="px-4 py-2 text-right">{formatCurrency(getInvoiceLineVatAmount(item))}</td>
                                   <td className="px-4 py-2">
-                                    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${isManual ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
-                                      {lineSource === 'manual' ? 'Manual' : 'System'}
-                                    </span>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${isManual ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
+                                        {getInvoiceLineSourceLabel(item)}
+                                      </span>
+                                      {isOverridden ? (
+                                        <span className="inline-flex rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-700">
+                                          Overridden
+                                        </span>
+                                      ) : null}
+                                    </div>
                                   </td>
                                   <td className="px-4 py-2 text-center">
                                     {canEditLine ? (
                                       <div className="flex items-center justify-center gap-1">
-                                        <button type="button" onClick={() => startEditManualLine(item)} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-[#ff6900]" title="Edit manual line" aria-label="Edit manual line"><Pencil size={15} /></button>
-                                        <button type="button" onClick={() => handleDeleteManualLine(item)} disabled={Boolean(lineId && lineActionKey.includes(lineId))} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50" title="Delete manual line" aria-label="Delete manual line"><Trash2 size={15} /></button>
+                                        <button type="button" onClick={() => startEditManualLine(item)} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-[#ff6900]" title={isSystem ? 'Edit system line override' : 'Edit manual line'} aria-label={isSystem ? 'Edit system line override' : 'Edit manual line'}><Pencil size={15} /></button>
+                                        {isManual ? (
+                                          <button type="button" onClick={() => handleDeleteManualLine(item)} disabled={Boolean(lineId && lineActionKey.includes(lineId))} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50" title="Delete manual line" aria-label="Delete manual line"><Trash2 size={15} /></button>
+                                        ) : null}
                                       </div>
                                     ) : (
                                       <span className="text-xs text-gray-400">-</span>

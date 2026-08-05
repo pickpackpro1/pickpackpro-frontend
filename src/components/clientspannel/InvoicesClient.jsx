@@ -197,8 +197,7 @@ const getInvoiceDownloadExtension = (contentType = '', fallbackFileName = '') =>
   const normalizedName = String(fallbackFileName || '').toLowerCase();
 
   if (normalizedName.endsWith('.pdf') || normalizedType.includes('pdf')) return 'pdf';
-  if (normalizedName.endsWith('.html') || normalizedName.endsWith('.htm') || normalizedType.includes('html')) return 'html';
-  return 'html';
+  return 'pdf';
 };
 
 const downloadBlob = (blob, fileName) => {
@@ -210,6 +209,14 @@ const downloadBlob = (blob, fileName) => {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+};
+
+const ensurePdfFileName = (fileName = '', fallback = 'invoice') => {
+  const normalizedFileName = String(fileName || '').trim();
+  if (normalizedFileName && /\.pdf$/i.test(normalizedFileName)) return normalizedFileName;
+
+  const baseName = sanitizeFileName(normalizedFileName || fallback).replace(/\.[^.]+$/i, '');
+  return `${baseName || 'invoice'}.pdf`;
 };
 
 const formatCurrency = (value) =>
@@ -517,16 +524,10 @@ const fetchInvoicePdfFile = async (invoice) => {
 
       if (contentType.toLowerCase().includes('application/json')) {
         const payload = await response.json();
-        const fileUrl = payload?.url || payload?.pdfUrl || payload?.pdf_url || payload?.downloadUrl || payload?.download_url || payload?.fileUrl || payload?.file_url;
-
-        if (fileUrl) {
-          return {
-            url: resolveInvoiceFileUrl(fileUrl),
-            fileName: getContentDispositionFileName(response.headers.get('content-disposition') || '') || `${sanitizeFileName(invoice?.invoice || lookupId)}.pdf`,
-          };
-        }
-
-        throw new Error(payload?.message || payload?.error || 'Invoice download response did not include a downloadable file.');
+        throw new Error(payload?.message || payload?.error || 'Invoice PDF endpoint returned JSON instead of a PDF.');
+      }
+      if (contentType.toLowerCase().includes('text/html')) {
+        throw new Error('Invoice PDF endpoint returned HTML instead of a PDF.');
       }
 
       const blob = await response.blob();
@@ -535,7 +536,7 @@ const fetchInvoicePdfFile = async (invoice) => {
 
       return {
         blob,
-        fileName: dispositionFileName || `${sanitizeFileName(invoice?.invoice || lookupId)}.${extension}`,
+        fileName: ensurePdfFileName(dispositionFileName, `${sanitizeFileName(invoice?.invoice || lookupId)}.${extension}`),
       };
     } catch (requestError) {
       lastError = requestError;
@@ -977,7 +978,7 @@ const InvoicesClient = () => {
         link.click();
         link.remove();
       } else {
-        downloadBlob(invoiceFile.blob, invoiceFile.fileName || `${sanitizeFileName(invoice?.invoice || invoiceId)}.html`);
+        downloadBlob(invoiceFile.blob, invoiceFile.fileName || `${sanitizeFileName(invoice?.invoice || invoiceId)}.pdf`);
       }
 
       setMessage(`Invoice downloaded for ${invoice?.invoice || invoiceId}.`);
