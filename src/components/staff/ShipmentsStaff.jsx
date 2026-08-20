@@ -68,12 +68,8 @@ const BOX_ALLOCATION_CACHE_KEY = "pickpackpro-box-allocation-items-v1";
 const FILE_OPEN_URL_CACHE = new Map();
 const BUNDLE_SIZE_NOTE_PREFIX = "Bundle Sizes:";
 const SUB_SHIPMENT_STATUSES = {
-  draft: "Draft",
-  awaiting_fba_labels: "Awaiting FBA labels",
-  ready_to_dispatch: "Ready to dispatch",
+  in_progress: "In progress",
   dispatched: "Dispatched",
-  completed: "Completed",
-  cancelled: "Cancelled",
 };
 const SUB_SHIPMENT_CREATION_STATUSES = new Set(["received", "in_progress", "prepped"]);
 
@@ -2871,7 +2867,7 @@ const getSubShipmentStatus = (subShipment = {}) =>
 
 const getSubShipmentStatusLabel = (status = "") => {
   const normalizedStatus = String(status || "").trim().toLowerCase();
-  return SUB_SHIPMENT_STATUSES[normalizedStatus] || formatStatusLabel(normalizedStatus || "draft");
+  return SUB_SHIPMENT_STATUSES[normalizedStatus] || formatStatusLabel(normalizedStatus || "in_progress");
 };
 
 const getSubShipmentItems = (subShipment = {}) =>
@@ -4965,8 +4961,13 @@ const ShipmentsStaff = () => {
   const handleOpenSubShipmentBoxModal = (subShipmentId = "", preferredBoxType = "box") => {
     const subShipment = subShipments.find((currentSubShipment) => getSubShipmentId(currentSubShipment) === subShipmentId);
     const boxData = subShipmentId ? subShipmentBoxData[subShipmentId] || {} : {};
+    const status = getSubShipmentStatus(subShipment);
 
-    if (!subShipmentId || !subShipment || getSubShipmentStatus(subShipment) === "cancelled") return;
+    if (!subShipmentId || !subShipment) return;
+    if (status === "dispatched") {
+      showToast("error", "This sub-shipment is already dispatched.");
+      return;
+    }
 
     const normalizedBoxType = preferredBoxType === "pallet" ? "pallet" : "box";
     const subShipmentBoxes = getSubShipmentBoxRows(subShipment, boxData);
@@ -6746,10 +6747,17 @@ const ShipmentsStaff = () => {
                       const items = getSubShipmentItems(subShipment);
                       const canDispatchBoxes = status !== "cancelled";
                       const eligibleSubShipmentPalletBoxes = getEligiblePalletBoxesFromRows(subLooseBoxes);
+                      const isSubShipmentDispatched = status === "dispatched";
+                      const subShipmentBoxableQuantity = getSubShipmentBoxableQuantity(subShipment, boxData);
                       const canAddSubShipmentBox =
-                        Boolean(subShipmentId) && status !== "cancelled" && getSubShipmentBoxableQuantity(subShipment, boxData) > 0;
+                        Boolean(subShipmentId) && !isSubShipmentDispatched && subShipmentBoxableQuantity > 0;
                       const canAddSubShipmentPallet =
-                        Boolean(subShipmentId) && status !== "cancelled" && eligibleSubShipmentPalletBoxes.length > 0;
+                        Boolean(subShipmentId) && !isSubShipmentDispatched && eligibleSubShipmentPalletBoxes.length > 0;
+                      const addSubShipmentBoxTitle = canAddSubShipmentBox
+                        ? "Add box"
+                        : isSubShipmentDispatched
+                          ? "Sub-shipment is dispatched"
+                          : "All SKU quantities are already boxed";
 
                       return (
                         <div key={subShipmentId || subShipmentIndex} className="overflow-hidden rounded-lg border border-[#dbe5f3] bg-[#f8fbff]">
@@ -6773,7 +6781,7 @@ const ShipmentsStaff = () => {
                                   type="button"
                                   onClick={() => handleOpenSubShipmentBoxModal(subShipmentId, "box")}
                                   disabled={!canAddSubShipmentBox}
-                                  title={canAddSubShipmentBox ? "Add box" : "All SKU quantities are already boxed"}
+                                  title={addSubShipmentBoxTitle}
                                   className="rounded-lg bg-[#132347] px-3 py-2 text-xs font-semibold text-white hover:bg-[#0f1b38] disabled:cursor-not-allowed disabled:opacity-60"
                                 >
                                   Add Box
