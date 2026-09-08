@@ -12,7 +12,7 @@ import {
 } from '../../utils/shipmentMapper';
 
 const API_BASE_URL = '';
-const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app';
+const BACKEND_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://pickpackpro-backend.vercel.app';
 const SAFE_FILE_UPLOAD_BYTES = 3 * 1024 * 1024;
 const IMAGE_UPLOAD_MAX_DIMENSION = 2400;
 const BOX_ALLOCATION_CACHE_KEY = 'pickpackpro-box-allocation-items-v1';

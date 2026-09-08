@@ -8,7 +8,7 @@ import { getClientIdFromSources, getClientTierFromSources } from '../../utils/cl
 import { getServiceDisplayName, getServiceKey, isKnownServiceCode } from '../../utils/serviceCatalog';
 
 const API_BASE_URL = '';
-const BACKEND_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://ali-backend.vercel.app').replace(/\/+$/, '');
+const BACKEND_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://pickpackpro-backend.vercel.app').replace(/\/+$/, '');
 const CLIENT_INVOICES_PAGE_SIZE = 20;
 const INVOICE_CATEGORY_DISPATCH = 'dispatch';
 const INVOICE_CATEGORY_CLIENT = 'client';

@@ -19,7 +19,7 @@ if (typeof window !== "undefined" && !window.__PICKPACKPRO_API_GET_CACHE__) {
     "pickpackpro-api-get-cache-v3",
   ];
   const AUTH_STORAGE_KEY = "pickpackpro-auth";
-  const BACKEND_API_ORIGIN = "https://ali-backend.vercel.app";
+  const BACKEND_API_ORIGIN = "https://pickpackpro-backend.vercel.app";
   const maxMemoryEntries = 200;
   const maxStoredEntries = 25;
   const maxStoredBodyChars = 250_000;

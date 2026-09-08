@@ -31,7 +31,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://ali-backend.vercel.app/api/$1"
+      "destination": "https://pickpackpro-backend.vercel.app/api/$1"
     },
     {
       "source": "/((?!assets/|images/|favicon.svg|icons.svg|.*\\..*).*)",
