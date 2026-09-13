@@ -25,6 +25,7 @@ import DiscrepancyResolutionModal from "../common/DiscrepancyResolutionModal";
 import ConfirmationModal from "../common/ConfirmationModal";
 import { BoxWeightBadges } from "../common/BoxWeightDialog";
 import ScanToPrintButton from "../common/ScanToPrintButton";
+import SplitLabelPdfButton from "../common/SplitLabelPdfButton";
 import { getBoxWeightErrorCode } from "../../utils/boxWeight";
 import { useBoxWeightPrompt } from "../../utils/useBoxWeightPrompt";
 import ShipmentNoteAttachments from "../common/ShipmentNoteAttachments";
@@ -6638,6 +6639,14 @@ const ShipmentsStaff = () => {
                     {primaryStatusAction.label}
                   </button>
                   <ScanToPrintButton lineItems={lineItems} />
+                  <SplitLabelPdfButton
+                    shipmentId={getShipmentRecordId(selectedShipment) || selectedShipmentId}
+                    lineItems={lineItems}
+                    apiBaseUrl={API_BASE_URL}
+                    buildHeaders={buildHeaders}
+                    parseResponse={parseResponse}
+                    onDone={() => loadShipmentDetail(selectedShipmentId, { showLoader: false })}
+                  />
                   <button
                     type="button"
                     onClick={() => loadShipmentDetail(selectedShipmentId)}
