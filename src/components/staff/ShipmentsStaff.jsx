@@ -24,6 +24,7 @@ import FullPageLoader from "../common/FullPageLoader";
 import DiscrepancyResolutionModal from "../common/DiscrepancyResolutionModal";
 import ConfirmationModal from "../common/ConfirmationModal";
 import { BoxWeightBadges } from "../common/BoxWeightDialog";
+import ScanToPrintButton from "../common/ScanToPrintButton";
 import { getBoxWeightErrorCode } from "../../utils/boxWeight";
 import { useBoxWeightPrompt } from "../../utils/useBoxWeightPrompt";
 import ShipmentNoteAttachments from "../common/ShipmentNoteAttachments";
@@ -6636,6 +6637,7 @@ const ShipmentsStaff = () => {
                   >
                     {primaryStatusAction.label}
                   </button>
+                  <ScanToPrintButton lineItems={lineItems} />
                   <button
                     type="button"
                     onClick={() => loadShipmentDetail(selectedShipmentId)}

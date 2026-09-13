@@ -6,6 +6,7 @@ import FullPageLoader from '../common/FullPageLoader';
 import DiscrepancyResolutionModal from '../common/DiscrepancyResolutionModal';
 import ConfirmationModal from '../common/ConfirmationModal';
 import { BoxWeightBadges } from '../common/BoxWeightDialog';
+import ScanToPrintButton from '../common/ScanToPrintButton';
 import { getBoxWeightErrorCode } from '../../utils/boxWeight';
 import { useBoxWeightPrompt } from '../../utils/useBoxWeightPrompt';
 import ShipmentNoteAttachments from '../common/ShipmentNoteAttachments';
@@ -6527,6 +6528,7 @@ const ShipmentDetail = () => {
               >
                 {primaryStatusAction.label}
               </button>
+              <ScanToPrintButton lineItems={lineItems} />
               <button onClick={loadShipmentData} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
                 <RefreshCw size={15} />
                 Refresh

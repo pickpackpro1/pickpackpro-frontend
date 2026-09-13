@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import LayoutStaff from "./stafflayout/LayoutStaff";
 import LoadingState from "../common/LoadingState";
 import FullPageLoader from "../common/FullPageLoader";
+import ScanReceiveButton from "../common/ScanReceiveButton";
 import { getSession } from "../../utils/auth";
 import {
   getLineItemId as getMappedLineItemId,
@@ -302,6 +303,20 @@ const ReceivingStaff = () => {
     }
   };
 
+  const handleScanReceive = async (item, receivedQty) => {
+    const shipmentId = selectedShipment.id || selectedShipment.uuid;
+    await parseResponse(
+      await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
+        method: "POST",
+        headers: buildHeaders(true),
+        body: JSON.stringify({ items: [{ shipmentItemId: getItemId(item), receivedQty }] }),
+      })
+    );
+    setMessage(`Received ${formatReceivingQuantity(receivedQty)} × ${getItemSku(item) || "item"}.`);
+    await loadShipmentDetail(selectedShipment);
+    loadPendingArrivals();
+  };
+
   const selectedItems = getLineItems(selectedShipment);
   const totalPages = Math.max(1, Number(queueMeta.totalPages || 1) || 1);
   const paginationStart = queueMeta.total ? (currentPage - 1) * RECEIVING_PAGE_SIZE + 1 : 0;
@@ -460,6 +475,8 @@ const ReceivingStaff = () => {
                     <h3 className="text-sm font-semibold text-[#132347]">{getReference(selectedShipment)}</h3>
                     <p className="mt-1 text-xs text-gray-500">{getClientName(selectedShipment)}</p>
                   </div>
+
+                  <ScanReceiveButton lineItems={selectedItems} onReceive={handleScanReceive} />
 
                   <div className="max-h-[52vh] space-y-3 overflow-y-auto pr-1">
                     {selectedItems.map((item) => {

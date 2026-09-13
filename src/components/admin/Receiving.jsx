@@ -20,6 +20,7 @@ import {
   isReceivingComplete,
 } from '../../utils/receiving';
 import { Package, AlertCircle, RefreshCw } from 'lucide-react';
+import ScanReceiveButton from '../common/ScanReceiveButton';
 
 const API_BASE_URL = '';
 const RECEIVING_PAGE_SIZE = 25;
@@ -232,6 +233,18 @@ const Receiving = () => {
     setReceivedQuantities({});
   };
 
+  const handleScanReceive = async (item, receivedQty) => {
+    const response = await fetch(`${API_BASE_URL}/api/shipments/${selectedShipment.id || selectedShipment.uuid}/receive`, {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify({ items: [{ shipmentItemId: getLineItemId(item), receivedQty }] }),
+    });
+    await parseResponse(response);
+    setMessage(`Received ${formatReceivingQuantity(receivedQty)} × ${getItemSku(item) || 'item'}.`);
+    await handleSelectShipment(selectedShipment);
+    loadPendingArrivals();
+  };
+
   const handleConfirmArrival = async () => {
     if (!selectedShipment || isSaving) return;
     try {
@@ -438,6 +451,7 @@ const Receiving = () => {
                 </button>
               </div>
               <div className="max-h-[70vh] overflow-y-auto p-6">
+                <ScanReceiveButton className="mb-4" lineItems={getLineItems(selectedShipment)} onReceive={handleScanReceive} />
                 <div className="space-y-4">
                   {getLineItems(selectedShipment).map((item, itemIndex) => {
                     const key = getLineItemId(item);
