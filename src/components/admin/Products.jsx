@@ -28,17 +28,19 @@ import {
   getProductFlags,
   getProductWeightText,
   getProductWeightValue,
+  getProductBarcode,
 } from '../../utils/productFields';
 
 const API_BASE_URL = '';
 const PRODUCTS_PER_PAGE = 25;
 const CSV_IMPORT_TOOLTIP =
-  'CSV must include headers. Required: product_name, sku. Optional: default_fnsku, length_cm, width_cm, height_cm, weight_kg, hazmat_flag, expiry_tracked, lot_tracked, needs_bundling, bundle_size, active. Column order does not matter. Boolean values can be true/false, yes/no, or 1/0.';
+  'CSV must include headers. Required: product_name, sku. Optional: barcode, default_fnsku, length_cm, width_cm, height_cm, weight_kg, hazmat_flag, expiry_tracked, lot_tracked, needs_bundling, bundle_size, active. Column order does not matter. Boolean values can be true/false, yes/no, or 1/0.';
 
 const initialProductForm = {
   clientId: '',
   productName: '',
   sku: '',
+  barcode: '',
   defaultFnsku: '',
   lengthCm: '',
   widthCm: '',
@@ -302,6 +304,7 @@ const normalizeProduct = (product) => {
     clientEmail: getProductInlineClientEmail(product),
     productName: product?.productName || product?.product_name || product?.name || 'Unnamed Product',
     sku: product?.sku || '',
+    barcode: getProductBarcode(product),
     defaultFnsku: product?.defaultFnsku || product?.defaultFNSKU || product?.default_fnsku || '',
     defaultFnskuLabelFileId: getProductDefaultFnskuLabelFileId(product),
     defaultFnskuLabelFile: getProductDefaultFnskuLabelFile(product),
@@ -332,6 +335,7 @@ const toOptionalNumber = (value) => {
 const toPayload = (form, { includeClientId = true, includeSku = true } = {}) => {
   const payload = {
     productName: form.productName.trim(),
+    barcode: String(form.barcode || '').trim() || null,
     defaultFnsku: form.defaultFnsku.trim(),
     lengthCm: toOptionalNumber(form.lengthCm),
     widthCm: toOptionalNumber(form.widthCm),
@@ -827,6 +831,7 @@ const Products = () => {
       clientId: productForEdit.clientId,
       productName: productForEdit.productName,
       sku: productForEdit.sku,
+      barcode: productForEdit.barcode || '',
       defaultFnsku: productForEdit.defaultFnsku,
       defaultFnskuLabelFile: productForEdit.defaultFnskuLabelFile || null,
       defaultFnskuLabelFileName: productForEdit.defaultFnskuLabelFileName || '',
@@ -1601,6 +1606,10 @@ const Products = () => {
                   <p className="text-xs text-gray-500 mb-1">Default FNSKU</p>
                   <p className="font-medium text-gray-900">{selectedProduct.defaultFnsku || '-'}</p>
                 </div>
+                <div>
+                  <p className="text-xs text-gray-500 mb-1">Barcode (EAN / UPC)</p>
+                  <p className="font-medium text-gray-900">{selectedProduct.barcode || '-'}</p>
+                </div>
                 <div className="col-span-2">
                   <p className="text-xs text-gray-500 mb-1">Default FNSKU Label File</p>
                   {selectedProduct.defaultFnskuLabelFileName ? (
@@ -1893,6 +1902,17 @@ const Products = () => {
                       setProductForm((prev) => ({ ...prev, sku: e.target.value }));
                     }}
                     className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900] disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500 disabled:focus:ring-0"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-gray-500">Barcode (EAN / UPC)</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="e.g. 5012345678900"
+                    value={productForm.barcode}
+                    onChange={(e) => setProductForm((prev) => ({ ...prev, barcode: e.target.value }))}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
                   />
                 </label>
                 <label className="block">

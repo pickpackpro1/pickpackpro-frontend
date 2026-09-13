@@ -129,6 +129,7 @@ export const normalizeSkuProduct = (product = {}) => ({
   sku: String(getProductSku(product) || '').trim(),
   productName: String(getProductName(product) || '').trim(),
   fnskuLabel: String(getProductFnsku(product) || '').trim(),
+  barcode: String(firstPresent(product?.barcode, product?.ean, product?.upc) || '').trim(),
   needsBundling: getProductNeedsBundling(product),
   needs_bundling: getProductNeedsBundling(product),
   bundleSize: String(getProductBundleSize(product) || '').trim(),

@@ -158,6 +158,19 @@ export const getProductWeightText = (product = {}) => {
   return /\b(kg|g|lb|lbs)\b/i.test(text) ? text : `${text} kg`;
 };
 
+export const getProductBarcode = (product = {}) =>
+  String(
+    firstPresent(
+      product?.barcode,
+      product?.ean,
+      product?.upc,
+      product?.gtin,
+      product?.metadata?.barcode,
+      product?.product?.barcode,
+      product?.products?.barcode
+    )
+  ).trim();
+
 export const getProductDefaultFnskuLabelFile = (product = {}) => {
   const directFile = firstPresent(
     product?.defaultFnskuLabelFile,

@@ -134,6 +134,7 @@ const createEmptyProductItem = () => ({
   sku: '',
   expectedQty: '',
   fnskuLabel: '',
+  barcode: '',
   bundleSize: '',
   needsBundling: false,
   serviceType: '',
@@ -4965,6 +4966,7 @@ const mapShipmentItemsToProductItems = (items = []) => {
     sku: getItemSku(item),
     expectedQty: String(getItemExpectedQty(item) || ''),
     fnskuLabel: getItemFnsku(item),
+    barcode: String(item?.barcode || item?.product?.barcode || item?.products?.barcode || '').trim(),
     bundleSize: String(getItemBundleSize(item) || ''),
     needsBundling: Boolean(item?.needsBundling || item?.needs_bundling),
     serviceType: '',
@@ -5364,6 +5366,7 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
           sku: product?.sku || item.sku,
           productName: product?.productName || item.productName,
           fnskuLabel: product?.fnskuLabel || '',
+          barcode: product?.barcode || '',
           needsBundling,
           bundleSize: needsBundling ? String(product?.bundleSize || product?.bundle_size || '') : '',
           ...getProductDefaultFnskuLabelSelectionState(product, item),
@@ -8884,6 +8887,20 @@ const ClientShipments = ({ awaitingFbaOnly = false }) => {
                               className="w-full rounded-lg border border-[#dbe3ef] px-4 py-3 text-sm text-[#132347] outline-none focus:ring-2 focus:ring-[#ff6900]"
                             />
                           </div>
+                        </div>
+
+                        <div className="mt-4">
+                          <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.14em] text-[#6b7280]">
+                            Barcode (EAN / UPC)
+                          </label>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            placeholder="Filled from the product if saved — or type it"
+                            value={item.barcode || ''}
+                            onChange={(e) => updateProductItem(index, 'barcode', e.target.value)}
+                            className="w-full rounded-lg border border-[#dbe3ef] px-4 py-3 text-sm text-[#132347] outline-none focus:ring-2 focus:ring-[#ff6900]"
+                          />
                         </div>
 
                         <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1fr)_120px]">

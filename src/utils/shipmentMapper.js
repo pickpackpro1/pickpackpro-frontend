@@ -599,6 +599,7 @@ export const buildShipmentItemPayload = (item = {}, index = 0) => {
     fnskuLabel,
     fnsku_label: fnskuLabel,
     fnsku: fnskuLabel,
+    barcode: String(firstPresent(item?.barcode, normalized.barcode) || '').trim() || null,
     services: normalizeServices(normalized.services, item?.services),
     needsBundling,
     needs_bundling: needsBundling,
