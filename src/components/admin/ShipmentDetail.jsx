@@ -5,6 +5,9 @@ import LoadingState from '../common/LoadingState';
 import FullPageLoader from '../common/FullPageLoader';
 import DiscrepancyResolutionModal from '../common/DiscrepancyResolutionModal';
 import ConfirmationModal from '../common/ConfirmationModal';
+import { BoxWeightBadges } from '../common/BoxWeightDialog';
+import { getBoxWeightErrorCode } from '../../utils/boxWeight';
+import { useBoxWeightPrompt } from '../../utils/useBoxWeightPrompt';
 import ShipmentNoteAttachments from '../common/ShipmentNoteAttachments';
 import { getSession } from '../../utils/auth';
 import { getDiscrepancyResolveData, resolveDiscrepancy as resolveDiscrepancyRequest } from '../../utils/discrepancies';
@@ -4240,6 +4243,11 @@ const ShipmentDetail = () => {
   const [boxNumber, setBoxNumber] = useState('');
   const [palletNumber, setPalletNumber] = useState('');
   const [sealBoxId, setSealBoxId] = useState('');
+  const { boxWeightPrompt, requestBoxWeight, resolveBoxWeightBlocker } = useBoxWeightPrompt({
+    apiBaseUrl: API_BASE_URL,
+    buildHeaders,
+    parseResponse,
+  });
   const [sealTrackingCode, setSealTrackingCode] = useState('');
   const [deleteBoxId, setDeleteBoxId] = useState('');
   const [addToBoxBoxId, setAddToBoxBoxId] = useState('');
@@ -4621,7 +4629,7 @@ const ShipmentDetail = () => {
               </div>
               <div>
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-[#7f8ea6]">Weight</p>
-                <p className="mt-1 font-medium">{boxWeight ? `${boxWeight} kg` : '-'}</p>
+                <p className="mt-1 font-medium">{boxWeight ? `${boxWeight} kg` : '-'}<BoxWeightBadges box={box} /></p>
               </div>
               <div>
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-[#7f8ea6]">Dimensions</p>
@@ -5963,7 +5971,15 @@ const ShipmentDetail = () => {
         };
       };
 
-      const createResult = await createBoxRequest(createBoxPayload);
+      let createResult;
+      try {
+        createResult = await createBoxRequest(createBoxPayload);
+      } catch (createError) {
+        if (getBoxWeightErrorCode(createError) !== 'BOX_WEIGHT_OVER_LIMIT') throw createError;
+        const confirmedWeight = await requestBoxWeight({ reason: 'over-limit', weightKg: createBoxPayload.weight });
+        if (!confirmedWeight) return false;
+        createResult = await createBoxRequest({ ...createBoxPayload, ...confirmedWeight });
+      }
 
       const boxPayload = createResult.payload;
       const response = createResult.response;
@@ -6154,7 +6170,15 @@ const ShipmentDetail = () => {
       setMessage(`${isPallet ? 'Pallet' : 'Box'} marked dispatched.`);
       await loadShipmentData({ showLoader: false });
     } catch (requestError) {
-      setError(requestError.message);
+      try {
+        if (await resolveBoxWeightBlocker(requestError)) {
+          await runMarkBoxDispatched(boxId, isPallet);
+          return;
+        }
+        setError(requestError.message);
+      } catch (weightError) {
+        setError(weightError.message);
+      }
     }
   };
 
@@ -7172,7 +7196,7 @@ const ShipmentDetail = () => {
                               </div>
                               <div>
                                 <p className="text-[10px] font-semibold uppercase tracking-wide text-[#7f8ea6]">Weight</p>
-                                <p className="mt-1 font-medium">{boxWeight ? `${boxWeight} kg` : '-'}</p>
+                                <p className="mt-1 font-medium">{boxWeight ? `${boxWeight} kg` : '-'}<BoxWeightBadges box={box} /></p>
                               </div>
                               <div>
                                 <p className="text-[10px] font-semibold uppercase tracking-wide text-[#7f8ea6]">Dimensions</p>
@@ -7964,6 +7988,7 @@ const ShipmentDetail = () => {
           </div>
         ) : null}
       </div>
+      {boxWeightPrompt}
       <ConfirmationModal
         open={Boolean(dispatchConfirm)}
         title={dispatchConfirm?.title}
