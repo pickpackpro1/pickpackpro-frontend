@@ -6,7 +6,7 @@ import FullPageLoader from '../common/FullPageLoader';
 import DiscrepancyResolutionModal from '../common/DiscrepancyResolutionModal';
 import ConfirmationModal from '../common/ConfirmationModal';
 import { BoxWeightBadges } from '../common/BoxWeightDialog';
-import ScanWorkflowButton from '../common/ScanWorkflowButton';
+import GlobalScanButton from '../common/GlobalScanButton';
 import SplitLabelPdfButton from '../common/SplitLabelPdfButton';
 import { getBoxWeightErrorCode } from '../../utils/boxWeight';
 import { useBoxWeightPrompt } from '../../utils/useBoxWeightPrompt';
@@ -4976,16 +4976,17 @@ const ShipmentDetail = () => {
   };
 
   // Scan step 1 of the combined scan flow: save the counted quantity (flags a discrepancy if it differs).
-  const handleScanReceive = async (item, receivedQty) => {
-    const shipmentId = getShipmentRecordId(shipment) || id;
+  // The scanned code is looked up across every client's shipments, not just this one — the same
+  // barcode can show up on someone else's shipment too.
+  const handleGlobalScanReceive = async (shipmentId, match, receivedQty) => {
     const response = await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
       method: 'POST',
       headers: buildHeaders(true),
-      body: JSON.stringify({ items: [{ shipmentItemId: getLineItemId(item), receivedQty }] }),
+      body: JSON.stringify({ items: [{ shipmentItemId: match.lineItemId, receivedQty }] }),
     });
     await parseResponse(response);
-    showToast('success', `Received ${receivedQty} × ${getItemSku(item) || 'item'}.`);
-    await loadShipmentData({ showLoader: false });
+    showToast('success', `Received ${receivedQty} × ${match.sku || 'item'} on ${match.shipmentReference} (${match.clientName}).`);
+    if ((getShipmentRecordId(shipment) || id) === shipmentId) await loadShipmentData({ showLoader: false });
   };
 
   const loadShipmentData = async ({ showLoader = true } = {}) => {
@@ -6542,7 +6543,13 @@ const ShipmentDetail = () => {
               >
                 {primaryStatusAction.label}
               </button>
-              <ScanWorkflowButton lineItems={lineItems} onReceive={handleScanReceive} label="Scan" />
+              <GlobalScanButton
+                label="Scan"
+                apiBaseUrl={API_BASE_URL}
+                buildHeaders={buildHeaders}
+                parseResponse={parseResponse}
+                onReceive={handleGlobalScanReceive}
+              />
               <SplitLabelPdfButton
                 shipmentId={getShipmentRecordId(shipment) || id}
                 lineItems={lineItems}

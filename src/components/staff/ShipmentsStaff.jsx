@@ -24,7 +24,6 @@ import FullPageLoader from "../common/FullPageLoader";
 import DiscrepancyResolutionModal from "../common/DiscrepancyResolutionModal";
 import ConfirmationModal from "../common/ConfirmationModal";
 import { BoxWeightBadges } from "../common/BoxWeightDialog";
-import ScanWorkflowButton from "../common/ScanWorkflowButton";
 import SplitLabelPdfButton from "../common/SplitLabelPdfButton";
 import { getBoxWeightErrorCode } from "../../utils/boxWeight";
 import { useBoxWeightPrompt } from "../../utils/useBoxWeightPrompt";
@@ -4485,7 +4484,9 @@ const ShipmentsStaff = () => {
   const [error, setError] = useState("");
   const [dispatchConfirm, setDispatchConfirm] = useState(null);
 
-  // Global scan on the list page: staff scan a box before knowing which client/shipment it's for.
+  // Scan flow (list page and shipment page both use this): the scanned code is looked up across
+  // every client's shipments, not just the one you might have open — the same barcode can show up
+  // on someone else's shipment too.
   const handleGlobalScanReceive = async (shipmentId, match, receivedQty) => {
     await parseResponse(
       await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
@@ -4495,7 +4496,12 @@ const ShipmentsStaff = () => {
       })
     );
     showToast("success", `Received ${receivedQty} × ${match.sku || "item"} on ${match.shipmentReference} (${match.clientName}).`);
-    loadShipments();
+    const openShipmentId = getShipmentRecordId(selectedShipment) || selectedShipmentId;
+    if (selectedShipment && openShipmentId === shipmentId) {
+      await loadShipmentDetail(shipmentId, { showLoader: false });
+    } else {
+      loadShipments();
+    }
   };
 
   const loadShipments = async ({ page = currentPage } = {}) => {
@@ -4563,20 +4569,6 @@ const ShipmentsStaff = () => {
     } finally {
       setIsLoading(false);
     }
-  };
-
-  // Scan step 1 of the combined scan flow: save the counted quantity (flags a discrepancy if it differs).
-  const handleScanReceive = async (item, receivedQty) => {
-    const shipmentId = getShipmentRecordId(selectedShipment) || selectedShipmentId;
-    await parseResponse(
-      await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
-        method: "POST",
-        headers: buildHeaders(true),
-        body: JSON.stringify({ items: [{ shipmentItemId: getLineItemId(item), receivedQty }] }),
-      })
-    );
-    showToast("success", `Received ${receivedQty} × ${getItemSku(item) || "item"}.`);
-    await loadShipmentDetail(shipmentId, { showLoader: false });
   };
 
   const loadShipmentDetail = async (shipmentId, { showLoader = true } = {}) => {
@@ -6673,7 +6665,13 @@ const ShipmentsStaff = () => {
                   >
                     {primaryStatusAction.label}
                   </button>
-                  <ScanWorkflowButton lineItems={lineItems} onReceive={handleScanReceive} label="Scan" />
+                  <GlobalScanButton
+                    label="Scan"
+                    apiBaseUrl={API_BASE_URL}
+                    buildHeaders={buildHeaders}
+                    parseResponse={parseResponse}
+                    onReceive={handleGlobalScanReceive}
+                  />
                   <SplitLabelPdfButton
                     shipmentId={getShipmentRecordId(selectedShipment) || selectedShipmentId}
                     lineItems={lineItems}
