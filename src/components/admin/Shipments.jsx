@@ -5,6 +5,7 @@ import FullPageLoader from '../common/FullPageLoader';
 import ProductSkuCombobox from '../common/ProductSkuCombobox';
 import DiscrepancyResolutionModal from '../common/DiscrepancyResolutionModal';
 import ShipmentNoteAttachments from '../common/ShipmentNoteAttachments';
+import GlobalScanButton from '../common/GlobalScanButton';
 import { getSession } from '../../utils/auth';
 import { getDiscrepancyResolveData, resolveDiscrepancy as resolveDiscrepancyRequest } from '../../utils/discrepancies';
 import {
@@ -3894,6 +3895,18 @@ const Shipments = () => {
     setSavingAction('');
   };
 
+  // Global scan on the list page: staff scan a box before knowing which client/shipment it's for.
+  const handleGlobalScanReceive = async (shipmentId, match, receivedQty) => {
+    const response = await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify({ items: [{ shipmentItemId: match.lineItemId, receivedQty }] }),
+    });
+    await parseResponse(response);
+    showToast('success', `Received ${receivedQty} × ${match.sku || 'item'} on ${match.shipmentReference} (${match.clientName}).`);
+    loadShipments();
+  };
+
   const loadShipments = async ({ pinnedShipments = [], excludedKeys = [], preferFullList = false, page = currentPage } = {}) => {
     const requestedPinnedRows = (Array.isArray(pinnedShipments) ? pinnedShipments : [pinnedShipments])
       .filter(Boolean)
@@ -5003,17 +5016,26 @@ const Shipments = () => {
 
         {!showCreateSection ? (
           <>
-            <div className="mb-6 flex items-center justify-between">
+            <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h1 className="text-2xl font-semibold text-gray-900">Shipments</h1>
               </div>
-              <button
-                onClick={openCreateSection}
-                className="inline-flex items-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-medium text-white hover:bg-[#e55d00]"
-              >
-                <Plus size={16} />
-                Create Shipment
-              </button>
+              <div className="flex flex-wrap items-center gap-3">
+                <GlobalScanButton
+                  label="Scan (any client)"
+                  apiBaseUrl={API_BASE_URL}
+                  buildHeaders={buildHeaders}
+                  parseResponse={parseResponse}
+                  onReceive={handleGlobalScanReceive}
+                />
+                <button
+                  onClick={openCreateSection}
+                  className="inline-flex items-center gap-2 rounded-lg bg-[#ff6900] px-4 py-2 text-sm font-medium text-white hover:bg-[#e55d00]"
+                >
+                  <Plus size={16} />
+                  Create Shipment
+                </button>
+              </div>
             </div>
 
             {error ? <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}

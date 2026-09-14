@@ -24,7 +24,7 @@ import FullPageLoader from "../common/FullPageLoader";
 import DiscrepancyResolutionModal from "../common/DiscrepancyResolutionModal";
 import ConfirmationModal from "../common/ConfirmationModal";
 import { BoxWeightBadges } from "../common/BoxWeightDialog";
-import ScanToPrintButton from "../common/ScanToPrintButton";
+import ScanWorkflowButton from "../common/ScanWorkflowButton";
 import SplitLabelPdfButton from "../common/SplitLabelPdfButton";
 import { getBoxWeightErrorCode } from "../../utils/boxWeight";
 import { useBoxWeightPrompt } from "../../utils/useBoxWeightPrompt";
@@ -52,6 +52,7 @@ import {
   normalizeServiceCode,
 } from "../../utils/serviceCatalog";
 import { fetchBoxItemsBatch, getBatchItemsForBox } from "../../utils/boxItemsBatch";
+import GlobalScanButton from "../common/GlobalScanButton";
 
 const API_BASE_URL = '';
 const STAFF_SHIPMENTS_PAGE_SIZE = 10;
@@ -4484,6 +4485,19 @@ const ShipmentsStaff = () => {
   const [error, setError] = useState("");
   const [dispatchConfirm, setDispatchConfirm] = useState(null);
 
+  // Global scan on the list page: staff scan a box before knowing which client/shipment it's for.
+  const handleGlobalScanReceive = async (shipmentId, match, receivedQty) => {
+    await parseResponse(
+      await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
+        method: "POST",
+        headers: buildHeaders(true),
+        body: JSON.stringify({ items: [{ shipmentItemId: match.lineItemId, receivedQty }] }),
+      })
+    );
+    showToast("success", `Received ${receivedQty} × ${match.sku || "item"} on ${match.shipmentReference} (${match.clientName}).`);
+    loadShipments();
+  };
+
   const loadShipments = async ({ page = currentPage } = {}) => {
     try {
       setIsLoading(true);
@@ -4549,6 +4563,20 @@ const ShipmentsStaff = () => {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Scan step 1 of the combined scan flow: save the counted quantity (flags a discrepancy if it differs).
+  const handleScanReceive = async (item, receivedQty) => {
+    const shipmentId = getShipmentRecordId(selectedShipment) || selectedShipmentId;
+    await parseResponse(
+      await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
+        method: "POST",
+        headers: buildHeaders(true),
+        body: JSON.stringify({ items: [{ shipmentItemId: getLineItemId(item), receivedQty }] }),
+      })
+    );
+    showToast("success", `Received ${receivedQty} × ${getItemSku(item) || "item"}.`);
+    await loadShipmentDetail(shipmentId, { showLoader: false });
   };
 
   const loadShipmentDetail = async (shipmentId, { showLoader = true } = {}) => {
@@ -6451,7 +6479,14 @@ const ShipmentsStaff = () => {
             <div className="overflow-hidden rounded-xl border bg-white shadow-sm">
               <div className="flex flex-col items-start justify-between gap-4 border-b px-6 py-4 sm:flex-row sm:items-center">
                 <h2 className="text-lg font-semibold text-gray-900">All Shipments</h2>
-                <div className="flex w-full items-center gap-3 sm:w-auto">
+                <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto">
+                  <GlobalScanButton
+                    label="Scan (any client)"
+                    apiBaseUrl={API_BASE_URL}
+                    buildHeaders={buildHeaders}
+                    parseResponse={parseResponse}
+                    onReceive={handleGlobalScanReceive}
+                  />
                   <div className="relative flex-grow sm:flex-grow-0">
                     <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
                     <input
@@ -6638,7 +6673,7 @@ const ShipmentsStaff = () => {
                   >
                     {primaryStatusAction.label}
                   </button>
-                  <ScanToPrintButton lineItems={lineItems} />
+                  <ScanWorkflowButton lineItems={lineItems} onReceive={handleScanReceive} label="Scan" />
                   <SplitLabelPdfButton
                     shipmentId={getShipmentRecordId(selectedShipment) || selectedShipmentId}
                     lineItems={lineItems}

@@ -20,7 +20,8 @@ import {
   isReceivingComplete,
 } from '../../utils/receiving';
 import { Package, AlertCircle, RefreshCw } from 'lucide-react';
-import ScanReceiveButton from '../common/ScanReceiveButton';
+import ScanWorkflowButton from '../common/ScanWorkflowButton';
+import GlobalScanButton from '../common/GlobalScanButton';
 
 const API_BASE_URL = '';
 const RECEIVING_PAGE_SIZE = 25;
@@ -245,6 +246,21 @@ const Receiving = () => {
     loadPendingArrivals();
   };
 
+  // Global scan: staff scan a box before knowing whose shipment it is — no client/shipment picked yet.
+  const handleGlobalScanReceive = async (shipmentId, match, receivedQty) => {
+    const response = await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify({ items: [{ shipmentItemId: match.lineItemId, receivedQty }] }),
+    });
+    await parseResponse(response);
+    setMessage(`Received ${formatReceivingQuantity(receivedQty)} × ${match.sku || 'item'} on ${match.shipmentReference} (${match.clientName}).`);
+    if (selectedShipment && (selectedShipment.id || selectedShipment.uuid) === shipmentId) {
+      await handleSelectShipment(selectedShipment);
+    }
+    loadPendingArrivals();
+  };
+
   const handleConfirmArrival = async () => {
     if (!selectedShipment || isSaving) return;
     try {
@@ -321,14 +337,23 @@ const Receiving = () => {
     <Layout>
       <FullPageLoader show={isLoading} label="Loading arrivals..." />
       <div className="p-6 bg-gray-50 min-h-screen">
-        <div className="mb-6 flex items-center justify-between">
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold text-gray-900">Receiving</h1>
           </div>
-          <button onClick={() => loadPendingArrivals()} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
-            <RefreshCw size={15} />
-            Refresh
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <GlobalScanButton
+              label="Scan a box (any client)"
+              apiBaseUrl={API_BASE_URL}
+              buildHeaders={buildHeaders}
+              parseResponse={parseResponse}
+              onReceive={handleGlobalScanReceive}
+            />
+            <button onClick={() => loadPendingArrivals()} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+              <RefreshCw size={15} />
+              Refresh
+            </button>
+          </div>
         </div>
 
         {message ? <p className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">{message}</p> : null}
@@ -451,7 +476,7 @@ const Receiving = () => {
                 </button>
               </div>
               <div className="max-h-[70vh] overflow-y-auto p-6">
-                <ScanReceiveButton className="mb-4" lineItems={getLineItems(selectedShipment)} onReceive={handleScanReceive} />
+                <ScanWorkflowButton className="mb-4" lineItems={getLineItems(selectedShipment)} onReceive={handleScanReceive} />
                 <div className="space-y-4">
                   {getLineItems(selectedShipment).map((item, itemIndex) => {
                     const key = getLineItemId(item);

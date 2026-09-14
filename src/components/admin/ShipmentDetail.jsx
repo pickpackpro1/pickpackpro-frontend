@@ -6,7 +6,7 @@ import FullPageLoader from '../common/FullPageLoader';
 import DiscrepancyResolutionModal from '../common/DiscrepancyResolutionModal';
 import ConfirmationModal from '../common/ConfirmationModal';
 import { BoxWeightBadges } from '../common/BoxWeightDialog';
-import ScanToPrintButton from '../common/ScanToPrintButton';
+import ScanWorkflowButton from '../common/ScanWorkflowButton';
 import SplitLabelPdfButton from '../common/SplitLabelPdfButton';
 import { getBoxWeightErrorCode } from '../../utils/boxWeight';
 import { useBoxWeightPrompt } from '../../utils/useBoxWeightPrompt';
@@ -4975,6 +4975,19 @@ const ShipmentDetail = () => {
       });
   };
 
+  // Scan step 1 of the combined scan flow: save the counted quantity (flags a discrepancy if it differs).
+  const handleScanReceive = async (item, receivedQty) => {
+    const shipmentId = getShipmentRecordId(shipment) || id;
+    const response = await fetch(`${API_BASE_URL}/api/shipments/${shipmentId}/receive`, {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify({ items: [{ shipmentItemId: getLineItemId(item), receivedQty }] }),
+    });
+    await parseResponse(response);
+    showToast('success', `Received ${receivedQty} × ${getItemSku(item) || 'item'}.`);
+    await loadShipmentData({ showLoader: false });
+  };
+
   const loadShipmentData = async ({ showLoader = true } = {}) => {
     try {
       if (showLoader) {
@@ -6529,7 +6542,7 @@ const ShipmentDetail = () => {
               >
                 {primaryStatusAction.label}
               </button>
-              <ScanToPrintButton lineItems={lineItems} />
+              <ScanWorkflowButton lineItems={lineItems} onReceive={handleScanReceive} label="Scan" />
               <SplitLabelPdfButton
                 shipmentId={getShipmentRecordId(shipment) || id}
                 lineItems={lineItems}
