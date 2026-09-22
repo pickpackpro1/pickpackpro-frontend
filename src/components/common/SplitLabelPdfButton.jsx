@@ -87,7 +87,7 @@ const SplitLabelPdfButton = ({ shipmentId, lineItems = [], apiBaseUrl = '', buil
             <div className="border-b border-gray-100 px-6 py-5">
               <h2 className="text-lg font-semibold text-[#132347]">Split a multi-product label PDF</h2>
               <p className="mt-1 text-sm text-gray-600">
-                Finds each product's FNSKU in the client's PDF and saves just those pages as that line's label.
+                Finds each product's FNSKU in the client's PDF and saves just its own labels against that product.
               </p>
             </div>
 
@@ -130,7 +130,7 @@ const SplitLabelPdfButton = ({ shipmentId, lineItems = [], apiBaseUrl = '', buil
               ) : (
                 <>
                   <p className="rounded-lg bg-green-50 px-3 py-2 text-sm font-medium text-green-700">
-                    Read {result.totalPages} pages · {result.fnskusInPdf} FNSKUs · made {result.split?.length || 0} label{' '}
+                    Read {result.totalPages} labels · {result.fnskusInPdf} products · made {result.split?.length || 0} label{' '}
                     {result.split?.length === 1 ? 'file' : 'files'}.
                   </p>
                   {result.split?.length ? (

@@ -207,7 +207,7 @@ export const PrintDialog = ({ item, matchedBy, onScanNext, onClose, apiBaseUrl =
       } else if (outcome === 'opened') {
         setResult(`Label opened in a new tab — print ${copies} ${copies === 1 ? 'copy' : 'copies'} from there.`);
       } else {
-        setResult(`Print window opened — set Copies to ${copies} (skip if the PDF already has one page per unit).`);
+        setResult(`Print window opened — ${copies} ${copies === 1 ? 'label' : 'labels'} ready to print.`);
       }
     } catch (printError) {
       setError(printError?.message || 'Could not open the label.');
