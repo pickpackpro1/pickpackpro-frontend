@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   getScanLineItemBarcode,
   getScanLineItemFnsku,
+  getScanLineItemId,
   getScanLineItemLabelUrl,
   getScanLineItemName,
   getScanLineItemSku,
@@ -139,7 +140,7 @@ export const ReceiveDialog = ({ item, matchedBy, onConfirm, onCancel }) => {
 };
 
 // One FNSKU label per sellable unit: bundles use dispatch qty, otherwise what was received, else what was expected.
-export const getLabelCount = (item = {}) => {
+const getLabelCount = (item = {}) => {
   const candidates = [item?.dispatchQty, item?.dispatch_qty, item?.receivedQty, item?.qty_received, item?.expectedQty, item?.qty_expected];
   for (const value of candidates) {
     const number = Number(value);
@@ -149,12 +150,45 @@ export const getLabelCount = (item = {}) => {
 };
 
 // Shared by scan-to-print and the global cross-client scanner.
-export const PrintDialog = ({ item, matchedBy, onScanNext, onClose }) => {
-  const labelUrl = getScanLineItemLabelUrl(item);
+export const PrintDialog = ({ item, matchedBy, onScanNext, onClose, apiBaseUrl = '', buildHeaders, parseResponse }) => {
+  const canIsolate = Boolean(getScanLineItemLabelUrl(item) && getScanLineItemId(item) && buildHeaders && parseResponse);
+  const [labelUrl, setLabelUrl] = useState(getScanLineItemLabelUrl(item));
   const [count, setCount] = useState(String(getLabelCount(item) || 1));
+  const [preparing, setPreparing] = useState(canIsolate);
   const [printing, setPrinting] = useState(false);
   const [result, setResult] = useState('');
   const [error, setError] = useState('');
+
+  // The client often uploads one PDF holding every product's labels. Before printing, ask the
+  // backend to pull out just this product's pages so staff never print the whole file by mistake.
+  useEffect(() => {
+    if (!canIsolate) return undefined;
+    const lineItemId = getScanLineItemId(item);
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/shipment-line-items/${encodeURIComponent(lineItemId)}/label/isolate`, {
+          method: 'POST',
+          headers: buildHeaders(true),
+        });
+        const payload = await parseResponse(response);
+        const data = payload?.data ?? payload;
+        if (cancelled || !data) return;
+        if (data.url) setLabelUrl(data.url);
+        if (data.pages) setCount(String(data.pages));
+        if (data.warning) setError(data.warning);
+      } catch {
+        // Best effort — if it fails we still let them print whatever is attached.
+      } finally {
+        if (!cancelled) setPreparing(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Runs once per scanned product; the dialog is remounted (keyed) for each new scan.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const copies = Number(count);
   const validCount = Number.isInteger(copies) && copies > 0;
@@ -216,7 +250,7 @@ export const PrintDialog = ({ item, matchedBy, onScanNext, onClose }) => {
               className="w-full rounded-lg border border-gray-200 px-3 py-3 text-2xl font-semibold focus:outline-none focus:ring-2 focus:ring-[#ff6900]"
             />
             <span className="mt-1 block text-[11px] text-gray-500">
-              Filled from this shipment's quantity. Change it if you need more or fewer.
+              {preparing ? 'Pulling this product’s labels out of the file…' : "Only this product's labels print. Change the number if you need more or fewer."}
             </span>
           </label>
 
@@ -243,10 +277,10 @@ export const PrintDialog = ({ item, matchedBy, onScanNext, onClose }) => {
           <button
             type="button"
             onClick={handlePrint}
-            disabled={!labelUrl || printing}
+            disabled={!labelUrl || printing || preparing}
             className="rounded-lg bg-[#ff6900] px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {printing ? 'Opening…' : 'OK — print'}
+            {preparing ? 'Preparing…' : printing ? 'Opening…' : 'OK — print'}
           </button>
         </div>
       </div>

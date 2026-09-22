@@ -501,7 +501,13 @@ const ReceivingStaff = () => {
                     <p className="mt-1 text-xs text-gray-500">{getClientName(selectedShipment)}</p>
                   </div>
 
-                  <ScanWorkflowButton lineItems={selectedItems} onReceive={handleScanReceive} />
+                  <ScanWorkflowButton
+                    lineItems={selectedItems}
+                    onReceive={handleScanReceive}
+                    apiBaseUrl={API_BASE_URL}
+                    buildHeaders={buildHeaders}
+                    parseResponse={parseResponse}
+                  />
 
                   <div className="max-h-[52vh] space-y-3 overflow-y-auto pr-1">
                     {selectedItems.map((item) => {

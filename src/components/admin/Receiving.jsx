@@ -476,7 +476,14 @@ const Receiving = () => {
                 </button>
               </div>
               <div className="max-h-[70vh] overflow-y-auto p-6">
-                <ScanWorkflowButton className="mb-4" lineItems={getLineItems(selectedShipment)} onReceive={handleScanReceive} />
+                <ScanWorkflowButton
+                  className="mb-4"
+                  lineItems={getLineItems(selectedShipment)}
+                  onReceive={handleScanReceive}
+                  apiBaseUrl={API_BASE_URL}
+                  buildHeaders={buildHeaders}
+                  parseResponse={parseResponse}
+                />
                 <div className="space-y-4">
                   {getLineItems(selectedShipment).map((item, itemIndex) => {
                     const key = getLineItemId(item);

@@ -8,7 +8,15 @@ import { getReceivingLineRemainingQty, formatReceivingQuantity } from '../../uti
 // One scan does the whole job in sequence: check the count against the system (fixing any
 // discrepancy), then immediately offer to print that product's FNSKU labels.
 // onReceive(item, receivedQty) must save and throw on failure.
-const ScanWorkflowButton = ({ lineItems = [], onReceive, label = 'Scan', className = '' }) => {
+const ScanWorkflowButton = ({
+  lineItems = [],
+  onReceive,
+  label = 'Scan',
+  className = '',
+  apiBaseUrl = '',
+  buildHeaders,
+  parseResponse,
+}) => {
   const [scanning, setScanning] = useState(false);
   const [choice, setChoice] = useState(null);
   // active: { item, matchedBy, code, stage: 'receive' | 'print' }
@@ -80,6 +88,9 @@ const ScanWorkflowButton = ({ lineItems = [], onReceive, label = 'Scan', classNa
           key={`${getScanLineItemId(active.item)}-${active.code}-print`}
           item={active.item}
           matchedBy={active.matchedBy}
+          apiBaseUrl={apiBaseUrl}
+          buildHeaders={buildHeaders}
+          parseResponse={parseResponse}
           onClose={() => setActive(null)}
           onScanNext={() => {
             setActive(null);

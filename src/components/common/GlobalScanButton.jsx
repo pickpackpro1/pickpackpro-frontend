@@ -165,6 +165,9 @@ const GlobalScanButton = ({ apiBaseUrl = '', buildHeaders, parseResponse, onRece
           key={`${resolved.lineItemId}-${scannedCode}-print`}
           item={resolved}
           matchedBy={resolved.matchedBy}
+          apiBaseUrl={apiBaseUrl}
+          buildHeaders={buildHeaders}
+          parseResponse={parseResponse}
           onClose={reset}
           onScanNext={() => {
             reset();
