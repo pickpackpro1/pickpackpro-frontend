@@ -158,25 +158,45 @@ export const PrintDialog = ({ item, matchedBy, onScanNext, onClose, apiBaseUrl =
   const [printing, setPrinting] = useState(false);
   const [result, setResult] = useState('');
   const [error, setError] = useState('');
+  const [note, setNote] = useState('');
+  // How many labels the file we have ready actually holds.
+  const [preparedFor, setPreparedFor] = useState(null);
 
-  // The client often uploads one PDF holding every product's labels. Before printing, ask the
-  // backend to pull out just this product's pages so staff never print the whole file by mistake.
+  // The client often uploads one PDF holding every product's labels — and often fewer labels than
+  // units. Ask the backend to prepare just this product's labels, in the number being shipped.
+  const prepareLabels = async (quantity) => {
+    const lineItemId = getScanLineItemId(item);
+    const response = await fetch(`${apiBaseUrl}/api/shipment-line-items/${encodeURIComponent(lineItemId)}/label/isolate`, {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify(quantity ? { quantity } : {}),
+    });
+    const payload = await parseResponse(response);
+    return payload?.data ?? payload;
+  };
+
+  const applyPrepared = (data) => {
+    if (!data) return;
+    if (data.url) setLabelUrl(data.url);
+    if (data.pages) {
+      setCount(String(data.pages));
+      setPreparedFor(data.pages);
+    }
+    setError(data.warning || '');
+    setNote(
+      data.copiesAdded > 0
+        ? `The client sent ${data.suppliedLabels} label${data.suppliedLabels === 1 ? '' : 's'} — ${data.copiesAdded} more ${data.copiesAdded === 1 ? 'copy was' : 'copies were'} made to cover all ${data.pages} units.`
+        : '',
+    );
+  };
+
   useEffect(() => {
     if (!canIsolate) return undefined;
-    const lineItemId = getScanLineItemId(item);
     let cancelled = false;
     (async () => {
       try {
-        const response = await fetch(`${apiBaseUrl}/api/shipment-line-items/${encodeURIComponent(lineItemId)}/label/isolate`, {
-          method: 'POST',
-          headers: buildHeaders(true),
-        });
-        const payload = await parseResponse(response);
-        const data = payload?.data ?? payload;
-        if (cancelled || !data) return;
-        if (data.url) setLabelUrl(data.url);
-        if (data.pages) setCount(String(data.pages));
-        if (data.warning) setError(data.warning);
+        const data = await prepareLabels();
+        if (!cancelled) applyPrepared(data);
       } catch {
         // Best effort — if it fails we still let them print whatever is attached.
       } finally {
@@ -201,7 +221,21 @@ export const PrintDialog = ({ item, matchedBy, onScanNext, onClose, apiBaseUrl =
     try {
       setPrinting(true);
       setError('');
-      const outcome = await printLabelUrl(labelUrl);
+      let printUrl = labelUrl;
+      // They changed the number — rebuild the file so exactly that many labels print.
+      if (canIsolate && preparedFor !== null && copies !== preparedFor) {
+        setPreparing(true);
+        try {
+          const data = await prepareLabels(copies);
+          applyPrepared(data);
+          if (data?.url) printUrl = data.url;
+        } catch {
+          // Keep the file we already have if rebuilding fails.
+        } finally {
+          setPreparing(false);
+        }
+      }
+      const outcome = await printLabelUrl(printUrl);
       if (outcome === 'blocked') {
         setError('Your browser blocked the label window. Allow pop-ups for this site and try again.');
       } else if (outcome === 'opened') {
@@ -259,8 +293,9 @@ export const PrintDialog = ({ item, matchedBy, onScanNext, onClose, apiBaseUrl =
               No FNSKU label file is uploaded for this SKU yet. Upload it on the shipment, then scan again.
             </p>
           ) : null}
+          {note ? <p className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-800">{note}</p> : null}
           {result ? <p className="rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">{result}</p> : null}
-          {error ? <p className="text-sm font-medium text-red-600">{error}</p> : null}
+          {error ? <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">{error}</p> : null}
         </div>
 
         <div className="grid grid-cols-1 gap-2 border-t border-gray-100 px-6 py-4 sm:grid-cols-3">
