@@ -383,8 +383,108 @@ const EditBoxModal = ({ box, apiBaseUrl, buildHeaders, parseResponse, onClose, o
   );
 };
 
-export const BoxAdminTools = ({ box, apiBaseUrl = '', buildHeaders, parseResponse, onChanged }) => {
+// What is IN the box: which SKUs and how many units of each. Replaces the whole list.
+const EditContentsModal = ({ box, lineChoices, apiBaseUrl, buildHeaders, parseResponse, onClose, onSaved }) => {
+  const choiceById = new Map(lineChoices.map((choice) => [choice.id, choice]));
+  const [rows, setRows] = useState(() =>
+    box.contentRows.length
+      ? box.contentRows.map((row) => ({ shipmentItemId: row.shipmentItemId, quantity: textValue(row.quantity) }))
+      : [{ shipmentItemId: lineChoices[0]?.id || '', quantity: '' }],
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const update = (index, patch) => {
+    setError('');
+    setRows((current) => current.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+  };
+
+  const save = async () => {
+    const items = [];
+    for (const [index, row] of rows.entries()) {
+      const quantity = Number(row.quantity);
+      if (!row.shipmentItemId) {
+        setError(`Row ${index + 1}: pick a SKU.`);
+        return;
+      }
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        setError(`Row ${index + 1}: units must be a whole number above 0.`);
+        return;
+      }
+      items.push({ shipmentItemId: row.shipmentItemId, quantity });
+    }
+    if (new Set(items.map((item) => item.shipmentItemId)).size !== items.length) {
+      setError('Each SKU can only appear once \u2014 combine the units into one row.');
+      return;
+    }
+    try {
+      setSaving(true);
+      const response = await fetch(`${apiBaseUrl}/api/boxes/${encodeURIComponent(box.id)}/contents`, {
+        method: 'PUT',
+        headers: buildHeaders(true),
+        body: JSON.stringify({ items }),
+      });
+      await parseResponse(response);
+      showToast('success', 'Box contents corrected.');
+      onSaved(items.map((item) => ({ ...item, sku: choiceById.get(item.shipmentItemId)?.sku || '' })));
+    } catch (requestError) {
+      setError(requestError?.message || 'Could not save the change.');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <ModalShell
+      title={`What's in ${box.label || 'this box'}`}
+      subtitle="Fix a wrong SKU or unit count. Only received units can be packed, and never more than are left unpacked."
+      saving={saving}
+      saveLabel="Save contents"
+      error={error}
+      onSave={save}
+      onClose={onClose}
+    >
+      <div className="space-y-2">
+        {rows.map((row, index) => (
+          <div key={index} className="flex items-end gap-2">
+            <div className="min-w-0 flex-1">
+              <Field label={index === 0 ? 'SKU' : ''}>
+                <select className={inputClass} value={row.shipmentItemId} onChange={(event) => update(index, { shipmentItemId: event.target.value })}>
+                  <option value="">Select SKU</option>
+                  {lineChoices.map((choice) => (
+                    <option key={choice.id} value={choice.id}>
+                      {choice.sku} {choice.received !== '' ? `(received ${choice.received})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <div className="w-24">
+              <Field label={index === 0 ? 'Units' : ''}>
+                <input className={inputClass} type="number" inputMode="numeric" min="1" step="1" value={row.quantity} onChange={(event) => update(index, { quantity: event.target.value })} />
+              </Field>
+            </div>
+            <button
+              type="button"
+              aria-label="Remove row"
+              disabled={rows.length === 1}
+              onClick={() => setRows((current) => current.filter((_row, rowIndex) => rowIndex !== index))}
+              className="mb-1 rounded-md border border-gray-200 px-2.5 py-2 text-sm text-gray-500 hover:bg-gray-50 disabled:opacity-40"
+            >
+              &times;
+            </button>
+          </div>
+        ))}
+      </div>
+      <button type="button" onClick={() => setRows((current) => [...current, { shipmentItemId: '', quantity: '' }])} className={smallButton}>
+        + Add another SKU
+      </button>
+    </ModalShell>
+  );
+};
+
+export const BoxAdminTools = ({ box, lineChoices = [], apiBaseUrl = '', buildHeaders, parseResponse, onChanged, onContentsSaved }) => {
   const [editing, setEditing] = useState(false);
+  const [editingContents, setEditingContents] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -412,10 +512,30 @@ export const BoxAdminTools = ({ box, apiBaseUrl = '', buildHeaders, parseRespons
         <button type="button" className={smallButton} disabled={busy} onClick={() => setEditing(true)}>
           Correct size / weight
         </button>
+        {!box.isPallet ? (
+          <button type="button" className={smallButton} disabled={busy} onClick={() => setEditingContents(true)}>
+            Edit contents
+          </button>
+        ) : null}
         <button type="button" className={dangerButton} disabled={busy} onClick={() => setConfirmDelete(true)}>
           Delete {box.isPallet ? 'pallet' : 'box'}
         </button>
       </div>
+      {editingContents ? (
+        <EditContentsModal
+          box={box}
+          lineChoices={lineChoices}
+          apiBaseUrl={apiBaseUrl}
+          buildHeaders={buildHeaders}
+          parseResponse={parseResponse}
+          onClose={() => setEditingContents(false)}
+          onSaved={(items) => {
+            setEditingContents(false);
+            onContentsSaved?.(items);
+            onChanged();
+          }}
+        />
+      ) : null}
       {editing ? (
         <EditBoxModal
           box={box}

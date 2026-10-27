@@ -1334,6 +1334,17 @@ const saveCachedBoxAllocationItems = (box = {}, items = [], extraKeys = []) => {
   writeBoxAllocationCache(cache);
 };
 
+const getBoxContentRowsForEdit = (box = {}, lineItemList = []) =>
+  toArray(box?.contents ?? box?.items ?? box?.boxItems ?? box?.box_items)
+    .map((row) => {
+      const sku = String(getBoxItemSku(row) || '').trim().toLowerCase();
+      const byId = String(getBoxItemLineItemId(row) || '').trim();
+      const line = lineItemList.find((item) => getLineItemId(item) === byId) ||
+        lineItemList.find((item) => sku && String(getItemSku(item) || '').trim().toLowerCase() === sku);
+      return { shipmentItemId: line ? getLineItemId(line) : byId, quantity: getBoxItemQuantity(row) };
+    })
+    .filter((row) => row.shipmentItemId && Number(row.quantity) > 0);
+
 const getBoxSkuCollectionValue = (...values) => {
   const skus = values.flatMap((value) => {
     if (!value && value !== 0) return [];
@@ -4703,10 +4714,13 @@ const ShipmentDetail = () => {
                 widthCm: getBoxDimensionValue(box, 'width', 'w'),
                 heightCm: getBoxDimensionValue(box, 'height', 'h'),
                 weightKg: getBoxWeight(box),
+              contentRows: getBoxContentRowsForEdit(box, lineItems),
               }}
               apiBaseUrl={API_BASE_URL}
               buildHeaders={buildHeaders}
               parseResponse={parseResponse}
+              lineChoices={lineItems.map((lineItem) => ({ id: getLineItemId(lineItem), sku: getItemSku(lineItem), received: firstPresent(getItemReceivedQty(lineItem), '') }))}
+              onContentsSaved={(savedItems) => saveCachedBoxAllocationItems(box, savedItems, [boxRecordId])}
               onChanged={() => loadShipmentData({ showLoader: false })}
             />
           ) : null}
@@ -7323,10 +7337,13 @@ const ShipmentDetail = () => {
                                                 widthCm: getBoxDimensionValue(box, 'width', 'w'),
                                                 heightCm: getBoxDimensionValue(box, 'height', 'h'),
                                                 weightKg: getBoxWeight(box),
+                                              contentRows: getBoxContentRowsForEdit(box, lineItems),
                                               }}
                                               apiBaseUrl={API_BASE_URL}
                                               buildHeaders={buildHeaders}
                                               parseResponse={parseResponse}
+                                              lineChoices={lineItems.map((lineItem) => ({ id: getLineItemId(lineItem), sku: getItemSku(lineItem), received: firstPresent(getItemReceivedQty(lineItem), '') }))}
+                                              onContentsSaved={(savedItems) => saveCachedBoxAllocationItems(box, savedItems, [boxRecordId])}
                                               onChanged={() => loadShipmentData({ showLoader: false })}
                                             />
                                           ) : null}
