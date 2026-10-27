@@ -7,6 +7,7 @@ import DiscrepancyResolutionModal from '../common/DiscrepancyResolutionModal';
 import ConfirmationModal from '../common/ConfirmationModal';
 import { BoxWeightBadges } from '../common/BoxWeightDialog';
 import GlobalScanButton from '../common/GlobalScanButton';
+import { BoxAdminTools, LineItemAdminTools } from './AdminCorrections';
 import SplitLabelPdfButton from '../common/SplitLabelPdfButton';
 import { getBoxWeightErrorCode } from '../../utils/boxWeight';
 import { useBoxWeightPrompt } from '../../utils/useBoxWeightPrompt';
@@ -4691,6 +4692,25 @@ const ShipmentDetail = () => {
             </button>
           </div>
 
+          {boxRecordId ? (
+            <BoxAdminTools
+              box={{
+                id: boxRecordId,
+                label: getBoxTitle(box, boxIndex),
+                isPallet,
+                sealed: Boolean(box?.dispatched_at || box?.dispatchedAt),
+                lengthCm: getBoxDimensionValue(box, 'length', 'l'),
+                widthCm: getBoxDimensionValue(box, 'width', 'w'),
+                heightCm: getBoxDimensionValue(box, 'height', 'h'),
+                weightKg: getBoxWeight(box),
+              }}
+              apiBaseUrl={API_BASE_URL}
+              buildHeaders={buildHeaders}
+              parseResponse={parseResponse}
+              onChanged={() => loadShipmentData({ showLoader: false })}
+            />
+          ) : null}
+
           {imageUrl ? (
             <button type="button" onClick={() => window.open(imageUrl, '_blank', 'noopener,noreferrer')} className="mt-4 block w-full overflow-hidden rounded-[4px] border border-[#dbe4f1] bg-[#f7f9fc]">
               <img src={imageUrl} alt={getBoxTitle(box, boxIndex)} className="h-32 w-full object-contain" />
@@ -6970,10 +6990,28 @@ const ShipmentDetail = () => {
                               FNSKU: {itemFnsku || '-'} - Expected: {expectedQty} - Received: {receivedQty}
                             </p>
                           </div>
-                          <button type="button" onClick={() => handleLabelPdf(item, index)} className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-[#d6dfef] bg-white px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-[#5f6d85] shadow-sm hover:bg-[#f8fbff]">
+                          <div className="flex shrink-0 flex-col items-end gap-2">
+                            <button type="button" onClick={() => handleLabelPdf(item, index)} className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-[#d6dfef] bg-white px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-[#5f6d85] shadow-sm hover:bg-[#f8fbff]">
                             <ArrowDown size={12} />
                             Label PDF
                           </button>
+                            <LineItemAdminTools
+                              item={{
+                                id: itemId,
+                                sku: itemSku,
+                                fnsku: itemFnsku,
+                                barcode: firstPresent(item?.barcode, item?.products?.barcode, item?.product?.barcode, ''),
+                                qtyExpected: expectedQty,
+                                labelFileId: getItemLabelFileId(item),
+                              }}
+                              shipmentId={getShipmentRecordId(shipment) || id}
+                              clientId={firstPresent(shipment?.clientId, shipment?.client_id, shipment?.client?.id, shipment?.clients?.id, '')}
+                              apiBaseUrl={API_BASE_URL}
+                              buildHeaders={buildHeaders}
+                              parseResponse={parseResponse}
+                              onChanged={() => loadShipmentData({ showLoader: false })}
+                            />
+                          </div>
                         </div>
                         <div className="space-y-3 px-4 py-4">
                           {itemServices.length ? itemServices.map((serviceName, serviceIndex) => {
@@ -7274,7 +7312,26 @@ const ShipmentDetail = () => {
                             </div>
                           ) : null}
 
-                          {imageUrl ? (
+                          {boxRecordId ? (
+                                            <BoxAdminTools
+                                              box={{
+                                                id: boxRecordId,
+                                                label: getBoxTitle(box, index),
+                                                isPallet,
+                                                sealed: Boolean(box?.dispatched_at || box?.dispatchedAt),
+                                                lengthCm: getBoxDimensionValue(box, 'length', 'l'),
+                                                widthCm: getBoxDimensionValue(box, 'width', 'w'),
+                                                heightCm: getBoxDimensionValue(box, 'height', 'h'),
+                                                weightKg: getBoxWeight(box),
+                                              }}
+                                              apiBaseUrl={API_BASE_URL}
+                                              buildHeaders={buildHeaders}
+                                              parseResponse={parseResponse}
+                                              onChanged={() => loadShipmentData({ showLoader: false })}
+                                            />
+                                          ) : null}
+
+                                          {imageUrl ? (
                             <button type="button" onClick={() => window.open(imageUrl, '_blank', 'noopener,noreferrer')} className="mt-4 block w-full overflow-hidden rounded-[4px] border border-[#dbe4f1] bg-[#f7f9fc]">
                               <img src={imageUrl} alt={getBoxTitle(box, index)} className="h-32 w-full object-contain" />
                             </button>
